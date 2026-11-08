@@ -1,0 +1,37 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*credentials*
+*token*
+# Python / tooling
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+# Runtime/private data (never commit media or descriptors)
+.kura/
+data/
+downloads/
+*.db
+*.db-*
+*.sqlite*
+*.torrent
+*.magnet
+*.aria2
+*.mkv
+*.mp4
+*.webm
+*.mp3
+*.zip
+# Local agent/editor metadata
+.pi/
+.vscode/
+.DS_Store
