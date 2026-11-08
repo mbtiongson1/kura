@@ -42,6 +42,8 @@ class Store:
             CREATE TABLE IF NOT EXISTS jobs (
                 infohash TEXT PRIMARY KEY, media_key TEXT UNIQUE NOT NULL,
                 value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS descriptors (
+                infohash TEXT PRIMARY KEY, value BLOB NOT NULL);
             CREATE TABLE IF NOT EXISTS events (
                 id INTEGER PRIMARY KEY, at REAL NOT NULL, infohash TEXT NOT NULL,
                 state TEXT NOT NULL, detail TEXT NOT NULL);
@@ -79,9 +81,16 @@ class Store:
     def jobs(self) -> list[dict]:
         return [json.loads(r[0]) for r in self.db.execute("SELECT value FROM jobs ORDER BY rowid")]
 
-    def record(self, job: dict):
+    def descriptor(self, infohash: str) -> bytes | None:
+        row = self.db.execute("SELECT value FROM descriptors WHERE infohash=?", (infohash,)).fetchone()
+        return row[0] if row else None
+
+    def record(self, job: dict, descriptor: bytes | None = None):
         job["updated_at"] = time.time()
         with self.db:
+            if descriptor is not None:
+                self.db.execute("INSERT OR REPLACE INTO descriptors VALUES (?,?)",
+                                (job["infohash"], descriptor))
             self.db.execute("INSERT INTO jobs VALUES (?,?,?) ON CONFLICT(infohash) DO UPDATE SET value=excluded.value",
                             (job["infohash"], job["media_key"], json.dumps(job)))
             self.db.execute("INSERT INTO events(at,infohash,state,detail) VALUES (?,?,?,?)",

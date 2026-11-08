@@ -33,8 +33,15 @@ def parse_title(title: str):
     ep = int(match.group(1 if kind == 0 else 2))
     if kind == 1:
         series += " S" + str(int(match.group(1))).zfill(2)
-    # Remaining tail must be metadata tags or extension, not a second title/episode.
+    # Metadata must not conceal a batch/range or another episode marker.
     tail = clean[match.end():]
+    for tag in re.findall(r"\[([^\]]*)\]|\(([^)]*)\)", clean):
+        text = " ".join(tag).strip()
+        if (re.search(r"\b\d{1,4}\s*[-~+]\s*\d{1,4}\b", text) or
+                re.search(r"\b(?:S\d{1,2}E|E|EP\.?\s*|Episode\s+)\d{1,4}\b", text, re.I) or
+                re.fullmatch(r"\d{1,3}", text)):
+            return None
+    # Remaining tail must be metadata tags or extension, not a second title/episode.
     tail = re.sub(r"\[[^\]]*\]|\([^)]*\)", "", tail)
     tail = re.sub(r"\.(mkv|mp4|webm|txt)$", "", tail.strip(), flags=re.I).strip()
     if tail or not series or not 1 <= ep <= 1899:

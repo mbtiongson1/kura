@@ -89,9 +89,16 @@ def parse_rss(data: bytes) -> list[Release]:
 class Nyaa:
     def search(self, title: str, episode: int, subtitles: str) -> list[Release]:
         category = {"english": "1_2", "raw": "1_4", "any": "1_0"}[subtitles]
-        query = urllib.parse.urlencode({"page": "rss", "q": f"{title} {episode:02d}",
-                                       "c": category, "f": "0"})
-        return parse_rss(fetch("https://nyaa.si/?" + query, 2 * 1024**2))
+        queries = [f"{title} {episode:02d}"]
+        season = re.fullmatch(r"(.+) S(\d{2})", title, re.I)
+        if season:
+            queries.append(f"{season[1]} S{season[2]}E{episode:02d}")
+        rows = {}
+        for text in queries:
+            query = urllib.parse.urlencode({"page": "rss", "q": text, "c": category, "f": "0"})
+            for release in parse_rss(fetch("https://nyaa.si/?" + query, 2 * 1024**2)):
+                rows[release.infohash] = release
+        return list(rows.values())
 
     def descriptor(self, release: Release) -> bytes:
         return fetch(release.url, 4 * 1024**2, True)

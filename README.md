@@ -85,7 +85,9 @@ endpoint** is enabled. Keep aria2 patched. There is no persistent seeding servic
 `--seed-time=0` exits at completion, though BitTorrent may upload pieces while downloading.
 
 ## Storage, interruption and status
-Default state: `~/.local/share/kura/state.sqlite3` (preferences, receipts, audit events).
+Default state: `~/.local/share/kura/state.sqlite3` (preferences, receipts, audit events
+and validated sanitized descriptors for explicit offline resume). This is private data,
+not an export to Git or a public torrent archive.
 Default payloads: `~/.local/share/kura/downloads/<infohash>/<validated-name>`.
 No legacy settings, credentials, torrents or media are imported automatically.
 Destination capabilities are `private[/subfolder]` and `shared[/subfolder]` only, not
@@ -99,8 +101,9 @@ kura prefs set --destination shared
 
 Android version/storage-provider permissions vary; app-private storage is the tested
 baseline. No broad storage grants are required for it. Budget: default 1500 MiB, hard
-maximum 10000 MiB per torrent, plus 64 MiB free reserve. Actual descriptor length, not
-RSS rounding, is authoritative. One Kura mutation runs at a time. Other applications
+maximum 10000 MiB per torrent, plus 64 MiB free reserve. On explicit resume, only
+already allocated blocks within the validated partial payload earn disk-space credit;
+sparse logical lengths do not. Actual descriptor length, not RSS rounding, is authoritative. One Kura mutation runs at a time. Other applications
 can still consume disk; disk-full never becomes a successful receipt.
 
 Foreground operation only. Optionally `termux-wake-lock` during long transfers and
@@ -108,7 +111,12 @@ review Android battery optimization; neither guarantees survival. Timeout is 30 
 with a 120-second no-progress bound. Ctrl-C/SIGTERM stops the child; SIGKILL/process death
 is reported as interrupted on the next invocation. A Linux/Android parent-death signal
 also terminates the aria2 child when the supervisor dies. Partial data is preserved. Retry with
-`--resume --yes` and the same release/destination. Never delete files merely to retry.
+`--resume --yes` and the same release/destination. Resume uses the recorded sanitized
+descriptor and release identity, not a fresh provider search: disappearing releases,
+changing seed counts or newly ambiguous search results cannot select a different torrent.
+Current quality/group/category/byte limits still apply; the recorded seeder count is a
+snapshot, not a fresh availability claim. Changed defaults may require explicit overrides
+to match the original destination. Never delete files merely to retry.
 A completed receipt blocks duplicate acquisition of the same title/episode or infohash.
 No automatic cleanup, move, purge or reacquisition policy exists. Completion requires
 aria2 exit 0, exact file size, no partial-control file, every torrent piece hash, and a
@@ -120,7 +128,9 @@ python -m unittest discover -s tests -v
 python tests/termux_e2e.py
 ```
 The opt-in second command uses **original CC0 test bytes**, a loopback-only HTTP tracker
-and a temporary local aria2 seeder. It exercises the real CLI search/dry-run/approval/
+and a temporary local aria2 seeder. It also interrupts a real partial transfer and resumes
+without Nyaa access under a mocked remaining-space limit smaller than the full torrent.
+It exercises the real CLI search/dry-run/approval/
 aria2/verification/status/duplicate path. Only Nyaa HTTP fetch and tracker/peer-port are
 substituted in the harness; no production CLI test bypass exists. It neither downloads
 public copyrighted media nor proves public swarm availability. Generated descriptors,

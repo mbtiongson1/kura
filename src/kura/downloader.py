@@ -37,8 +37,18 @@ def run(torrent: Torrent, directory: Path, state_root: Path, timeout: int = 1800
     if not binary:
         raise KuraError("downloader_missing", "Install aria2: pkg install aria2")
     ensure_dir(directory)
-    if shutil.disk_usage(directory).free < torrent.length + RESERVE:
-        raise KuraError("insufficient_space", "Need complete torrent size plus 64 MiB free reserve")
+    payload = directory / torrent.name
+    allocated = 0
+    if payload.exists() or payload.is_symlink():
+        regular_file(payload)
+        stat = payload.stat()
+        # st_size alone overcredits sparse files. Only already allocated blocks
+        # within this exact validated payload may be reused during explicit resume.
+        allocated = min(torrent.length, stat.st_size, stat.st_blocks * 512)
+    required = torrent.length - allocated + RESERVE
+    if shutil.disk_usage(directory).free < required:
+        raise KuraError("insufficient_space", "Need remaining unallocated bytes plus 64 MiB reserve",
+                        required_free_bytes=required, allocated_bytes=allocated)
     # Unique private descriptor outside the media directory; never stored in Git.
     descriptor = state_root / (torrent.infohash + ".torrent")
     if descriptor.exists() or descriptor.is_symlink():

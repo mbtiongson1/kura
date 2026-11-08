@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.parse
 from unittest.mock import Mock, patch
 
 from kura.core import Core
@@ -78,6 +79,15 @@ class Case(unittest.TestCase):
                       "Show - 03 - 04 (1080p)", "Show - 03 Another Show (1080p)",
                       "Show - 1900 (1080p)", "Show 03 (1080p)", "Show - 03\n (1080p)"):
             self.assertIsNone(parse_title(title), title)
+
+    def test_metadata_cannot_hide_batches_or_episode_markers(self):
+        for tag in ("01 - 12", "03 ~ 04", "E04", "EP. 04", "S01E04", "04"):
+            self.assertIsNone(parse_title(f"Show - 03 [{tag}] (1080p).mkv"), tag)
+            self.assertIsNone(parse_title(f"Show [{tag}] - 03 (1080p).mkv"), tag)
+            name = f"[Kura] Kura Sample - 03 [{tag}] (1080p).txt"
+            row, data = sample(name)
+            self.core.provider = FakeProvider([replace(self.row, infohash=row.infohash)], data)
+            self.error("descriptor_identity", self.core.download, "Kura Sample", 3, {}, dry_run=True)
 
     def test_ambiguity_not_resolved_by_seeders(self):
         other = replace(self.row, id="2", infohash="a"*40, seeders=100)
@@ -149,6 +159,13 @@ class Case(unittest.TestCase):
         self.core.provider = FakeProvider([replace(self.row, infohash=row.infohash)], data)
         self.error("descriptor_identity", self.core.download, "Kura Sample", 3, {}, dry_run=True)
 
+    def test_descriptor_group_and_resolution_always_match_selection(self):
+        for name in ("[Other] Kura Sample - 03 (1080p).txt", "[Kura] Kura Sample - 03 (720p).txt"):
+            row, data = sample(name)
+            self.core.provider = FakeProvider([replace(self.row, infohash=row.infohash)], data)
+            self.error("descriptor_identity", self.core.download, "Kura Sample", 3,
+                       {"resolution": "any"}, dry_run=True)
+
     def test_size_bound_authoritative(self):
         self.error("unsafe_torrent", inspect, self.data, self.row.infohash, 1)
 
@@ -215,6 +232,30 @@ class Case(unittest.TestCase):
                 self.core.download("Kura Sample", 3, {}, yes=True, resume=True)
         self.assertEqual(self.store.jobs()[0]["state"], "interrupted")
 
+    def test_resume_uses_recorded_descriptor_without_provider_or_seeder_gate(self):
+        with patch("kura.downloader.run", side_effect=KuraError("download_failed", "fixture")):
+            self.error("download_failed", self.core.download, "Kura Sample", 3, {}, yes=True)
+        self.assertIsNotNone(self.store.descriptor(self.row.infohash))
+        provider = Mock()
+        provider.search.side_effect = AssertionError("Resume must not rediscover")
+        provider.descriptor.side_effect = AssertionError("Resume must use validated local metadata")
+        self.core.provider = provider
+        self.store.save_prefs(Preferences(min_seeders=999))
+        self.error("resume_preferences", self.core.download, "Kura Sample", 3,
+                   {"resolution": "720p"}, resume=True, yes=True)
+        self.error("resume_mismatch", self.core.download, "Kura Sample", 3,
+                   {"destination": "private/elsewhere"}, resume=True, yes=True)
+        self.error("resume_mismatch", self.core.download, "Kura Sample", 3,
+                   {}, resume=True, yes=True, release_id="2")
+        with patch("kura.downloader.run", return_value={"verified": True}):
+            result = self.core.download("Kura Sample", 3, {}, resume=True, yes=True)
+        self.assertEqual(result["state"], "complete")
+        provider.search.assert_not_called()
+        provider.descriptor.assert_not_called()
+
+    def test_resume_without_record_refused(self):
+        self.error("no_resume", self.core.download, "Kura Sample", 3, {}, resume=True, yes=True)
+
     def test_sigkill_recovery(self):
         with patch("kura.downloader.run", return_value={}):
             job = self.core.download("Kura Sample", 3, {}, yes=True)
@@ -244,6 +285,26 @@ class Case(unittest.TestCase):
         with patch("kura.downloader.shutil.which", return_value="/bin/aria2c"), \
              patch("kura.downloader.shutil.disk_usage", return_value=Mock(free=RESERVE)):
             self.error("insufficient_space", run, self.torrent, self.root / "out", self.store.root)
+
+    def test_resume_counts_allocated_not_logical_size(self):
+        out = self.root / "out"
+        out.mkdir()
+        payload = out / NAME
+        payload.write_bytes(PAYLOAD)
+        proc = Mock()
+        proc.wait.return_value = 0
+        proc.poll.return_value = 0
+        with patch("kura.downloader.shutil.which", return_value="/bin/aria2c"), \
+             patch("kura.downloader.shutil.disk_usage", return_value=Mock(free=RESERVE+1)), \
+             patch("kura.downloader.subprocess.Popen", return_value=proc):
+            self.assertEqual(run(self.torrent, out, self.store.root)["size_bytes"], len(PAYLOAD))
+        # A sparse logical length is not allocated disk space and cannot earn credit.
+        payload.unlink()
+        with payload.open("wb") as f:
+            f.truncate(len(PAYLOAD))
+        with patch("kura.downloader.shutil.which", return_value="/bin/aria2c"), \
+             patch("kura.downloader.shutil.disk_usage", return_value=Mock(free=RESERVE+1)):
+            self.error("insufficient_space", run, self.torrent, out, self.store.root)
 
     def test_subprocess_safe_and_nonzero(self):
         proc = Mock()
@@ -322,6 +383,26 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(rows[0].size_bytes, 42*1024)
         self.assertEqual(parse_rss(data.replace(b"https://nyaa.si/download", b"https://evil.test/download")), [])
 
+    def test_season_episode_query_uses_contiguous_form_and_dedupes(self):
+        queries = []
+        rss = b'''<rss xmlns:nyaa="https://nyaa.si/xmlns/nyaa"><channel><item>
+        <title>[Kura] Show S02E03 (1080p).mkv</title>
+        <link>https://nyaa.si/download/1.torrent</link>
+        <nyaa:infoHash>aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</nyaa:infoHash>
+        <nyaa:size>1 MiB</nyaa:size><nyaa:seeders>2</nyaa:seeders>
+        <nyaa:categoryId>1_2</nyaa:categoryId><nyaa:trusted>Yes</nyaa:trusted>
+        </item></channel></rss>'''
+        def fake_fetch(url, limit):
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)["q"][0]
+            queries.append(query)
+            return rss if "S02E03" in query else b"<rss><channel/></rss>"
+        with patch("kura.provider.fetch", side_effect=fake_fetch):
+            rows = Nyaa().search("Show S02", 3, "english")
+        self.assertEqual(queries, ["Show S02 03", "Show S02E03"])
+        self.assertEqual((rows[0].series, rows[0].episode), ("Show S02", 3))
+        with patch("kura.provider.fetch", return_value=rss):
+            self.assertEqual(len(Nyaa().search("Show S02", 3, "english")), 1)
+
     def test_xml_entities_rejected(self):
         with self.assertRaises(KuraError):
             parse_rss(b'<!DOCTYPE rss [<!ENTITY x "xx">]><rss/>')
@@ -367,7 +448,11 @@ class CLITests(unittest.TestCase):
                 deadline = time.monotonic() + 5
                 while time.monotonic() < deadline:
                     stat = Path(f"/proc/{child_pid}/stat")
-                    if not stat.exists() or stat.read_text().split(") ")[1].startswith("Z"):
+                    try:
+                        state = stat.read_text().split(") ")[1]
+                    except (FileNotFoundError, ProcessLookupError):
+                        break
+                    if state.startswith("Z"):
                         break
                     time.sleep(0.02)
                 else:

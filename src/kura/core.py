@@ -1,11 +1,8 @@
 """Headless acquisition service, shared by the CLI and future bounded tool adapters."""
 from dataclasses import asdict, replace
-import hashlib
-from pathlib import Path
-
 from . import downloader
-from .models import KuraError, Preferences, Provider
-from .releases import eligible, normalize, query_check, select
+from .models import KuraError, Preferences, Provider, Release
+from .releases import eligible, normalize, parse_title, query_check, select
 from .safety import destination, ensure_dir, no_symlinks, regular_file
 from .store import Store, validate_prefs
 from .torrent import inspect
@@ -38,26 +35,52 @@ class Core:
         # Serialize mutations across processes, including the entire foreground transfer.
         with self.store.lock() as lock_fd:
             self.store.recover()
-            p, rows = self.search(title, episode, overrides)
-            release = select(rows, p, release_id)
-            torrent = inspect(self.provider.descriptor(release), release.infohash, p.max_size_mb * 1024**2)
-            # A descriptor cannot swap identity while retaining the RSS promise.
-            from .releases import parse_title
+            query_check(title, episode)
+            p = self.preferences(overrides)
+            media_key = normalize(title) + ":" + str(episode)
+            jobs = self.store.jobs()
+            existing = next((j for j in jobs if j["media_key"] == media_key), None)
+            if existing and not dry_run:
+                if existing["state"] == "complete":
+                    raise KuraError("duplicate", "This episode already has a verified receipt", existing=existing)
+                if not resume:
+                    raise KuraError("duplicate", "A recorded job exists; explicitly use --resume", existing=existing)
+            if resume or (existing and dry_run):
+                if not existing:
+                    raise KuraError("no_resume", "No recorded job exists for this title and episode")
+                release = Release(**existing["release"])
+                if release_id and release_id != release.id:
+                    raise KuraError("resume_mismatch", "Resume must use the recorded release")
+                # No fresh discovery/seed-count gate: this exact job was already selected.
+                # Current quality/group/category/size policy and authorization still apply.
+                if not eligible([release], title, episode, replace(p, min_seeders=0)):
+                    raise KuraError("resume_preferences", "Recorded release conflicts with current preferences")
+                descriptor = self.store.descriptor(release.infohash)
+                if descriptor is None:
+                    raise KuraError("resume_unavailable", "Recorded job has no validated descriptor; no download started")
+            else:
+                rows = eligible(self.provider.search(title, episode, p.subtitles), title, episode, p)
+                release = select(rows, p, release_id)
+                descriptor = self.provider.descriptor(release)
+            torrent = inspect(descriptor, release.infohash, p.max_size_mb * 1024**2)
+            # Approval identity must agree with the payload, independently of preferences.
             parsed = parse_title(torrent.name)
             if (not parsed or normalize(parsed[0]) != normalize(title) or parsed[1] != episode or
-                    (p.resolution != "any" and parsed[3] != p.resolution) or
-                    (p.groups and parsed[2].casefold() != release.group.casefold())):
-                raise KuraError("descriptor_identity", "Torrent filename does not match requested title/episode/resolution")
+                    parsed[2].casefold() != release.group.casefold() or
+                    parsed[3] != release.resolution or
+                    (p.resolution != "any" and parsed[3] != p.resolution)):
+                raise KuraError("descriptor_identity", "Torrent filename disagrees with selected title/episode/group/resolution")
             base = destination(p.destination)
             directory = base / torrent.infohash
             no_symlinks(directory)
-            media_key = normalize(title) + ":" + str(episode)
-            existing = next((j for j in self.store.jobs() if
-                             j["media_key"] == media_key or j["infohash"] == torrent.infohash), None)
+            existing = existing or next((j for j in jobs if j["infohash"] == torrent.infohash), None)
+            if resume and existing["destination"] != str(directory):
+                raise KuraError("resume_mismatch", "Resume must use the recorded destination")
             plan = {"source": "nyaa", "query": title, "episode": episode,
                     "release": release.json(), "preferences": asdict(p),
                     "destination": str(directory), "expected_size_bytes": torrent.length,
-                    "existing": existing, "uri_type": "validated_torrent"}
+                    "existing": existing, "uri_type": "validated_torrent", "resume": resume,
+                    "seeders_are_snapshot": bool(existing)}
             if dry_run:
                 return {"state": "planned", **plan}
             if existing:
@@ -79,7 +102,7 @@ class Core:
             job = {**plan, "infohash": torrent.infohash, "media_key": media_key,
                    "state": "acquiring", "authorization": "explicit_yes" if yes else "interactive",
                    "existing": None}
-            self.store.record(job)
+            self.store.record(job, torrent.sanitized)
             try:
                 evidence = downloader.run(torrent, directory, self.store.root, lock_fd=lock_fd)
                 job.update(state="complete", evidence=evidence, error=None)

@@ -43,7 +43,8 @@ Required strict `tests` check added before feature push. Independent Terra appro
 is an operational merge gate, not a fabricated second-account GitHub approval.
 Secret scanning, push protection, vulnerability alerts, automated security fixes and
 private vulnerability reporting enabled. CodeQL default setup cannot select Python
-until Python reaches the repository; enable/verify once feature branch is published.
+until Python reaches the default branch (REST returned 422 while main was docs-only);
+enable/verify after the feature merge. The initial secret/alert controls are active.
 CI is one Python 3.11 unit-test job on PR/main, no matrix or costly packaging.
 
 ## Validation evidence
@@ -54,7 +55,7 @@ CI is one Python 3.11 unit-test job on PR/main, no matrix or costly packaging.
 - An initial `--no-build-isolation` install failed because a fresh venv lacks
   setuptools. The documented normal isolated build succeeded; this is not a runtime
   incompatibility and the README warns against that unsupported install shortcut.
-- Final source: **45 unit tests passed**, including real supervisor-SIGKILL child
+- Initial pre-review source: **45 unit tests passed**, including real supervisor-SIGKILL child
   termination, cross-process locks, persistent preferences in fresh processes,
   malicious URLs/redirects/XML/bencode/paths, low disk, timeout/interruption and
   exit-0-without-bytes refusals. `git diff --check` and compileall passed.
@@ -81,6 +82,36 @@ filesystem isolation claim. Android process survival is not guaranteed. A durabl
 complete receipt is historical evidence, not a promise the user has retained a file.
 No GUI/Rust implementation, Supabase, Unraid, Plex, Tailscale, AniList, schedules,
 background queue, autonomous cleanup or seeding-policy implementation.
+
+## Independent review loop
+Terra round 1 independently reviewed `fa6433c11fdd76803e54a9fcd2b2566ce7c4de53`
+and requested five blocking fixes. Executed identity was verified from child session
+model/effort events: `openai-codex/gpt-6.1-terra`, high (shared provider).
+
+1. Spaced ranges/episode markers hidden in metadata: reject tags, with release and
+   descriptor regression coverage.
+2. Resume depending on fresh search: transactionally cache sanitized descriptors;
+   explicit resume uses recorded identity, revalidates policy/paths/hash and requires
+   new approval, but does not rediscover or gate on stale seed counts.
+3. Full-size free-space check on resume: credit only validated payload allocation
+   (`min(st_blocks*512, st_size, expected_size)`), never sparse logical length.
+4. Descriptor group mismatch without group preferences: always compare selected
+   group/resolution identity with the descriptor, independently of preference filters.
+5. Contiguous season/episode search mismatch: query supported separated and S02E03
+   forms and merge/deduplicate provider results.
+
+New tests cover all five. The real torrent harness now includes an interrupted partial
+transfer, offline recorded-job resume and a constrained free-space value below the
+full torrent requirement. **Final revised validation passed: 51 unit tests**, no skips;
+real CLI/aria2 transfer **1,408,000 bytes, 86 verified pieces**, SHA-256
+`d57edf4cead28f476e667b9c2b1b438df65b513123312cbdb7d7fda60cd7da52`.
+The interrupted transfer had 114,688 allocated bytes; explicit resume completed with
+Nyaa fetch forbidden and only 68,403,200 mocked free bytes (less than full size + reserve).
+The complete evidence replaces the earlier small fixture run in `validation-termux.txt`.
+The first new run exposed a process-stat test race when the killed child disappeared;
+handled as successful termination. Enlarging the fixture also required updating its
+own descriptor inspection budget. Both harness fixes were rerun successfully.
+Fresh exact-HEAD Terra approval remains pending.
 
 ## Review and outstanding work
 Independent Terra review must inspect the latest pushed HEAD, architecture, all source,
