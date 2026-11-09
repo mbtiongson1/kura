@@ -46,20 +46,21 @@ def parse_title(title: str):
         # Unknown punctuation must not turn two episode-looking numbers into
         # harmless metadata. Exempt explicit dimensions/frame-rate/audio forms,
         # not arbitrary numeric prose or an ever-growing separator allowlist.
-        numeric = re.sub(r"\b\d{3,4}\s*[x×]\s*\d{3,4}\b", "", text, flags=re.I)
-        numeric = re.sub(r"\b\d{1,3}(?:\.\d+)?\s*(?:fps|Hz)\b", "", numeric, flags=re.I)
+        numeric = re.sub(r"\b\d{3,4}\s*[x×]\s*\d{3,4}\b", " ", text, flags=re.I)
+        numeric = re.sub(r"\b\d{1,3}(?:\.\d+)?\s*(?:fps|Hz)\b", " ", numeric, flags=re.I)
         if (re.fullmatch(r"[1-9]\.[01]", text) or
                 re.search(r"\b(?:AAC|FLAC|AC-?3|E-?AC-?3|DTS|DDP|OPUS|VORBIS)", text, re.I)):
-            numeric = re.sub(r"(?<!\d)[1-9]\.[01](?!\d)", "", numeric)
-        numeric = re.sub(r"(?:[xh][ ._-]?(?:264|265|266)|AV1|VP[89]|AC-?3|E-?AC-?3)", "", numeric, flags=re.I)
-        numeric = re.sub(r"(?:480|720|1080|2160)p|(?:8|10|12)[ -]?bit", "", numeric, flags=re.I)
+            numeric = re.sub(r"(?<!\d)[1-9]\.[01](?!\d)", " ", numeric)
+        numeric = re.sub(r"(?<!\w)(?:[xh][ ._-]?(?:264|265|266)|AV1|VP[89]|AC-?3|E-?AC-?3)(?!\w)", " ", numeric, flags=re.I)
+        numeric = re.sub(r"(?<!\w)(?:(?:480|720|1080|2160)p|(?:8|10|12)[ -]?bit)(?!\w)", " ", numeric, flags=re.I)
         # Count runs even when adjacent to prose (03of04, 03plus04, etc.).
         multiple_numbers = len(re.findall(r"\d+", numeric)) > 1
         # Do not require word boundaries after endpoints: version suffixes and
         # adjacent labels must never disguise a range/list as codec metadata.
-        if (multiple_numbers or
+        unexplained_episode = any(int(n) < 1900 for n in re.findall(r"(?<!\w)\d{1,4}(?!\w)", numeric))
+        if (multiple_numbers or unexplained_episode or
                 re.search(r"\d\s*(?:[-~+,;&/+_]|and|to|through)\s*\d", text, re.I) or
-                re.search(r"(?:S\d{1,2}E|E|EP\.?\s*|Episodes?\s*)\d{1,4}", text, re.I) or
+                re.search(r"(?:S\d{1,2}(?:E\d{1,4})?|(?:E|EP\.?\s*|Episodes?\s*)\d{1,4})", text, re.I) or
                 re.fullmatch(r"\d{1,3}", text)):
             return None
     # Remaining tail must be metadata tags or extension, not a second title/episode.

@@ -150,7 +150,15 @@ Added adjacent-prose regressions in every tag position and positive CRC/codec pa
 RSS and descriptor coverage. Positive codec coverage caught a redundant raw-number
 check that rejected AC3/channel/bit-depth metadata; removed in favor of the normalized
 numeric gate. Refreshed validation passed: **54 tests, no skips**, real original and
-offline-resumed torrents, live metadata and diff hygiene. Independent approval pending.
+offline-resumed torrents, live metadata and diff hygiene.
+Terra round 7 reviewed `3b064b60f2f81a74b7722b7ce3defff22137b5fd` and found
+unbounded codec substitutions could concatenate surrounding episode digits (`03x26404`).
+Recognized codec/quality forms now require token boundaries and every recognized span
+is replaced with whitespace, never concatenated. Remaining unexplained standalone
+episode numbers and season markers fail closed too. Added regression cases across
+all tag positions and RSS/descriptor paths. Refreshed validation passed: 54 tests
+without skips, original and interrupted/offline-resumed torrents, live Nyaa metadata
+and diff hygiene. Independent exact-HEAD approval remains pending.
 
 ## Review and outstanding work
 Independent Terra review must inspect the latest pushed HEAD, architecture, all source,
