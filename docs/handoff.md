@@ -133,8 +133,15 @@ version-suffixed range endpoints bypassed a word boundary. Tag checks now normal
 version suffixes and do not require word boundaries for range/list endpoints; Unicode
 dash variants are also refused. All tag positions have versioned range/list parser,
 RSS and descriptor regressions. Refreshed validation passed: 53 tests, both real torrent
-paths and provider metadata request; same 1,408,000-byte SHA-256 receipt. Exact-HEAD
-Terra approval remains pending.
+paths and provider metadata request; same 1,408,000-byte SHA-256 receipt.
+Terra round 5 reviewed `29b12a8604b5d904939bb828503e1f3e8bab13bd` and found
+other Unicode dash/minus variants. All Unicode Pd characters and the mathematical minus
+are now normalized. A separator-independent numeric-tag check also rejects unknown
+punctuation/prose joining two episode-looking numbers, with narrow dimension/frame-rate/
+audio exemptions and positive codec regressions. Parser/RSS/descriptor tests cover the
+reported Unicode variants and unknown separators. Final validation passed again:
+53 tests without skips, both real torrent paths, live Nyaa metadata and diff hygiene.
+The exact latest evidence is committed in `validation-termux.txt`; Terra approval pending.
 
 ## Review and outstanding work
 Independent Terra review must inspect the latest pushed HEAD, architecture, all source,

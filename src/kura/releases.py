@@ -38,9 +38,20 @@ def parse_title(title: str):
     for tag in re.findall(r"\[([^\]]*)\]|\(([^)]*)\)", title):
         text = unicodedata.normalize("NFKC", " ".join(tag).strip())
         text = re.sub(r"(?<=\d)v\d+", "", text, flags=re.I)
+        text = "".join("-" if unicodedata.category(c) == "Pd" or c == "−" else c for c in text)
+        # Unknown punctuation must not turn two episode-looking numbers into
+        # harmless metadata. Exempt explicit dimensions/frame-rate/audio forms,
+        # not arbitrary numeric prose or an ever-growing separator allowlist.
+        numeric = re.sub(r"\b\d{3,4}\s*[x×]\s*\d{3,4}\b", "", text, flags=re.I)
+        numeric = re.sub(r"\b\d{1,3}(?:\.\d+)?\s*(?:fps|Hz)\b", "", numeric, flags=re.I)
+        if (re.fullmatch(r"[1-9]\.[01]", text) or
+                re.search(r"\b(?:AAC|FLAC|AC-?3|E-?AC-?3|DTS|DDP|OPUS|VORBIS)", text, re.I)):
+            numeric = re.sub(r"(?<!\d)[1-9]\.[01](?!\d)", "", numeric)
+        multiple_numbers = len(re.findall(r"(?<!\w)\d{1,4}(?!\w)", numeric)) > 1
         # Do not require word boundaries after endpoints: version suffixes and
         # adjacent labels must never disguise a range/list as codec metadata.
-        if (re.search(r"\d\s*(?:[-~+–—,;&/+_]|and|to|through)\s*\d", text, re.I) or
+        if (multiple_numbers or
+                re.search(r"\d\s*(?:[-~+,;&/+_]|and|to|through)\s*\d", text, re.I) or
                 re.search(r"\b\d{1,3}\s+\d{1,3}(?!\d)", text) or
                 re.search(r"(?:S\d{1,2}E|E|EP\.?\s*|Episodes?\s*)\d{1,4}", text, re.I) or
                 re.fullmatch(r"\d{1,3}", text)):
