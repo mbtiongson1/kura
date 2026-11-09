@@ -35,7 +35,7 @@ def parse_title(title: str):
         series += " S" + str(int(match.group(1))).zfill(2)
     # Metadata must not conceal a batch/range or another episode marker.
     tail = clean[match.end():]
-    for tag in re.findall(r"\[([^\]]*)\]|\(([^)]*)\)", clean):
+    for tag in re.findall(r"\[([^\]]*)\]|\(([^)]*)\)", title):
         text = " ".join(tag).strip()
         if (re.search(r"\b\d{1,4}\s*[-~+]\s*\d{1,4}\b", text) or
                 re.search(r"\b\d{1,4}\s*(?:[,;&/+_]|and|to|through)\s*\d{1,4}\b|\b\d{1,3}\s+\d{1,3}\b", text, re.I) or

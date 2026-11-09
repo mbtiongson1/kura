@@ -121,7 +121,13 @@ Added a real slow-child/repeated-SIGINT/lock-retention test plus injected-interr
 coverage. **Final validation: 53 unit tests passed with no skips**, including the real
 slow-child repeated-interrupt case; original and offline-resumed 1,408,000-byte torrent
 transfers both passed with the same SHA-256/86 pieces. See `validation-termux.txt`.
-Fresh exact-HEAD Terra approval remains pending.
+Terra round 3 reviewed `55279e72381ea751e723d5e3693d662193b5586f` and found
+that the leading group bracket escaped metadata checks. The ambiguity scan now covers
+**all** brackets in the original title, including the leading tag; added parser, actual
+RSS and descriptor regressions for leading lists, compound markers and spaced ranges.
+Post-round-3 validation passed: all 53 tests (no skips), real original transfer,
+interrupted/offline resumed transfer, live metadata request, and diff hygiene. Latest
+results are in `validation-termux.txt`. Exact-HEAD Terra approval remains pending.
 
 ## Review and outstanding work
 Independent Terra review must inspect the latest pushed HEAD, architecture, all source,

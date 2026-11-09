@@ -86,9 +86,13 @@ class Case(unittest.TestCase):
                     "Episode3", "Season1Episode3Episode4"):
             self.assertIsNone(parse_title(f"Show - 03 [{tag}] (1080p).mkv"), tag)
             self.assertIsNone(parse_title(f"Show [{tag}] - 03 (1080p).mkv"), tag)
+            self.assertIsNone(parse_title(f"[{tag}] Show - 03 (1080p).mkv"), tag)
             name = f"[Kura] Kura Sample - 03 [{tag}] (1080p).txt"
             row, data = sample(name)
             self.core.provider = FakeProvider([replace(self.row, infohash=row.infohash)], data)
+            self.error("descriptor_identity", self.core.download, "Kura Sample", 3, {}, dry_run=True)
+            row, data = sample(f"[{tag}] Kura Sample - 03 (1080p).txt")
+            self.core.provider = FakeProvider([replace(self.row, infohash=row.infohash, group=tag)], data)
             self.error("descriptor_identity", self.core.download, "Kura Sample", 3, {}, dry_run=True)
 
     def test_ambiguity_not_resolved_by_seeders(self):
@@ -395,6 +399,8 @@ class ProviderTests(unittest.TestCase):
         self.assertTrue(rows[0].trusted)
         self.assertEqual(rows[0].size_bytes, 42*1024)
         self.assertEqual(parse_rss(data.replace(b"https://nyaa.si/download", b"https://evil.test/download")), [])
+        for tag in (b"03, 04", b"S01E03E04", b"01 - 12"):
+            self.assertEqual(parse_rss(data.replace(b"[Kura]", b"[" + tag + b"]")), [])
 
     def test_season_episode_query_uses_contiguous_form_and_dedupes(self):
         queries = []
