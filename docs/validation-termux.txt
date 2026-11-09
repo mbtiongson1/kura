@@ -54,7 +54,7 @@ test_xml_entities_rejected (test_kura.ProviderTests.test_xml_entities_rejected) 
 test_repeated_sigint_retains_lock_until_slow_child_reaped (test_lifecycle.RepeatedInterruptTests.test_repeated_sigint_retains_lock_until_slow_child_reaped) ... ok
 
 ----------------------------------------------------------------------
-Ran 54 tests in 4.952s
+Ran 54 tests in 8.602s
 
 OK
 {
@@ -70,7 +70,7 @@ OK
   "duplicate": "rejected",
   "status": "complete",
   "evidence": {
-    "path": "/data/data/com.termux/files/usr/tmp/kura-authorized-2o2oyl9y/home/.local/share/kura/downloads/de580238510450594c8beadb6aac15a3a1803371/[Kura] Kura Sample - 03 (1080p).txt",
+    "path": "/data/data/com.termux/files/usr/tmp/kura-authorized-untr9vck/home/.local/share/kura/downloads/de580238510450594c8beadb6aac15a3a1803371/[Kura] Kura Sample - 03 (1080p).txt",
     "size_bytes": 1408000,
     "sha256": "d57edf4cead28f476e667b9c2b1b438df65b513123312cbdb7d7fda60cd7da52",
     "pieces_verified": 86

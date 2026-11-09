@@ -69,6 +69,9 @@ tracks or a guarantee of language. Nyaa trusted status is not a legal-rights gua
 The parser deliberately accepts only `Series - 03` or `Series S02E03` with metadata
 tags. Query `Series S02` for the latter. No fuzzy titles, episode ranges, season packs,
 multiple files or inferred specials. Unsupported naming is rejected rather than guessed.
+Numeric metadata is fail-closed: only explicit codec/quality/audio/dimension/frame-rate,
+version, standalone year and CRC formats are recognized. Unknown numeric tags, including
+numeric release-group labels, are unsupported rather than interpreted as safe metadata.
 Resolution and group constraints are enforced; ranked results prefer the ordered group
 list then seeders. Automatic selection needs exactly one trusted candidate in the best
 group tier. Seed counts do not resolve identity ambiguity. If refused, inspect search

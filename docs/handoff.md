@@ -158,7 +158,15 @@ is replaced with whitespace, never concatenated. Remaining unexplained standalon
 episode numbers and season markers fail closed too. Added regression cases across
 all tag positions and RSS/descriptor paths. Refreshed validation passed: 54 tests
 without skips, original and interrupted/offline-resumed torrents, live Nyaa metadata
-and diff hygiene. Independent exact-HEAD approval remains pending.
+and diff hygiene.
+Terra round 8 reviewed `bedab91c289fbbe7d8d679bbef74a03df8d8496f` and found
+adjacent spelled-out season labels (`Season02`). Numeric metadata now fully fails closed:
+ANY digit remaining after explicit recognized metadata classification is refused, including
+unknown numeric group tags. Supported standalone years/versions/Hi10P are explicit;
+spelled-out season labels are also directly rejected. Added Season/Saison/volume cases
+and documented the deliberate unsupported-naming limitation. Final validation passed:
+54 tests/no skips, both real original and offline-resume torrent paths, live metadata
+and diff hygiene. Latest results committed; exact-HEAD independent approval pending.
 
 ## Review and outstanding work
 Independent Terra review must inspect the latest pushed HEAD, architecture, all source,
