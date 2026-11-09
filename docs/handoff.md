@@ -141,7 +141,16 @@ punctuation/prose joining two episode-looking numbers, with narrow dimension/fra
 audio exemptions and positive codec regressions. Parser/RSS/descriptor tests cover the
 reported Unicode variants and unknown separators. Final validation passed again:
 53 tests without skips, both real torrent paths, live Nyaa metadata and diff hygiene.
-The exact latest evidence is committed in `validation-termux.txt`; Terra approval pending.
+The exact evidence is committed in `validation-termux.txt`.
+Terra round 6 reviewed `48144cde0e3264194fb371c8a8598413d8bc0fc5` and found
+numeric prose adjacency (`03of04`) bypassed word boundaries. The conservative numeric
+check now counts every digit run after explicitly stripping supported numeric codec,
+resolution, dimension, frame-rate and audio forms, with a narrow standalone CRC case.
+Added adjacent-prose regressions in every tag position and positive CRC/codec parser,
+RSS and descriptor coverage. Positive codec coverage caught a redundant raw-number
+check that rejected AC3/channel/bit-depth metadata; removed in favor of the normalized
+numeric gate. Refreshed validation passed: **54 tests, no skips**, real original and
+offline-resumed torrents, live metadata and diff hygiene. Independent approval pending.
 
 ## Review and outstanding work
 Independent Terra review must inspect the latest pushed HEAD, architecture, all source,

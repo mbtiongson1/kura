@@ -7,6 +7,7 @@ test_bencode_attacks (test_kura.Case.test_bencode_attacks) ... ok
 test_completion_and_duplicate (test_kura.Case.test_completion_and_duplicate) ... ok
 test_completion_piece_verification (test_kura.Case.test_completion_piece_verification) ... ok
 test_confirmation_required (test_kura.Case.test_confirmation_required) ... ok
+test_crc_descriptor_is_accepted (test_kura.Case.test_crc_descriptor_is_accepted) ... ok
 test_descriptor_drops_all_urls (test_kura.Case.test_descriptor_drops_all_urls) ... ok
 test_descriptor_group_and_resolution_always_match_selection (test_kura.Case.test_descriptor_group_and_resolution_always_match_selection) ... ok
 test_descriptor_hash_mismatch (test_kura.Case.test_descriptor_hash_mismatch) ... ok
@@ -53,7 +54,7 @@ test_xml_entities_rejected (test_kura.ProviderTests.test_xml_entities_rejected) 
 test_repeated_sigint_retains_lock_until_slow_child_reaped (test_lifecycle.RepeatedInterruptTests.test_repeated_sigint_retains_lock_until_slow_child_reaped) ... ok
 
 ----------------------------------------------------------------------
-Ran 53 tests in 6.533s
+Ran 54 tests in 5.245s
 
 OK
 {
@@ -69,7 +70,7 @@ OK
   "duplicate": "rejected",
   "status": "complete",
   "evidence": {
-    "path": "/data/data/com.termux/files/usr/tmp/kura-authorized-qdacl76u/home/.local/share/kura/downloads/de580238510450594c8beadb6aac15a3a1803371/[Kura] Kura Sample - 03 (1080p).txt",
+    "path": "/data/data/com.termux/files/usr/tmp/kura-authorized-07xuqw9v/home/.local/share/kura/downloads/de580238510450594c8beadb6aac15a3a1803371/[Kura] Kura Sample - 03 (1080p).txt",
     "size_bytes": 1408000,
     "sha256": "d57edf4cead28f476e667b9c2b1b438df65b513123312cbdb7d7fda60cd7da52",
     "pieces_verified": 86

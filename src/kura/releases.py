@@ -39,6 +39,10 @@ def parse_title(title: str):
         text = unicodedata.normalize("NFKC", " ".join(tag).strip())
         text = re.sub(r"(?<=\d)v\d+", "", text, flags=re.I)
         text = "".join("-" if unicodedata.category(c) == "Pd" or c == "−" else c for c in text)
+        # A standalone CRC is common release metadata, not episode prose.
+        if (re.fullmatch(r"[0-9a-f]{8}", text, re.I) and
+                not re.search(r"E\d{1,4}E\d{1,4}", text, re.I)):
+            continue
         # Unknown punctuation must not turn two episode-looking numbers into
         # harmless metadata. Exempt explicit dimensions/frame-rate/audio forms,
         # not arbitrary numeric prose or an ever-growing separator allowlist.
@@ -47,12 +51,14 @@ def parse_title(title: str):
         if (re.fullmatch(r"[1-9]\.[01]", text) or
                 re.search(r"\b(?:AAC|FLAC|AC-?3|E-?AC-?3|DTS|DDP|OPUS|VORBIS)", text, re.I)):
             numeric = re.sub(r"(?<!\d)[1-9]\.[01](?!\d)", "", numeric)
-        multiple_numbers = len(re.findall(r"(?<!\w)\d{1,4}(?!\w)", numeric)) > 1
+        numeric = re.sub(r"(?:[xh][ ._-]?(?:264|265|266)|AV1|VP[89]|AC-?3|E-?AC-?3)", "", numeric, flags=re.I)
+        numeric = re.sub(r"(?:480|720|1080|2160)p|(?:8|10|12)[ -]?bit", "", numeric, flags=re.I)
+        # Count runs even when adjacent to prose (03of04, 03plus04, etc.).
+        multiple_numbers = len(re.findall(r"\d+", numeric)) > 1
         # Do not require word boundaries after endpoints: version suffixes and
         # adjacent labels must never disguise a range/list as codec metadata.
         if (multiple_numbers or
                 re.search(r"\d\s*(?:[-~+,;&/+_]|and|to|through)\s*\d", text, re.I) or
-                re.search(r"\b\d{1,3}\s+\d{1,3}(?!\d)", text) or
                 re.search(r"(?:S\d{1,2}E|E|EP\.?\s*|Episodes?\s*)\d{1,4}", text, re.I) or
                 re.fullmatch(r"\d{1,3}", text)):
             return None
