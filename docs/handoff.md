@@ -102,7 +102,7 @@ model/effort events: `openai-codex/gpt-6.1-terra`, high (shared provider).
 
 New tests cover all five. The real torrent harness now includes an interrupted partial
 transfer, offline recorded-job resume and a constrained free-space value below the
-full torrent requirement. **Final revised validation passed: 51 unit tests**, no skips;
+full torrent requirement. **Round-1 repair validation passed: 51 unit tests**, no skips;
 real CLI/aria2 transfer **1,408,000 bytes, 86 verified pieces**, SHA-256
 `d57edf4cead28f476e667b9c2b1b438df65b513123312cbdb7d7fda60cd7da52`.
 The interrupted transfer had 114,688 allocated bytes; explicit resume completed with
@@ -111,6 +111,16 @@ The complete evidence replaces the earlier small fixture run in `validation-term
 The first new run exposed a process-stat test race when the killed child disappeared;
 handled as successful termination. Enlarging the fixture also required updating its
 own descriptor inspection budget. Both harness fixes were rerun successfully.
+Terra round 2 reviewed `2f8a1e171c156c149960c7dcde7831e043393c08` and found
+remaining explicit episode-list/compound-marker gaps plus repeated-interrupt cleanup.
+Both are repaired: list/compound markers now fail closed; cleanup ignores further
+SIGINT/SIGTERM until the child is terminated/reaped and restores handlers afterward.
+The operation lock now releases by FD close, never explicit shared-description unlock,
+so an inheriting child retains exclusion even if supervision unwinds unexpectedly.
+Added a real slow-child/repeated-SIGINT/lock-retention test plus injected-interrupt
+coverage. **Final validation: 53 unit tests passed with no skips**, including the real
+slow-child repeated-interrupt case; original and offline-resumed 1,408,000-byte torrent
+transfers both passed with the same SHA-256/86 pieces. See `validation-termux.txt`.
 Fresh exact-HEAD Terra approval remains pending.
 
 ## Review and outstanding work

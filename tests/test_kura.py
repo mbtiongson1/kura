@@ -81,7 +81,9 @@ class Case(unittest.TestCase):
             self.assertIsNone(parse_title(title), title)
 
     def test_metadata_cannot_hide_batches_or_episode_markers(self):
-        for tag in ("01 - 12", "03 ~ 04", "E04", "EP. 04", "S01E04", "04"):
+        for tag in ("01 - 12", "03 ~ 04", "E04", "EP. 04", "S01E04", "04",
+                    "03, 04", "S01E03E04", "03&04", "03 04", "03_04",
+                    "Episode3", "Season1Episode3Episode4"):
             self.assertIsNone(parse_title(f"Show - 03 [{tag}] (1080p).mkv"), tag)
             self.assertIsNone(parse_title(f"Show [{tag}] - 03 (1080p).mkv"), tag)
             name = f"[Kura] Kura Sample - 03 [{tag}] (1080p).txt"
@@ -334,6 +336,17 @@ class Case(unittest.TestCase):
                 else:
                     self.error("download_timeout", run, self.torrent, self.root / "out", self.store.root)
             proc.terminate.assert_called_once()
+
+    def test_repeated_python_interrupt_during_cleanup_still_reaps(self):
+        proc = Mock()
+        proc.wait.side_effect = [KeyboardInterrupt(), KeyboardInterrupt(), 0]
+        proc.poll.return_value = None
+        with patch("kura.downloader.shutil.which", return_value="/bin/aria2c"), \
+             patch("kura.downloader.subprocess.Popen", return_value=proc):
+            with self.assertRaises(KeyboardInterrupt):
+                run(self.torrent, self.root / "out", self.store.root)
+        self.assertEqual(proc.wait.call_count, 3)
+        self.assertEqual(proc.terminate.call_count, 2)
 
     def test_exit_zero_without_payload_fails(self):
         proc = Mock()

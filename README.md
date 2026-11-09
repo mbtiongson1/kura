@@ -106,7 +106,9 @@ already allocated blocks within the validated partial payload earn disk-space cr
 sparse logical lengths do not. Actual descriptor length, not RSS rounding, is authoritative. One Kura mutation runs at a time. Other applications
 can still consume disk; disk-full never becomes a successful receipt.
 
-Foreground operation only. Optionally `termux-wake-lock` during long transfers and
+Foreground operation only. During child termination/reaping, further Ctrl-C/SIGTERM
+is temporarily ignored so retries cannot overlap a still-exiting downloader.
+Optionally `termux-wake-lock` during long transfers and
 review Android battery optimization; neither guarantees survival. Timeout is 30 minutes
 with a 120-second no-progress bound. Ctrl-C/SIGTERM stops the child; SIGKILL/process death
 is reported as interrupted on the next invocation. A Linux/Android parent-death signal

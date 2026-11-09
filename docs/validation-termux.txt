@@ -26,6 +26,7 @@ test_no_source (test_kura.Case.test_no_source) ... ok
 test_path_boundary (test_kura.Case.test_path_boundary) ... ok
 test_preferences_persist_and_override (test_kura.Case.test_preferences_persist_and_override) ... ok
 test_query_validation (test_kura.Case.test_query_validation) ... ok
+test_repeated_python_interrupt_during_cleanup_still_reaps (test_kura.Case.test_repeated_python_interrupt_during_cleanup_still_reaps) ... ok
 test_resume_counts_allocated_not_logical_size (test_kura.Case.test_resume_counts_allocated_not_logical_size) ... ok
 test_resume_uses_recorded_descriptor_without_provider_or_seeder_gate (test_kura.Case.test_resume_uses_recorded_descriptor_without_provider_or_seeder_gate) ... ok
 test_resume_without_record_refused (test_kura.Case.test_resume_without_record_refused) ... ok
@@ -49,9 +50,10 @@ test_season_episode_query_uses_contiguous_form_and_dedupes (test_kura.ProviderTe
 test_url_allowlist (test_kura.ProviderTests.test_url_allowlist) ... ok
 test_utf16_entities_rejected (test_kura.ProviderTests.test_utf16_entities_rejected) ... ok
 test_xml_entities_rejected (test_kura.ProviderTests.test_xml_entities_rejected) ... ok
+test_repeated_sigint_retains_lock_until_slow_child_reaped (test_lifecycle.RepeatedInterruptTests.test_repeated_sigint_retains_lock_until_slow_child_reaped) ... ok
 
 ----------------------------------------------------------------------
-Ran 51 tests in 5.244s
+Ran 53 tests in 4.198s
 
 OK
 {
@@ -67,7 +69,7 @@ OK
   "duplicate": "rejected",
   "status": "complete",
   "evidence": {
-    "path": "/data/data/com.termux/files/usr/tmp/kura-authorized-c3wogd8x/home/.local/share/kura/downloads/de580238510450594c8beadb6aac15a3a1803371/[Kura] Kura Sample - 03 (1080p).txt",
+    "path": "/data/data/com.termux/files/usr/tmp/kura-authorized-lfkjs4w3/home/.local/share/kura/downloads/de580238510450594c8beadb6aac15a3a1803371/[Kura] Kura Sample - 03 (1080p).txt",
     "size_bytes": 1408000,
     "sha256": "d57edf4cead28f476e667b9c2b1b438df65b513123312cbdb7d7fda60cd7da52",
     "pieces_verified": 86

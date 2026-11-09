@@ -31,6 +31,35 @@ def parent_death_guard():
     return guard
 
 
+def stop_child(proc):
+    """Cleanup is not cancellable: retain supervision until the child is reaped."""
+    previous = {sig: signal.signal(sig, signal.SIG_IGN) for sig in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        while True:
+            try:
+                if proc.poll() is None:
+                    try:
+                        proc.terminate()
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            proc.kill()
+                        except ProcessLookupError:
+                            pass
+                        proc.wait()
+                break
+            except KeyboardInterrupt:
+                # Also resilient to a pending Python interrupt delivered before
+                # SIG_IGN took effect (or injected by a test).
+                continue
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
 def run(torrent: Torrent, directory: Path, state_root: Path, timeout: int = 1800, *,
         lock_fd: int | None = None) -> dict:
     binary = shutil.which("aria2c")
@@ -89,11 +118,6 @@ def run(torrent: Torrent, directory: Path, state_root: Path, timeout: int = 1800
     except OSError as e:
         raise KuraError("downloader_error", "Could not execute aria2") from e
     finally:
-        if proc is not None and proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
+        if proc is not None:
+            stop_child(proc)
         descriptor.unlink(missing_ok=True)

@@ -61,10 +61,10 @@ class Store:
                 fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise KuraError("busy", "Another Kura mutation is running")
-            try:
-                yield f.fileno()
-            finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
+            # Closing our FD releases the lock only after any inheriting child
+            # also closes it. Explicit LOCK_UN would unlock that child\'s shared
+            # open-file description if supervision were interrupted during cleanup.
+            yield f.fileno()
 
     def prefs(self) -> Preferences:
         row = self.db.execute("SELECT value FROM preferences WHERE id=1").fetchone()

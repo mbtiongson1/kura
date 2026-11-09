@@ -38,7 +38,8 @@ def parse_title(title: str):
     for tag in re.findall(r"\[([^\]]*)\]|\(([^)]*)\)", clean):
         text = " ".join(tag).strip()
         if (re.search(r"\b\d{1,4}\s*[-~+]\s*\d{1,4}\b", text) or
-                re.search(r"\b(?:S\d{1,2}E|E|EP\.?\s*|Episode\s+)\d{1,4}\b", text, re.I) or
+                re.search(r"\b\d{1,4}\s*(?:[,;&/+_]|and|to|through)\s*\d{1,4}\b|\b\d{1,3}\s+\d{1,3}\b", text, re.I) or
+                re.search(r"(?:S\d{1,2}E|E|EP\.?\s*|Episodes?\s*)\d{1,4}", text, re.I) or
                 re.fullmatch(r"\d{1,3}", text)):
             return None
     # Remaining tail must be metadata tags or extension, not a second title/episode.
