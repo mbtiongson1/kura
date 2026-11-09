@@ -1,34 +1,35 @@
-# Roadmap and legacy boundary
+# Kura roadmap
 
-Kura is the successor product in a **new repository**, not a rename, archive or rewrite
-of MPV AniList Sync. The bootstrap architecture is direction, not implementation of
-all the planning tracks. Existing desktop/UI/player behavior remains in the legacy repo.
+Kura is a new successor repository, not a rename, archive or rewrite of MPV AniList Sync.
+The old application remains unchanged. Native issue transfer mapping:
+[issue-transfer-map.md](issue-transfer-map.md) and [JSON ledger](issue-transfer-map.json).
 
-## Landed scope (pending reviewed feature merge)
-- Architecture/security bootstrap, protected main and lightweight CI.
-- Headless Python/JSON CLI, Nyaa single-episode discovery and explicit acquisition.
-- Persisted preferences, bounded local storage, safe aria2 subprocess, truthful receipts.
-- Mock security/failure cases and a real authorized Termux loopback torrent transfer.
+## Landed
+[PR #1](https://github.com/mbtiongson1/kura/pull/1), merged as
+`82300917b2ac85d3c09c5db009789c3aa675d99b`, independently Terra-approved:
+- Architecture/security baseline, protected main, lightweight CI and security scanning.
+- Headless Python/JSON CLI, conservative Nyaa single-episode discovery and explicit aria2 acquisition.
+- Local preferences/overrides, safe scoped storage, idempotency, interruption and intentional offline resume.
+- Verified files/piece hashes/SHA-256, 54 tests and real authorized native Termux transfer evidence.
 
-## Remaining design tracks
-All links below are original issue identities; native GitHub transfer preserves redirects.
-The verified destination-number map will be committed after the approved feature merge.
+## Reconciled tracks
 
-| Original issue | Track | Reconciliation |
+| Kura issue (legacy) | Track | Remaining work |
 | --- | --- | --- |
-| [208](https://github.com/mbtiongson1/MPV-anilist-sync/issues/208) | Headless agentic core | Acquisition is the first bounded service, not completion of account/player/library/sync tools. Legacy refactor assumptions need a successor-product scope update. |
-| [219](https://github.com/mbtiongson1/MPV-anilist-sync/issues/219) | Architecture epic | Target baseline established; infrastructure discovery and detailed integration ADRs remain. Repo rename is superseded by the authorized greenfield strategy. |
-| [220](https://github.com/mbtiongson1/MPV-anilist-sync/issues/220) | Baseline/migration | Code audit and greenfield decision started; broader legacy/security/infrastructure inventory remains. No legacy credentials or archives imported. |
-| [221](https://github.com/mbtiongson1/MPV-anilist-sync/issues/221) | Watch ledger / optional Supabase / AniList | Design only, unimplemented. Local acquisition audit is not a cross-device watch ledger. |
-| [222](https://github.com/mbtiongson1/MPV-anilist-sync/issues/222) | Observation and identity | Design only; exact acquisition title matching is not canonical media identity or watch observation. |
-| [223](https://github.com/mbtiongson1/MPV-anilist-sync/issues/223) | Unraid and organizer inventory | Design only; request actual share layout/organizer before decisions. |
-| [224](https://github.com/mbtiongson1/MPV-anilist-sync/issues/224) | Followed-series acquisition | One explicit episode is implemented; subscriptions, scheduling and autonomous budgets are deferred. |
-| [225](https://github.com/mbtiongson1/MPV-anilist-sync/issues/225) | Storage lifecycle / reacquisition | No cleanup/organization/archive/reacquisition implementation. Metadata receipts are only a foundation. |
-| [226](https://github.com/mbtiongson1/MPV-anilist-sync/issues/226) | Tailscale/Plex/Android delivery | Native Termux storage only; remote playback/distribution is unimplemented. |
-| [227](https://github.com/mbtiongson1/MPV-anilist-sync/issues/227) | Bounded agent tools and policy | JSON CLI and explicit approval exist; supported Gemini integration, remote identity, API and scoped recurring grants need design. |
-| [228](https://github.com/mbtiongson1/MPV-anilist-sync/issues/228) | Termux torrent MVP | Evaluate closure only after Terra approval, green checks and verified feature merge; controlled test torrent is the authorized acceptance sample. |
+| [#2](https://github.com/mbtiongson1/kura/issues/2) (208) | Agentic core | Acquisition is the first service; account/player/library/season/sync workflows are not implemented. |
+| [#3](https://github.com/mbtiongson1/kura/issues/3) (219) | Architecture epic | Baseline established; infrastructure discovery and detailed integration ADRs remain. New repo supersedes rename plans. |
+| [#4](https://github.com/mbtiongson1/kura/issues/4) (220) | Audit / migration | Limited reuse audit and greenfield decision landed; broader legacy/infrastructure/security inventory remains. |
+| [#5](https://github.com/mbtiongson1/kura/issues/5) (221) | Watch ledger / optional sync | Design only. Acquisition audit is not a cross-device watch ledger or AniList reconciler. |
+| [#6](https://github.com/mbtiongson1/kura/issues/6) (222) | Observation / identity | Design only. Exact acquisition matching is not canonical identity or watch observation. |
+| [#7](https://github.com/mbtiongson1/kura/issues/7) (223) | Unraid inventory / organizer | Design only; discover actual shares and organizer before changing anything. |
+| [#8](https://github.com/mbtiongson1/kura/issues/8) (224) | Followed-series acquisition | One explicit episode landed; subscriptions, scheduling and autonomous budgets remain deferred. |
+| [#9](https://github.com/mbtiongson1/kura/issues/9) (225) | Storage lifecycle | No cleanup/organization/archive/reacquisition implementation; receipts are only a foundation. |
+| [#10](https://github.com/mbtiongson1/kura/issues/10) (226) | Private playback / distribution | Termux storage only; remote Plex/Tailscale/Android delivery is not implemented. |
+| [#11](https://github.com/mbtiongson1/kura/issues/11) (227) | Agent tools / policy | JSON CLI and explicit approval exist; supported Gemini interfaces, remote identity/API and recurring grants need design. |
+| [#12](https://github.com/mbtiongson1/kura/issues/12) (228) | Termux torrent MVP | **Completed/closed**, with acceptance evidence after verified merge. |
 
-The complete open-issue inventory at bootstrap contains these 11 Kura-relevant issues.
-No additional legacy-only open issues were found. Re-query before transfer; do not migrate
-old pull requests or unrelated closed history. Native transfer preserves descriptions,
-history and references; repair bare legacy issue references using verified mappings.
+All ten core/design tracks remain open; the epic is not complete merely because a
+baseline architecture exists. GUI/Rust is still an independent future client decision,
+not an approved implementation. Supabase, Unraid, Plex, Tailscale and AniList are not
+implemented. No additional providers, daemon, seasonal automation, cleanup or seeding
+policy has been added. Do not infer authorization for these from this roadmap.
