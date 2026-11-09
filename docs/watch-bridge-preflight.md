@@ -76,6 +76,10 @@ transactional, preserve all receipts, and never hold that lock for a watch lifet
 The installed Pi extension API documents `registerCommand` and `session_shutdown`;
 lifecycle implementation and abrupt-parent-death behavior remain to be tested.
 
+Existing regression suite: `PYTHONPATH=src python -m unittest discover -s tests -v`
+passed all 54 tests. An initial invocation without installation or `PYTHONPATH`
+failed during import; it did not exercise the tests. No new watch tests exist.
+
 The Supabase CLI was not found in PATH. No credentials were read or printed. Supabase,
 RLS, outbox and AniList writes remain unimplemented; cloud prerequisites are not a
 blocker for the local MVP. This preflight made no repository runtime changes.
