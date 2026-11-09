@@ -1,12 +1,36 @@
 # Kura bootstrap and torrent MVP handoff
 
+## Final feature result
+**MERGED**: [PR #1](https://github.com/mbtiongson1/kura/pull/1), squash commit
+`82300917b2ac85d3c09c5db009789c3aa675d99b` (2026-11-09 UTC).
+Shared-provider Terra independently approved exact request HEAD
+`8c1554b5a8e4625e3290540a0e7df52cae262f14`, findings empty, in round 9.
+Approval is recorded in [the PR](https://github.com/mbtiongson1/kura/pull/1#issuecomment-6729347682).
+Actual child session events confirmed provider `openai-codex`, model `gpt-6.1-terra`,
+effort `high`; no substitute reviewer or fabricated GitHub-account approval.
+Sol verified matching remote HEAD, clean checkout, green required `tests` and enforced
+main protection, then merged normally with `--match-head-commit` (no admin bypass).
+
+Post-merge exact main passed **54 native Termux tests**, original torrent transfer,
+real interruption/offline resume, 86 piece hashes and SHA-256 for 1,408,000 CC0 bytes.
+CodeQL Python analysis [42540335118](https://github.com/mbtiongson1/kura/actions/runs/42540335118)
+passed; default setup is configured (weekly). Code/secret scanning open alerts: zero
+at verification. Main protection was read back again and remains enforced.
+
+Legacy application code remains clean at `c4f15e1b508691f91c16b8081d336f5483bdf432`.
+Its existing [CI run 42533897716](https://github.com/mbtiongson1/MPV-anilist-sync/actions/runs/42533897716)
+was queried after the Kura merge: Ubuntu/macOS/Windows tests, frontend, typecheck,
+version-sync and docker all report success. This is upstream per-commit evidence,
+not a claim of rerunning the legacy suite locally or altering the old application.
+
 ## Ownership and scope
 Lead/sole implementer: Sol (`openai-codex/gpt-6.1-sol`). Independent reviewer:
 Terra shared (`openai-codex/gpt-6.1-terra`, high, read-only). No worker implementation.
 Repository: https://github.com/mbtiongson1/kura (new, public).
 Architecture-only root commit: `25f26cc` (no feature code).
 Legacy baseline: `c4f15e1b508691f91c16b8081d336f5483bdf432`; working tree clean,
-no application changes. Issue transfer is explicitly deferred until after merge.
+no application changes. Issue transfer is permitted only after the above approved,
+green feature merge and post-merge verification.
 
 ## Implementation
 - Stdlib-only Python >=3.11 headless services and typed models/provider port.
@@ -42,9 +66,10 @@ through `gh api`: PR required, admin enforcement, zero required GitHub approvals
 Required strict `tests` check added before feature push. Independent Terra approval
 is an operational merge gate, not a fabricated second-account GitHub approval.
 Secret scanning, push protection, vulnerability alerts, automated security fixes and
-private vulnerability reporting enabled. CodeQL default setup cannot select Python
-until Python reaches the default branch (REST returned 422 while main was docs-only);
-enable/verify after the feature merge. The initial secret/alert controls are active.
+private vulnerability reporting enabled. CodeQL initially returned 422 while main was
+docs-only; after Python landed it was enabled for Python and its first analysis passed.
+Default setup is configured, query suite default, weekly schedule. Initial secret/alert
+controls remained active throughout.
 CI is one Python 3.11 unit-test job on PR/main, no matrix or costly packaging.
 
 ## Validation evidence
@@ -168,9 +193,24 @@ and documented the deliberate unsupported-naming limitation. Final validation pa
 54 tests/no skips, both real original and offline-resume torrent paths, live metadata
 and diff hygiene. Latest results committed; exact-HEAD independent approval pending.
 
-## Review and outstanding work
-Independent Terra review must inspect the latest pushed HEAD, architecture, all source,
-fixture harness, tests and this report. Pending approval/green checks: do not merge.
-After an approved merge: verify main controls and runtime, native-transfer the 11 open
-Kura-relevant legacy issues (208, 219–228), preserve history and repair cross-references,
-record mappings and reconcile MVP completion against actual acceptance evidence.
+## Final review, issue transfer and outstanding scope
+Round 9 Terra approval was clean for exact HEAD `8c1554b5a8e4625e3290540a0e7df52cae262f14`;
+its read-only limits are explicit in the PR approval record. Sol separately verified
+runtime, live checks/protection and exact remote HEAD before normal protected merge.
+
+After verified merge, **11** Kura-relevant open issues were native-transferred (not
+recreated), with original descriptions/history, native transfer events and old URL
+redirects verified. GitHub changed global IDs and briefly returned stale mutation reads;
+the verifier stopped, recovered existing moves without replay, and verified all mappings.
+First-issue pre-transfer comment-count retention is an explicit ledger limitation.
+References were repaired and read back. No PRs or unrelated closed issues were moved.
+See [issue-transfer-map.md](issue-transfer-map.md) and [JSON ledger](issue-transfer-map.json).
+MVP legacy #228 is now Kura #12, closed only after acceptance reconciliation; the ten
+other design/core issues remain open. Legacy source has zero open issues and is not archived.
+The later greenfield/Sol mission supersedes old in-place/Flash assumptions without
+silently migrating personal configuration. Future tracks are in [roadmap.md](roadmap.md).
+
+No unresolved feature-review blockers remain. Known limitations remain those documented
+above: conservative naming, category-level subtitle claims, conditional shared storage,
+foreground lifecycle and no guarantee of public swarm availability. Future integrations
+and destructive automation are not implemented or authorized by the roadmap.
