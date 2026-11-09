@@ -127,7 +127,14 @@ that the leading group bracket escaped metadata checks. The ambiguity scan now c
 RSS and descriptor regressions for leading lists, compound markers and spaced ranges.
 Post-round-3 validation passed: all 53 tests (no skips), real original transfer,
 interrupted/offline resumed transfer, live metadata request, and diff hygiene. Latest
-results are in `validation-termux.txt`. Exact-HEAD Terra approval remains pending.
+results are in `validation-termux.txt`.
+Terra round 4 reviewed `c5a5cddce803028c14fc15a878884044e65a4448` and found
+version-suffixed range endpoints bypassed a word boundary. Tag checks now normalize
+version suffixes and do not require word boundaries for range/list endpoints; Unicode
+dash variants are also refused. All tag positions have versioned range/list parser,
+RSS and descriptor regressions. Refreshed validation passed: 53 tests, both real torrent
+paths and provider metadata request; same 1,408,000-byte SHA-256 receipt. Exact-HEAD
+Terra approval remains pending.
 
 ## Review and outstanding work
 Independent Terra review must inspect the latest pushed HEAD, architecture, all source,

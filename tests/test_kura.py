@@ -83,7 +83,8 @@ class Case(unittest.TestCase):
     def test_metadata_cannot_hide_batches_or_episode_markers(self):
         for tag in ("01 - 12", "03 ~ 04", "E04", "EP. 04", "S01E04", "04",
                     "03, 04", "S01E03E04", "03&04", "03 04", "03_04",
-                    "Episode3", "Season1Episode3Episode4"):
+                    "Episode3", "Season1Episode3Episode4", "01 - 12v2",
+                    "01v2 - 12v3", "03v2, 04v3", "03 04v2", "01 – 12v2"):
             self.assertIsNone(parse_title(f"Show - 03 [{tag}] (1080p).mkv"), tag)
             self.assertIsNone(parse_title(f"Show [{tag}] - 03 (1080p).mkv"), tag)
             self.assertIsNone(parse_title(f"[{tag}] Show - 03 (1080p).mkv"), tag)
@@ -399,7 +400,7 @@ class ProviderTests(unittest.TestCase):
         self.assertTrue(rows[0].trusted)
         self.assertEqual(rows[0].size_bytes, 42*1024)
         self.assertEqual(parse_rss(data.replace(b"https://nyaa.si/download", b"https://evil.test/download")), [])
-        for tag in (b"03, 04", b"S01E03E04", b"01 - 12"):
+        for tag in (b"03, 04", b"S01E03E04", b"01 - 12", b"01 - 12v2", b"03v2, 04v3"):
             self.assertEqual(parse_rss(data.replace(b"[Kura]", b"[" + tag + b"]")), [])
 
     def test_season_episode_query_uses_contiguous_form_and_dedupes(self):

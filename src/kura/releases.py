@@ -36,9 +36,12 @@ def parse_title(title: str):
     # Metadata must not conceal a batch/range or another episode marker.
     tail = clean[match.end():]
     for tag in re.findall(r"\[([^\]]*)\]|\(([^)]*)\)", title):
-        text = " ".join(tag).strip()
-        if (re.search(r"\b\d{1,4}\s*[-~+]\s*\d{1,4}\b", text) or
-                re.search(r"\b\d{1,4}\s*(?:[,;&/+_]|and|to|through)\s*\d{1,4}\b|\b\d{1,3}\s+\d{1,3}\b", text, re.I) or
+        text = unicodedata.normalize("NFKC", " ".join(tag).strip())
+        text = re.sub(r"(?<=\d)v\d+", "", text, flags=re.I)
+        # Do not require word boundaries after endpoints: version suffixes and
+        # adjacent labels must never disguise a range/list as codec metadata.
+        if (re.search(r"\d\s*(?:[-~+–—,;&/+_]|and|to|through)\s*\d", text, re.I) or
+                re.search(r"\b\d{1,3}\s+\d{1,3}(?!\d)", text) or
                 re.search(r"(?:S\d{1,2}E|E|EP\.?\s*|Episodes?\s*)\d{1,4}", text, re.I) or
                 re.fullmatch(r"\d{1,3}", text)):
             return None
