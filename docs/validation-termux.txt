@@ -1,0 +1,86 @@
+test_fresh_process_preferences_and_json_errors (test_kura.CLITests.test_fresh_process_preferences_and_json_errors) ... ok
+test_sigkill_terminates_downloader_child (test_kura.CLITests.test_sigkill_terminates_downloader_child) ... ok
+test_all_preferences_enforced (test_kura.Case.test_all_preferences_enforced) ... ok
+test_ambiguity_not_resolved_by_seeders (test_kura.Case.test_ambiguity_not_resolved_by_seeders) ... ok
+test_bad_preferences (test_kura.Case.test_bad_preferences) ... ok
+test_bencode_attacks (test_kura.Case.test_bencode_attacks) ... ok
+test_completion_and_duplicate (test_kura.Case.test_completion_and_duplicate) ... ok
+test_completion_piece_verification (test_kura.Case.test_completion_piece_verification) ... ok
+test_confirmation_required (test_kura.Case.test_confirmation_required) ... ok
+test_crc_descriptor_is_accepted (test_kura.Case.test_crc_descriptor_is_accepted) ... ok
+test_descriptor_drops_all_urls (test_kura.Case.test_descriptor_drops_all_urls) ... ok
+test_descriptor_group_and_resolution_always_match_selection (test_kura.Case.test_descriptor_group_and_resolution_always_match_selection) ... ok
+test_descriptor_hash_mismatch (test_kura.Case.test_descriptor_hash_mismatch) ... ok
+test_disk_reserve (test_kura.Case.test_disk_reserve) ... ok
+test_downloader_inherits_mutation_lock (test_kura.Case.test_downloader_inherits_mutation_lock) ... ok
+test_dry_run_no_downloader_no_job (test_kura.Case.test_dry_run_no_downloader_no_job) ... ok
+test_duplicate_feed_rows (test_kura.Case.test_duplicate_feed_rows) ... ok
+test_exit_zero_without_payload_fails (test_kura.Case.test_exit_zero_without_payload_fails) ... ok
+test_failure_resume_and_interruption (test_kura.Case.test_failure_resume_and_interruption) ... ok
+test_group_ranking (test_kura.Case.test_group_ranking) ... ok
+test_lock_prevents_concurrent_mutation (test_kura.Case.test_lock_prevents_concurrent_mutation) ... ok
+test_metadata_cannot_hide_batches_or_episode_markers (test_kura.Case.test_metadata_cannot_hide_batches_or_episode_markers) ... ok
+test_missing_downloader (test_kura.Case.test_missing_downloader) ... ok
+test_missing_short_and_control_file_not_complete (test_kura.Case.test_missing_short_and_control_file_not_complete) ... ok
+test_multifile_and_symlink_metadata_rejected (test_kura.Case.test_multifile_and_symlink_metadata_rejected) ... ok
+test_no_source (test_kura.Case.test_no_source) ... ok
+test_path_boundary (test_kura.Case.test_path_boundary) ... ok
+test_preferences_persist_and_override (test_kura.Case.test_preferences_persist_and_override) ... ok
+test_query_validation (test_kura.Case.test_query_validation) ... ok
+test_repeated_python_interrupt_during_cleanup_still_reaps (test_kura.Case.test_repeated_python_interrupt_during_cleanup_still_reaps) ... ok
+test_resume_counts_allocated_not_logical_size (test_kura.Case.test_resume_counts_allocated_not_logical_size) ... ok
+test_resume_uses_recorded_descriptor_without_provider_or_seeder_gate (test_kura.Case.test_resume_uses_recorded_descriptor_without_provider_or_seeder_gate) ... ok
+test_resume_without_record_refused (test_kura.Case.test_resume_without_record_refused) ... ok
+test_sigkill_recovery (test_kura.Case.test_sigkill_recovery) ... ok
+test_size_bound_authoritative (test_kura.Case.test_size_bound_authoritative) ... ok
+test_state_symlink (test_kura.Case.test_state_symlink) ... ok
+test_subprocess_safe_and_nonzero (test_kura.Case.test_subprocess_safe_and_nonzero) ... ok
+test_subprocess_timeout_and_ctrl_c_terminate (test_kura.Case.test_subprocess_timeout_and_ctrl_c_terminate) ... ok
+test_symlink_payload_rejected (test_kura.Case.test_symlink_payload_rejected) ... ok
+test_title_parser (test_kura.Case.test_title_parser) ... ok
+test_unexpected_file_and_resume_symlink (test_kura.Case.test_unexpected_file_and_resume_symlink) ... ok
+test_unsafe_torrent_names (test_kura.Case.test_unsafe_torrent_names) ... ok
+test_untrusted_requires_explicit_selection (test_kura.Case.test_untrusted_requires_explicit_selection) ... ok
+test_wrong_descriptor_identity (test_kura.Case.test_wrong_descriptor_identity) ... ok
+test_bounded_response (test_kura.ProviderTests.test_bounded_response) ... ok
+test_feed_fixture (test_kura.ProviderTests.test_feed_fixture) ... ok
+test_private_dns (test_kura.ProviderTests.test_private_dns) ... ok
+test_provider_offline (test_kura.ProviderTests.test_provider_offline) ... ok
+test_redirect_rejected (test_kura.ProviderTests.test_redirect_rejected) ... ok
+test_season_episode_query_uses_contiguous_form_and_dedupes (test_kura.ProviderTests.test_season_episode_query_uses_contiguous_form_and_dedupes) ... ok
+test_url_allowlist (test_kura.ProviderTests.test_url_allowlist) ... ok
+test_utf16_entities_rejected (test_kura.ProviderTests.test_utf16_entities_rejected) ... ok
+test_xml_entities_rejected (test_kura.ProviderTests.test_xml_entities_rejected) ... ok
+test_repeated_sigint_retains_lock_until_slow_child_reaped (test_lifecycle.RepeatedInterruptTests.test_repeated_sigint_retains_lock_until_slow_child_reaped) ... ok
+
+----------------------------------------------------------------------
+Ran 54 tests in 8.602s
+
+OK
+{
+  "success": true,
+  "platform": "android",
+  "python": "3.14.6",
+  "aria2": "aria2 version 1.37.0",
+  "fixture": "Original CC0 payload; loopback tracker and aria2 seeder; no public media",
+  "test_seams": "Fixture Nyaa HTTPS fetch; local tracker/peer-port substitution only",
+  "search": "passed",
+  "dry_run": "passed",
+  "download": "complete",
+  "duplicate": "rejected",
+  "status": "complete",
+  "evidence": {
+    "path": "/data/data/com.termux/files/usr/tmp/kura-authorized-untr9vck/home/.local/share/kura/downloads/de580238510450594c8beadb6aac15a3a1803371/[Kura] Kura Sample - 03 (1080p).txt",
+    "size_bytes": 1408000,
+    "sha256": "d57edf4cead28f476e667b9c2b1b438df65b513123312cbdb7d7fda60cd7da52",
+    "pieces_verified": 86
+  },
+  "partial_resume": {
+    "state": "complete",
+    "provider": "not consulted",
+    "allocated_before": 114688,
+    "constrained_free": 68403200,
+    "sha256": "d57edf4cead28f476e667b9c2b1b438df65b513123312cbdb7d7fda60cd7da52"
+  }
+}
+{"schema_version": 1, "success": true, "phase": "search", "data": {"query": "Kura Authorized Sample", "episode": 3, "preferences": {"resolution": "1080p", "groups": [], "subtitles": "english", "max_size_mb": 1500, "min_seeders": 1, "destination": "private"}, "candidates": []}, "error": null}

@@ -1,0 +1,106 @@
+"""Conservative parsing; intentionally decline fuzzy matches and unsupported naming."""
+import re
+import unicodedata
+from .models import KuraError, Preferences, Release
+
+
+def normalize(value: str) -> str:
+    return " ".join(re.findall(r"\w+", unicodedata.normalize("NFKC", value).casefold()))
+
+
+def query_check(title: str, episode: int):
+    if not normalize(title) or len(title) > 200 or any(ord(c) < 32 for c in title):
+        raise KuraError("invalid_query", "Title must be 1..200 printable characters")
+    if not 1 <= episode <= 1899:
+        raise KuraError("invalid_query", "Episode must be 1..1899")
+
+
+def parse_title(title: str):
+    if len(title) > 500 or any(ord(c) < 32 for c in title):
+        return None
+    if re.search(r"\b(batch|complete|all episodes)\b|\d[-~+]\d|\d\s*[~+]\s*\d", title, re.I):
+        return None
+    group = re.match(r"^\[([^\]]+)\]\s*", title)
+    clean = title[group.end():] if group else title
+    # Only a well-delimited single episode; no speculative bracket-number fallback.
+    patterns = [r"\s+-\s+(\d{1,4})(?:v\d+)?(?=\s|\[|\(|\.|$)",
+                r"\s+S(\d{1,2})E(\d{1,4})(?:v\d+)?(?=\s|\[|\(|\.|$)"]
+    matches = [(i, m) for i, p in enumerate(patterns) for m in re.finditer(p, clean, re.I)]
+    if len(matches) != 1:
+        return None
+    kind, match = matches[0]
+    series = clean[:match.start()].strip()
+    ep = int(match.group(1 if kind == 0 else 2))
+    if kind == 1:
+        series += " S" + str(int(match.group(1))).zfill(2)
+    # Metadata must not conceal a batch/range or another episode marker.
+    tail = clean[match.end():]
+    for tag in re.findall(r"\[([^\]]*)\]|\(([^)]*)\)", title):
+        text = unicodedata.normalize("NFKC", " ".join(tag).strip())
+        text = re.sub(r"(?<=\d)v\d+", "", text, flags=re.I)
+        text = "".join("-" if unicodedata.category(c) == "Pd" or c == "−" else c for c in text)
+        # A standalone CRC is common release metadata, not episode prose.
+        if (re.fullmatch(r"[0-9a-f]{8}", text, re.I) and
+                not re.search(r"E\d{1,4}E\d{1,4}", text, re.I)):
+            continue
+        if re.fullmatch(r"(?:19|20)\d{2}", text):
+            continue  # Standalone release year, not a season/episode claim.
+        # Unknown punctuation must not turn two episode-looking numbers into
+        # harmless metadata. Exempt explicit dimensions/frame-rate/audio forms,
+        # not arbitrary numeric prose or an ever-growing separator allowlist.
+        numeric = re.sub(r"\b\d{3,4}\s*[x×]\s*\d{3,4}\b", " ", text, flags=re.I)
+        numeric = re.sub(r"\b\d{1,3}(?:\.\d+)?\s*(?:fps|Hz)\b", " ", numeric, flags=re.I)
+        if (re.fullmatch(r"[1-9]\.[01]", text) or
+                re.search(r"\b(?:AAC|FLAC|AC-?3|E-?AC-?3|DTS|DDP|OPUS|VORBIS)", text, re.I)):
+            numeric = re.sub(r"(?<!\d)[1-9]\.[01](?!\d)", " ", numeric)
+        numeric = re.sub(r"(?<!\w)(?:[xh][ ._-]?(?:264|265|266)|AV1|VP[89]|AC-?3|E-?AC-?3)(?!\w)", " ", numeric, flags=re.I)
+        numeric = re.sub(r"(?<!\w)(?:(?:480|720|1080|2160)p|(?:8|10|12)[ -]?bits?|Hi(?:8|10|12)P|v\d+)(?!\w)", " ", numeric, flags=re.I)
+        # Fail closed on ANY unexplained numeric metadata, including adjacent
+        # prose and season/volume labels. Unknown numeric group tags are unsupported.
+        unclassified_numeric = bool(re.search(r"\d", numeric))
+        # Do not require word boundaries after endpoints: version suffixes and
+        # adjacent labels must never disguise a range/list as codec metadata.
+        if (unclassified_numeric or
+                re.search(r"\d\s*(?:[-~+,;&/+_]|and|to|through)\s*\d", text, re.I) or
+                re.search(r"(?:S\d{1,2}(?:E\d{1,4})?|(?:E|EP\.?\s*|Episodes?\s*|Seasons?\s*)\d{1,4})", text, re.I) or
+                re.fullmatch(r"\d{1,3}", text)):
+            return None
+    # Remaining tail must be metadata tags or extension, not a second title/episode.
+    tail = re.sub(r"\[[^\]]*\]|\([^)]*\)", "", tail)
+    tail = re.sub(r"\.(mkv|mp4|webm|txt)$", "", tail.strip(), flags=re.I).strip()
+    if tail or not series or not 1 <= ep <= 1899:
+        return None
+    resolutions = set(re.findall(r"\b(480p|720p|1080p|2160p)\b", title, re.I))
+    resolution = next(iter(resolutions)).lower() if len(resolutions) == 1 else "unknown"
+    return series, ep, group.group(1) if group else "unknown", resolution
+
+
+def eligible(releases: list[Release], title: str, episode: int, p: Preferences) -> list[Release]:
+    groups = [g.casefold() for g in p.groups]
+    rows = [r for r in releases if
+            normalize(r.series) == normalize(title) and r.episode == episode and
+            (p.resolution == "any" or r.resolution == p.resolution) and
+            (not groups or r.group.casefold() in groups) and
+            (p.subtitles == "any" or r.subtitles == p.subtitles) and
+            0 < r.size_bytes <= p.max_size_mb * 1024**2 and r.seeders >= p.min_seeders]
+    def tier(r):
+        return groups.index(r.group.casefold()) if groups else 0
+    # Dedupe same infohash; never treat seeder count as identity confidence.
+    unique = {r.infohash: r for r in rows}
+    return sorted(unique.values(), key=lambda r: (tier(r), -r.seeders, r.id))
+
+
+def select(rows: list[Release], p: Preferences, release_id: str | None) -> Release:
+    if release_id:
+        rows = [r for r in rows if r.id == release_id]
+    else:
+        rows = [r for r in rows if r.trusted]
+        if rows and p.groups:
+            group = rows[0].group.casefold()
+            rows = [r for r in rows if r.group.casefold() == group]
+    if not rows:
+        raise KuraError("no_match", "No release satisfies title, episode and preferences")
+    if len(rows) != 1:
+        raise KuraError("ambiguous", "Choose an eligible --release-id from search; no download authorized",
+                        candidates=[r.json() for r in rows])
+    return rows[0]
