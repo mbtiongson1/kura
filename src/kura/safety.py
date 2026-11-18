@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 import stat
+import sys
 
 from .models import KuraError
 
@@ -29,8 +30,13 @@ def ensure_dir(path: Path):
 def destination(value: str) -> Path:
     # No arbitrary absolute path or parent traversal, including CLI overrides.
     kind, _, suffix = value.partition("/")
+    shared_root = (
+        Path.home() / "Downloads" / "Kura"
+        if sys.platform == "darwin"
+        else Path("/storage/emulated/0/Download/Kura")
+    )
     roots = {"private": private_root() / "downloads",
-             "shared": Path("/storage/emulated/0/Download/Kura")}
+             "shared": shared_root}
     if kind not in roots or any(p in ("", ".", "..") for p in suffix.split("/")) and suffix:
         raise KuraError("unsafe_destination", "Use private[/folder] or shared[/folder]")
     if "\\" in value or any(ord(c) < 32 for c in value) or len(value) > 240:
@@ -38,7 +44,9 @@ def destination(value: str) -> Path:
     path = roots[kind] / suffix
     no_symlinks(path)
     if kind == "shared" and not roots[kind].parent.is_dir():
-        raise KuraError("storage_permission", "Run termux-setup-storage before using shared storage")
+        hint = ("Create ~/Downloads before using shared storage" if sys.platform == "darwin"
+                else "Run termux-setup-storage before using shared storage")
+        raise KuraError("storage_permission", hint)
     return path
 
 

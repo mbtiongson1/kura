@@ -16,8 +16,10 @@ RESERVE = 64 * 1024**2
 
 def parent_death_guard():
     """Linux/Android: terminate aria2 even if its supervising Python gets SIGKILL."""
+    if sys.platform == "darwin":
+        return None
     if not (sys.platform.startswith("linux") or sys.platform == "android"):
-        raise KuraError("unsupported_platform", "This MVP requires native Termux or Linux")
+        raise KuraError("unsupported_platform", "This MVP requires native Termux, Linux or macOS")
     libc = ctypes.CDLL(None, use_errno=True)
     parent = os.getpid()
 
@@ -64,7 +66,8 @@ def run(torrent: Torrent, directory: Path, state_root: Path, timeout: int = 1800
         lock_fd: int | None = None) -> dict:
     binary = shutil.which("aria2c")
     if not binary:
-        raise KuraError("downloader_missing", "Install aria2: pkg install aria2")
+        hint = "brew install aria2" if sys.platform == "darwin" else "pkg install aria2"
+        raise KuraError("downloader_missing", f"Install aria2: {hint}")
     ensure_dir(directory)
     payload = directory / torrent.name
     allocated = 0
