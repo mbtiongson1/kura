@@ -71,7 +71,7 @@ def exercise():
     real_popen = subprocess.Popen
     seeder = None
     with tempfile.TemporaryDirectory(prefix="kura-authorized-") as temp:
-        root = Path(temp)
+        root = Path(temp).resolve()
         seed = root / "seed"
         seed.mkdir()
         (seed / NAME).write_bytes(PAYLOAD)

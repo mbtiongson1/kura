@@ -27,7 +27,7 @@ from helpers import FakeProvider, NAME, PAYLOAD, sample
 class Case(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         self.paths = patch("kura.safety.private_root", return_value=self.root / "state")
         self.paths.start()
         self.store = Store(self.root / "state")
@@ -503,7 +503,7 @@ class CLITests(unittest.TestCase):
 
     def test_fresh_process_preferences_and_json_errors(self):
         with tempfile.TemporaryDirectory() as root:
-            env = {**os.environ, "HOME": root}
+            env = {**os.environ, "HOME": str(Path(root).resolve())}
             def call(*args):
                 p = subprocess.run([sys.executable, "-m", "kura", *args], capture_output=True, text=True, env=env)
                 return p.returncode, json.loads(p.stdout)
@@ -514,6 +514,15 @@ class CLITests(unittest.TestCase):
             self.assertEqual(result["error"]["code"], "invalid_arguments")
             self.assertEqual(call("downloads", "status")[1]["data"]["downloads"], [])
 
+
+    def test_parent_death_guard_platform_support(self):
+        from kura.downloader import parent_death_guard
+        with patch("kura.downloader.sys.platform", "darwin"):
+            self.assertIsNone(parent_death_guard())
+        with patch("kura.downloader.sys.platform", "win32"):
+            with self.assertRaises(KuraError) as caught:
+                parent_death_guard()
+            self.assertEqual(caught.exception.code, "unsupported_platform")
 
 if __name__ == "__main__":
     unittest.main()

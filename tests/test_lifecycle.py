@@ -12,7 +12,8 @@ from kura.models import KuraError
 from kura.store import Store
 
 
-@unittest.skipUnless(sys.platform.startswith("linux") or sys.platform == "android", "Linux/Android")
+@unittest.skipUnless(sys.platform.startswith("linux") or sys.platform in ("android", "darwin"),
+                     "Linux/Android/macOS")
 class RepeatedInterruptTests(unittest.TestCase):
     def wait_file(self, path, timeout=10):
         deadline = time.monotonic() + timeout
@@ -24,7 +25,7 @@ class RepeatedInterruptTests(unittest.TestCase):
 
     def test_repeated_sigint_retains_lock_until_slow_child_reaped(self):
         with tempfile.TemporaryDirectory(prefix="kura-signals-") as temp:
-            root = Path(temp)
+            root = Path(temp).resolve()
             pidfile, terminating, reaped = (root / x for x in ("pid", "terminating", "reaped"))
             fake = root / "aria2c"
             fake.write_text(
@@ -76,7 +77,11 @@ class RepeatedInterruptTests(unittest.TestCase):
                 self.assertEqual(parent.returncode, 0, stderr.decode())
                 self.assertEqual(reaped.read_text(), "reaped")
                 # Parent only returns from run after wait() has reaped the child.
-                self.assertFalse(Path(f"/proc/{child_pid}").exists())
+                if Path("/proc").is_dir():
+                    self.assertFalse(Path(f"/proc/{child_pid}").exists())
+                else:
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(child_pid, 0)
             finally:
                 if parent.poll() is None:
                     parent.kill()
