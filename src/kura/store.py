@@ -47,6 +47,8 @@ class Store:
             CREATE TABLE IF NOT EXISTS events (
                 id INTEGER PRIMARY KEY, at REAL NOT NULL, infohash TEXT NOT NULL,
                 state TEXT NOT NULL, detail TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS aliases (
+                key TEXT PRIMARY KEY, value TEXT NOT NULL, fetched_at REAL NOT NULL);
         """)
         if self.db.execute("SELECT version FROM meta").fetchone()[0] != 1:
             raise KuraError("state_version", "Unsupported local database version")
@@ -80,6 +82,27 @@ class Store:
 
     def jobs(self) -> list[dict]:
         return [json.loads(r[0]) for r in self.db.execute("SELECT value FROM jobs ORDER BY rowid")]
+
+    def alias(self, key: str) -> dict | None:
+        """Cached alias resolution or None. Cache misses and errors are never fatal."""
+        try:
+            row = self.db.execute("SELECT value, fetched_at FROM aliases WHERE key=?", (key,)).fetchone()
+        except sqlite3.Error:
+            return None
+        if not row:
+            return None
+        try:
+            return {**json.loads(row[0]), "fetched_at": row[1]}
+        except (TypeError, ValueError):
+            return None
+
+    def save_alias(self, key: str, value: dict, fetched_at: float):
+        try:
+            with self.db:
+                self.db.execute("INSERT OR REPLACE INTO aliases VALUES (?,?,?)",
+                                (key, json.dumps(value), fetched_at))
+        except sqlite3.Error:
+            pass  # A cache write must never fail a read-only discovery command.
 
     def descriptor(self, infohash: str) -> bytes | None:
         row = self.db.execute("SELECT value FROM descriptors WHERE infohash=?", (infohash,)).fetchone()

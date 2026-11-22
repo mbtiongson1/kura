@@ -75,10 +75,12 @@ def parse_title(title: str):
     return series, ep, group.group(1) if group else "unknown", resolution
 
 
-def eligible(releases: list[Release], title: str, episode: int, p: Preferences) -> list[Release]:
+def eligible(releases: list[Release], titles, episode: int, p: Preferences) -> list[Release]:
+    """Acquisition policy. `titles` is one spelling or a bounded alias set."""
+    wanted = {normalize(t) for t in ([titles] if isinstance(titles, str) else titles) if normalize(t)}
     groups = [g.casefold() for g in p.groups]
     rows = [r for r in releases if
-            normalize(r.series) == normalize(title) and r.episode == episode and
+            normalize(r.series) in wanted and r.episode == episode and
             (p.resolution == "any" or r.resolution == p.resolution) and
             (not groups or r.group.casefold() in groups) and
             (p.subtitles == "any" or r.subtitles == p.subtitles) and

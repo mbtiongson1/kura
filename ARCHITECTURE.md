@@ -18,6 +18,11 @@ Python is an MVP decision for portability, not a requirement for future clients.
   authorization, idempotency and completion verification. Dependency-injected ports.
 - **Provider adapters**: search and bounded descriptor retrieval. MVP Nyaa RSS only.
   Results are untrusted data; a provider cannot authorize a download or write paths.
+- **Identity/alias adapter**: optional AniList GraphQL lookup (one bounded, unauthenticated
+  request, no credentials, redirects or proxy inheritance) maps a user alias to bounded
+  candidate spellings. It is discovery-only: it widens which titles Nyaa is queried for,
+  never preferences, release choice or approval. Matching is exact or whole-word subset;
+  equal-best candidates are refused. Results are cached with a TTL in local state.
 - **Downloader adapter**: local aria2c argument-array subprocess, no shell or RPC.
   Validated torrent metadata supplies exact expected paths, size and piece hashes.
 - **Local repository**: versioned preferences and acquisition/audit records in SQLite;
@@ -35,6 +40,7 @@ or ambiguity -> bounded torrent metadata inspection -> dry-run proposal -> expli
 approval -> disk/path checks + idempotency reservation -> foreground aria2 ->
 verify exit, exact files, sizes and piece hashes -> durable truthful receipt.
 No AniList authentication, seasonal automation, daemon or autonomous cleanup.
+Public AniList alias lookup is read-only metadata; OAuth identity remains future work.
 RSS hints never replace authoritative descriptor lengths/hashes.
 Interrupted jobs retain partial files; retries require explicit authorization.
 
