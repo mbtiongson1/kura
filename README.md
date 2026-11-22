@@ -47,6 +47,7 @@ All runtime code uses Python's standard library. On a fresh virtualenv, do not u
 
 ## Commands
 ```sh
+kura aliases "some alias"
 kura search "Anime Title" --episode 3 --json
 kura download "Anime Title" --episode 3 --dry-run
 # Only for a torrent you have permission to acquire:
@@ -63,6 +64,32 @@ The downloader lifecycle guard currently requires Linux/Android; it is not a des
 Windows/macOS acquisition implementation.
 Preferences persist across invocations; search/download accept the same overrides
 without changing saved values. `--groups ''` clears the allowed group list.
+
+### Alias resolution (AniList)
+Titles are often known by an alias rather than the romanized Nyaa series name.
+`kura aliases "dark item"` performs one bounded, unauthenticated AniList GraphQL query
+and returns the candidate spellings it matched. `search` and `download` use the same
+lookup before querying Nyaa, so the alias resolves without hand-guessing:
+
+```sh
+kura aliases "dark item"
+# {"status": "resolved", "identity": {"anilist_id": 186742,
+#  "matched": "A Certain Dark Item", "titles": ["A Certain Dark Item",
+#  "Toaru Anbu no ITEM", ...]}}
+kura search "dark item" --episode 7
+kura download "dark item" --episode 7 --yes
+```
+
+Alias metadata is untrusted discovery input only. It never authorizes a download,
+never relaxes preferences, and never picks a release: resolution must be an exact title
+or a whole-word subset match, and equal-best candidates from different AniList entries
+are refused as `ambiguous` rather than guessed. Results are cached for 7 days in the
+private state database (network failures for 10 minutes) and `--refresh` re-queries.
+Network failure degrades to `status: unavailable` and the literal title, so search still
+works offline from cache. `--no-alias` disables resolution for deterministic/offline use.
+Unknown or unsupported romanizations still need `--release-id` or `--groups`.
+A resolved identity also keys duplicate receipts, so a later request under another alias
+cannot re-acquire the same episode.
 English/raw subtitle preference means the provider category, **not** inspected subtitle
 tracks or a guarantee of language. Nyaa trusted status is not a legal-rights guarantee.
 

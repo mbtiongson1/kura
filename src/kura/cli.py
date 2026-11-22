@@ -8,6 +8,7 @@ import sqlite3
 import sys
 
 from .core import Core
+from .anilist import AniList
 from .models import KuraError
 from .provider import Nyaa
 from .safety import private_root
@@ -36,6 +37,8 @@ def parser():
         q.add_argument("title")
         q.add_argument("--episode", type=int, required=True)
         q.add_argument("--json", action="store_true", help="JSON is the default for every command")
+        q.add_argument("--no-alias", action="store_true",
+                       help="Skip AniList alias resolution; use the literal title only")
         options(q)
         if name == "download":
             approval = q.add_mutually_exclusive_group()
@@ -43,6 +46,10 @@ def parser():
             approval.add_argument("--yes", action="store_true", help="Confirm authorization for this single torrent")
             q.add_argument("--resume", action="store_true", help="Explicitly retry an interrupted/failed acquisition")
             q.add_argument("--release-id", help="Disambiguate using an eligible Nyaa release ID")
+    q = sub.add_parser("aliases")
+    q.add_argument("title")
+    q.add_argument("--refresh", action="store_true", help="Ignore the cached resolution")
+    q.add_argument("--json", action="store_true")
     q = sub.add_parser("downloads")
     q.add_argument("operation", choices=["status"])
     q.add_argument("--json", action="store_true")
@@ -66,7 +73,7 @@ def confirm(plan):
 def execute(args):
     store = Store(private_root())
     try:
-        core = Core(store, Nyaa())
+        core = Core(store, Nyaa(), None if getattr(args, "no_alias", False) else AniList())
         overrides = {key: getattr(args, key) for key in asdict(store.prefs())
                      if getattr(args, key, None) is not None}
         if "groups" in overrides:
@@ -76,14 +83,18 @@ def execute(args):
                 with store.lock():
                     store.save_prefs(core.preferences(overrides))
             return asdict(store.prefs())
+        if args.command == "aliases":
+            return {"query": args.title, **core.alias_status(args.title, refresh=args.refresh)}
         if args.command == "downloads":
             return core.status()
         if args.command == "search":
-            p, rows = core.search(args.title, args.episode, overrides)
+            p, rows, alias = core.search(args.title, args.episode, overrides,
+                                         aliases=not getattr(args, "no_alias", False))
             return {"query": args.title, "episode": args.episode, "preferences": asdict(p),
-                    "candidates": [r.json() for r in rows]}
+                    "identity": alias, "candidates": [r.json() for r in rows]}
         return core.download(args.title, args.episode, overrides, dry_run=args.dry_run,
-                             yes=args.yes, resume=args.resume, release_id=args.release_id, confirm=confirm)
+                             yes=args.yes, resume=args.resume, release_id=args.release_id, confirm=confirm,
+                             aliases=not args.no_alias)
     finally:
         store.db.close()
 
