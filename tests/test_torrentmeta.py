@@ -238,7 +238,8 @@ class ParseCase(unittest.TestCase):
         self.assertEqual(tracker_host("http://[::1]:80/a"), "::1")
         for bad in ("tracker.example/announce", "", "http://", "http://a..example/", "http://a%65.example/",
                     "http://good.example\\@bad.test/", "http://a.example/ x", "http://a b.example/",
-                    "http://[bad/"):
+                    "http://[bad/", "http://t.example:invalid/a", "http://t.example:99999/a",
+                    "1http://t.example/a", "://t.example/a"):
             with self.subTest(url=bad):
                 self.assertIsNone(tracker_host(bad))
 

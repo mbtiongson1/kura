@@ -82,7 +82,9 @@ class ProtectCase(unittest.TestCase):
         for extra in ({b"announce-list": [[b"http://ok.example/a"], b"bad"]},
                       {b"announce-list": [[5]]}, {b"announce-list": b"x"},
                       {b"announce": b"not a url"}, {b"announce": b"tracker.example/a"},
-                      {b"announce": b"http://a%65.example/a"}, {b"announce": b"http://a.example\\@b.test/"},
+                      {b"announce": b"http://a%65.example/a"}, {b"announce": b"http://tracker.example:invalid/announce"},
+                      {b"announce": b"http://tracker.example:99999/announce"},
+                      {b"announce": b"1http://tracker.example/announce"}, {b"announce": b"http://a.example\\@b.test/"},
                       {b"announce-list": [[b"http://a.example/" + b"x" * 2100]]}):
             with self.subTest(extra=extra):
                 meta, result = self.check(root_extra=extra)
@@ -139,16 +141,20 @@ class ProtectCase(unittest.TestCase):
         urls = [f"http://tracker.example/announce?passkey={secret}",
                 f"http://user:{secret}@tracker.example/announce",
                 f"http://tracker.example/{secret}abcdefgh/announce",
+                "http://tracker.example/shortsecret/announce", "http://tracker.example/k/announce",
+                "http://tracker.example/announce/extra",
                 f"http://tracker.example/announce#{secret}",
                 f"http://tracker.example/announce?",
                 "ftp://tracker.example/announce", "ws://tracker.example/announce",
-                "http://tracker.example/announce"]
+                "http://tracker.example/announce", "http://tracker.example/announce.php", "udp://tracker.example:80"]
         meta, result = self.check(announce=urls[0], announce_list=[urls[1:]])
         self.assertFalse(result.protected)
         link = magnet(meta, result)
         self.assertNotIn(secret, link)
         self.assertNotIn("passkey", link)
-        self.assertEqual(parse_qs(urlsplit(link).query)["tr"], ["http://tracker.example/announce"])
+        self.assertEqual(parse_qs(urlsplit(link).query)["tr"], ["http://tracker.example/announce",
+                                                                      "http://tracker.example/announce.php",
+                                                                      "udp://tracker.example:80"])
         self.assertNotIn(secret, repr(meta.json()))
 
     def test_policy_line_errors_carry_line_numbers(self):

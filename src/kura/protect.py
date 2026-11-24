@@ -3,8 +3,8 @@
 Fail closed. A private flag, a denylisted tracker host or source tag, a protected
 infohash, malformed announce data or an unparsable descriptor all mean *protected*.
 Private-tracker announce URLs embed credentials, so a magnet link is only produced for
-unprotected torrents and only from announce URLs that carry no query, userinfo or
-credential-looking path. Pure functions; the only I/O is ``load_policy`` reading its two
+unprotected torrents and only from announce URLs that carry no query or userinfo and use a
+conventional path. Pure functions; the only I/O is ``load_policy`` reading its two
 files.
 """
 from dataclasses import dataclass
@@ -21,7 +21,7 @@ MAX_POLICY_LINES = 1000
 MAX_POLICY_BYTES = 1024**2
 _LABEL = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
 _INFOHASH = re.compile(r"[0-9a-fA-F]{40}")
-_SECRET_SEGMENT = re.compile(r"[0-9A-Za-z_-]{20,}")
+_PUBLIC_PATHS = frozenset({"", "/", "/announce", "/announce.php"})
 
 
 @dataclass(frozen=True)
@@ -171,8 +171,9 @@ def _public_tracker(url: str) -> bool:
         return False
     if "?" in url or "#" in url or "@" in parts.netloc or parts.username or parts.password:
         return False
-    # Credentials are sometimes embedded in the path (/<key>/announce).
-    return not any(_SECRET_SEGMENT.fullmatch(seg) for seg in parts.path.split("/"))
+    # Credentials are sometimes embedded in the path (/<key>/announce), and no heuristic can
+    # prove an arbitrary path is credential-free, so only the conventional paths are emitted.
+    return parts.path in _PUBLIC_PATHS
 
 
 def magnet(meta: TorrentMeta, protection: Protection) -> str | None:

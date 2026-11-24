@@ -82,7 +82,11 @@ def tracker_host(url: str) -> str | None:
     if not isinstance(url, str) or "\\" in url or any(ord(c) <= 32 or ord(c) == 127 for c in url):
         return None
     try:
-        host = urlsplit(url).hostname
+        parts = urlsplit(url)
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9+.-]*", parts.scheme):
+            return None
+        parts.port  # raises ValueError on a non-numeric or out-of-range port
+        host = parts.hostname
         if not host:
             return None
         host = host.rstrip(".").encode("idna").decode("ascii").lower()
