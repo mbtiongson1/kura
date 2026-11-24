@@ -10,10 +10,12 @@ Magnet links and sanitized info dictionaries are accepted only for public, unpro
 torrents; anything else is refused here as defence in depth.
 """
 from contextlib import contextmanager
+import hashlib
 import json
 import re
 import sqlite3
 import time
+from urllib.parse import parse_qsl, urlsplit
 
 from .models import KuraError
 
@@ -44,6 +46,38 @@ def _infohash(value) -> str:
     return value
 
 
+def _check_magnet(magnet, infohash: str):
+    """Accept only a bare btih magnet with dn and credential-free http/https/udp trackers."""
+    try:
+        parts = urlsplit(magnet)
+        pairs = parse_qsl(parts.query, keep_blank_values=True, strict_parsing=True)
+    except (TypeError, ValueError):
+        raise _invalid("Magnet is not parseable")
+    if parts.scheme != "magnet" or parts.netloc or parts.path or parts.fragment:
+        raise _invalid("Magnet is not a plain magnet link")
+    xt = [v for k, v in pairs if k == "xt"]
+    if xt != ["urn:btih:" + infohash] or any(k not in ("xt", "dn", "tr") for k, _ in pairs):
+        raise _invalid("Magnet must carry only this infohash, a name and trackers")
+    for k, v in pairs:
+        if k != "tr":
+            continue
+        try:
+            t = urlsplit(v)
+            _ = t.port
+        except ValueError:
+            raise _invalid("Magnet tracker is not parseable")
+        if (t.scheme not in ("http", "https", "udp") or not t.hostname or t.query or t.fragment
+                or "@" in t.netloc or t.username or t.password):
+            raise _invalid("Magnet tracker must be a credential-free http, https or udp URL")
+
+
+def _check_info(info, infohash: str):
+    """The stored info must be exactly the hashed info dictionary, so it holds no URLs."""
+    if (not isinstance(info, (bytes, bytearray)) or not info.startswith(b"d")
+            or hashlib.sha1(info).hexdigest() != infohash):
+        raise _invalid("Info must be the bencoded info dictionary matching the infohash")
+
+
 def _load(text):
     return json.loads(text) if text is not None else None
 
@@ -58,13 +92,14 @@ class ManifestRepo:
         self.db.execute("BEGIN IMMEDIATE")
         try:
             yield self.db
+            self.db.commit()
         except BaseException as exc:
-            self.db.rollback()
+            # Also covers a failed commit (lock timeout): never leave a transaction open.
+            if self.db.in_transaction:
+                self.db.rollback()
             if isinstance(exc, sqlite3.IntegrityError):
                 raise _invalid("Row violates a manifest constraint") from exc
             raise
-        else:
-            self.db.commit()
 
     # ---- library inventory -------------------------------------------------
 
@@ -150,7 +185,10 @@ class ManifestRepo:
         'protected', plus reasons and policy_sha256), descriptor_sha256, source (str);
         optional release_group, magnet, info (bytes), first_seen, updated_at (default
         now). magnet and info must be None for private or protected torrents (else
-        invalid_manifest). first_seen is kept when the row already exists.
+        invalid_manifest). A magnet must be 'magnet:?xt=urn:btih:<infohash>' plus
+        optional dn and tr parameters, each tr an http/https/udp URL without query,
+        fragment or userinfo; info must be the bencoded info dictionary whose SHA-1
+        equals the infohash. first_seen is kept when the row already exists.
         """
         _need(row, "infohash", "name", "total_bytes", "piece_length", "files", "private",
               "protection", "descriptor_sha256", "source")
@@ -161,8 +199,10 @@ class ManifestRepo:
         magnet, info = row.get("magnet"), row.get("info")
         if (protection["protected"] or row["private"]) and (magnet is not None or info is not None):
             raise _invalid("Magnet and info are stored only for public, unprotected torrents")
-        if info is not None and not isinstance(info, (bytes, bytearray)):
-            raise _invalid("Info must be bytes")
+        if magnet is not None:
+            _check_magnet(magnet, infohash)
+        if info is not None:
+            _check_info(info, infohash)
         now = time.time()
         with self._tx() as db:
             db.execute(

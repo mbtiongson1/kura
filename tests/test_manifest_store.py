@@ -1,4 +1,5 @@
 """State schema v2 migration and the manifest repository. Synthetic data only."""
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
@@ -23,7 +24,12 @@ V1 = """
 """
 NEW_TABLES = {"library_titles", "library_files", "manifest_torrents", "manifest_links",
               "verifications", "swarm_checks", "quarantine_plans"}
-H1, H2 = "a" * 40, "b" * 40
+from kura.torrent import encode
+
+INFO = encode({b"name": b"Kura Sample Series", b"length": 3, b"piece length": 16384,
+               b"pieces": hashlib.sha1(b"abc").digest()})
+H1 = hashlib.sha1(INFO).hexdigest()
+H2 = "b" * 40
 
 
 def tables(path: Path) -> set[str]:
@@ -167,7 +173,8 @@ def torrent(infohash=H1, **extra):
            "files": [{"index": 0, "path": ["Kura Sample Series", "ep01.mkv"], "length": 10,
                       "offset": 0, "pad": False}],
            "private": False, "protection": {"protected": False, "reasons": [], "policy_sha256": "0" * 64},
-           "magnet": "magnet:?xt=urn:btih:" + infohash, "info": b"d4:name1:xe",
+           "magnet": "magnet:?xt=urn:btih:" + infohash + "&dn=Kura+Sample&tr=https%3A%2F%2Ftracker.example%2Fannounce",
+           "info": INFO if infohash == H1 else None,
            "descriptor_sha256": "c" * 64, "source": "synthetic", "first_seen": 1.0, "updated_at": 2.0}
     row.update(extra)
     return row
@@ -226,7 +233,7 @@ class Repo(TempCase):
         got = self.repo.torrent(H1)
         self.assertEqual(got["name"], "Kura Sample Series")
         self.assertIs(got["private"], False)
-        self.assertEqual(got["info"], b"d4:name1:xe")
+        self.assertEqual(got["info"], INFO)
         self.assertEqual(got["files"][0]["path"], ["Kura Sample Series", "ep01.mkv"])
         self.assertEqual(got["protection"]["protected"], False)
         self.assertEqual((got["first_seen"], got["updated_at"]), (1.0, 2.0))
@@ -246,6 +253,34 @@ class Repo(TempCase):
         got = self.repo.torrent(H1)
         self.assertEqual((got["magnet"], got["info"], got["private"]), (None, None, True))
         self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM manifest_torrents").fetchone()[0], 1)
+
+    def test_magnet_and_info_are_screened(self):
+        base = "magnet:?xt=urn:btih:" + H1
+        bad_magnets = [
+            base + "&tr=https%3A%2F%2Ftracker.example%2Fannounce%3Fpasskey%3Dsecret",
+            base + "&tr=https%3A%2F%2Fuser%3Apw%40tracker.example%2Fannounce",
+            base + "&tr=ftp%3A%2F%2Ftracker.example%2Fannounce",
+            base + "&tr=file%3A%2F%2F%2Fetc%2Fpasswd",
+            base + "&tr=https%3A%2F%2Ftracker.example%2Fa%23frag",
+            base + "&x.pe=host.example%3A6881",
+            base + "&ws=https%3A%2F%2Fweb.example%2Ffile",
+            "magnet:?xt=urn:btih:" + "c" * 40,
+            base + "&xt=urn:btih:" + "c" * 40,
+            "https://tracker.example/" + H1,
+            "magnet:?dn=no-hash",
+        ]
+        for magnet in bad_magnets:
+            with self.subTest(magnet=magnet):
+                with self.assertRaises(KuraError) as ctx:
+                    self.repo.upsert_torrent(torrent(magnet=magnet))
+                self.assertEqual(ctx.exception.code, "invalid_manifest")
+        for info in (b"d4:name1:xe", INFO + b"x", b"", INFO.replace(b"Sample", b"Simple")):
+            with self.subTest(info=info):
+                with self.assertRaises(KuraError):
+                    self.repo.upsert_torrent(torrent(info=info))
+        self.assertIsNone(self.repo.torrent(H1))
+        self.repo.upsert_torrent(torrent(magnet="magnet:?xt=urn:btih:" + H1))
+        self.assertEqual(self.repo.torrent(H1)["magnet"], "magnet:?xt=urn:btih:" + H1)
 
     def test_torrent_validation(self):
         for bad in (torrent(infohash="A" * 40), torrent(infohash="a" * 39),
@@ -340,6 +375,37 @@ class Repo(TempCase):
             self.assertEqual(other.execute("SELECT COUNT(*) FROM library_titles").fetchone()[0], 1)
         finally:
             other.close()
+
+    def test_failed_commit_leaves_no_open_transaction(self):
+        self.store.db.execute("PRAGMA busy_timeout=50")
+        blocker = sqlite3.connect(self.db_path)
+        blocker.execute("BEGIN IMMEDIATE")
+        try:
+            with self.assertRaises(sqlite3.OperationalError):
+                self.repo.save_inventory("lib", 1, [title("A")], 1.0)
+        finally:
+            blocker.rollback()
+            blocker.close()
+        self.assertFalse(self.store.db.in_transaction)
+        self.assertEqual(self.repo.titles("lib"), [])
+        self.repo.save_inventory("lib", 1, [title("A")], 1.0)
+        self.assertEqual(len(self.repo.titles("lib")), 1)
+
+    def test_failed_commit_rolls_back(self):
+        # A reader holding a shared lock makes COMMIT of a writer fail with busy.
+        reader = sqlite3.connect(self.db_path)
+        self.store.db.execute("PRAGMA busy_timeout=50")
+        reader.execute("BEGIN")
+        reader.execute("SELECT COUNT(*) FROM library_titles").fetchone()
+        try:
+            with self.assertRaises(sqlite3.OperationalError):
+                self.repo.save_inventory("lib", 1, [title("A")], 1.0)
+            self.assertFalse(self.store.db.in_transaction)
+        finally:
+            reader.rollback()
+            reader.close()
+        self.repo.save_inventory("lib", 1, [title("B")], 2.0)
+        self.assertEqual([t["rel_path"] for t in self.repo.titles("lib")], ["B"])
 
     def test_v1_features_still_work_on_v2(self):
         self.store.save_prefs(Preferences())
