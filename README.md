@@ -118,6 +118,9 @@ endpoint** is enabled. Keep aria2 patched. There is no persistent seeding servic
 Default state: `~/.local/share/kura/state.sqlite3` (preferences, receipts, audit events
 and validated sanitized descriptors for explicit offline resume). This is private data,
 not an export to Git or a public torrent archive.
+The state database is schema version 2 (library manifest tables). Kura migrates an existing
+version 1 database on first open; older Kura builds refuse a version 2 database, so keep one
+build per state directory after upgrading.
 Default payloads: `~/.local/share/kura/downloads/<infohash>/<validated-name>`.
 No legacy settings, credentials, torrents or media are imported automatically.
 Destination capabilities are `private[/subfolder]` and `shared[/subfolder]` only, not

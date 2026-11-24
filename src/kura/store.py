@@ -25,6 +25,48 @@ def validate_prefs(p: Preferences) -> Preferences:
     return p
 
 
+SCHEMA_VERSION = 2
+
+# Each migration is idempotent DDL (IF NOT EXISTS) so a concurrent opener that
+# queued behind the writer re-runs it harmlessly; the version bump is guarded.
+MIGRATIONS = {
+    2: """
+        CREATE TABLE IF NOT EXISTS library_titles (
+            id INTEGER PRIMARY KEY, library TEXT NOT NULL, rel_path TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK(kind IN ('dir','file')), root_dev INTEGER NOT NULL,
+            file_count INTEGER NOT NULL, total_bytes INTEGER NOT NULL,
+            newest_mtime_ns INTEGER NOT NULL, blocked TEXT NOT NULL DEFAULT '[]',
+            identity TEXT, seen_at REAL NOT NULL, UNIQUE(library, rel_path));
+        CREATE TABLE IF NOT EXISTS library_files (
+            title_id INTEGER NOT NULL, rel_path TEXT NOT NULL, size INTEGER NOT NULL,
+            mtime_ns INTEGER NOT NULL, dev INTEGER NOT NULL, ino INTEGER NOT NULL,
+            PRIMARY KEY(title_id, rel_path));
+        CREATE TABLE IF NOT EXISTS manifest_torrents (
+            infohash TEXT PRIMARY KEY CHECK(length(infohash)=40),
+            name TEXT NOT NULL, release_group TEXT, total_bytes INTEGER NOT NULL,
+            piece_length INTEGER NOT NULL, files TEXT NOT NULL, private INTEGER NOT NULL,
+            protection TEXT NOT NULL, magnet TEXT, info BLOB, descriptor_sha256 TEXT NOT NULL,
+            source TEXT NOT NULL, first_seen REAL NOT NULL, updated_at REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS manifest_links (
+            title_id INTEGER NOT NULL, infohash TEXT NOT NULL, strategy TEXT NOT NULL,
+            mapping TEXT NOT NULL, PRIMARY KEY(title_id, infohash));
+        CREATE TABLE IF NOT EXISTS verifications (
+            id INTEGER PRIMARY KEY, title_id INTEGER NOT NULL, infohash TEXT NOT NULL,
+            verdict TEXT NOT NULL, files TEXT NOT NULL, pieces_total INTEGER NOT NULL,
+            pieces_ok INTEGER NOT NULL, bytes_read INTEGER NOT NULL,
+            started_at REAL NOT NULL, finished_at REAL NOT NULL);
+        CREATE INDEX IF NOT EXISTS verifications_link
+            ON verifications(title_id, infohash, finished_at);
+        CREATE TABLE IF NOT EXISTS swarm_checks (
+            id INTEGER PRIMARY KEY, infohash TEXT NOT NULL, checked_at REAL NOT NULL,
+            seeders INTEGER, leechers INTEGER, status TEXT NOT NULL, detail TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS quarantine_plans (
+            plan_hash TEXT PRIMARY KEY, created_at REAL NOT NULL, plan TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'proposed');
+    """,
+}
+
+
 class Store:
     def __init__(self, root: Path):
         ensure_dir(root)
@@ -50,9 +92,33 @@ class Store:
             CREATE TABLE IF NOT EXISTS aliases (
                 key TEXT PRIMARY KEY, value TEXT NOT NULL, fetched_at REAL NOT NULL);
         """)
-        if self.db.execute("SELECT version FROM meta").fetchone()[0] != 1:
-            raise KuraError("state_version", "Unsupported local database version")
         self.db.commit()
+        self._migrate()
+
+    def _version(self) -> int:
+        return self.db.execute("SELECT version FROM meta").fetchone()[0]
+
+    def _migrate(self):
+        """Bring the database to SCHEMA_VERSION, one atomic step per version.
+
+        A newer or unknown version is refused so an older build never writes to a
+        schema it does not understand. Concurrent openers serialise on BEGIN
+        IMMEDIATE; the loser re-runs idempotent DDL and its guarded UPDATE is a no-op.
+        """
+        version = self._version()
+        if not 1 <= version <= SCHEMA_VERSION:
+            raise KuraError("state_version", "Unsupported local database version")
+        for step in range(version + 1, SCHEMA_VERSION + 1):
+            try:
+                self.db.executescript(
+                    f"BEGIN IMMEDIATE;{MIGRATIONS[step]}"
+                    f"UPDATE meta SET version={step} WHERE version={step - 1};COMMIT;")
+            except sqlite3.Error:
+                if self.db.in_transaction:
+                    self.db.rollback()
+                raise KuraError("state_version", "Local database migration failed")
+        if self._version() != SCHEMA_VERSION:
+            raise KuraError("state_version", "Unsupported local database version")
 
     @contextmanager
     def lock(self):
