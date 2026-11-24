@@ -278,6 +278,23 @@ class Repo(TempCase):
             with self.subTest(info=info):
                 with self.assertRaises(KuraError):
                     self.repo.upsert_torrent(torrent(info=info))
+        # Matching hash but unacceptable content: private, URL-bearing, non-canonical, not a dict.
+        raw = {b"name": b"Kura Sample Series", b"length": 3, b"piece length": 16384,
+               b"pieces": hashlib.sha1(b"abc").digest()}
+        unordered = b"d4:name1:x6:lengthi3ee"
+        for label, info in (("private", encode({**raw, b"private": 1})),
+                            ("announce", encode({**raw, b"announce": b"https://t.example/a"})),
+                            ("url-list", encode({**raw, b"url-list": [b"https://w.example/"]})),
+                            ("unordered", unordered), ("list", b"li1ee"), ("int", b"i1e")):
+            with self.subTest(label=label):
+                ih = hashlib.sha1(info).hexdigest()
+                with self.assertRaises(KuraError) as ctx:
+                    self.repo.upsert_torrent(torrent(infohash=ih, info=info, magnet=None))
+                self.assertEqual(ctx.exception.code, "invalid_manifest")
+        flagged = encode({**raw, b"private": 0})
+        ih = hashlib.sha1(flagged).hexdigest()
+        self.repo.upsert_torrent(torrent(infohash=ih, info=flagged, magnet=None))
+        self.assertEqual(self.repo.torrent(ih)["info"], flagged)
         self.assertIsNone(self.repo.torrent(H1))
         self.repo.upsert_torrent(torrent(magnet="magnet:?xt=urn:btih:" + H1))
         self.assertEqual(self.repo.torrent(H1)["magnet"], "magnet:?xt=urn:btih:" + H1)

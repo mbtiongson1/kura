@@ -18,6 +18,7 @@ import time
 from urllib.parse import parse_qsl, urlsplit
 
 from .models import KuraError
+from .torrent import decode, encode
 
 _INFOHASH = re.compile(r"[0-9a-f]{40}\Z")
 _PLAN_HASH = re.compile(r"[0-9a-f]{64}\Z")
@@ -71,11 +72,25 @@ def _check_magnet(magnet, infohash: str):
             raise _invalid("Magnet tracker must be a credential-free http, https or udp URL")
 
 
+_URL_KEYS = (b"announce", b"announce-list", b"url-list", b"httpseeds", b"nodes")
+
+
 def _check_info(info, infohash: str):
-    """The stored info must be exactly the hashed info dictionary, so it holds no URLs."""
-    if (not isinstance(info, (bytes, bytearray)) or not info.startswith(b"d")
-            or hashlib.sha1(info).hexdigest() != infohash):
-        raise _invalid("Info must be the bencoded info dictionary matching the infohash")
+    """The stored info must be the canonical, public info dictionary of this infohash."""
+    if not isinstance(info, (bytes, bytearray)):
+        raise _invalid("Info must be bytes")
+    info = bytes(info)
+    if hashlib.sha1(info).hexdigest() != infohash:
+        raise _invalid("Info does not match the infohash")
+    try:
+        decoded = decode(info)
+        canonical_form = isinstance(decoded, dict) and encode(decoded) == info
+    except (KuraError, ValueError, TypeError):
+        canonical_form = False
+    if not canonical_form:
+        raise _invalid("Info must be a canonical bencoded dictionary")
+    if decoded.get(b"private", 0) != 0 or any(k in decoded for k in _URL_KEYS):
+        raise _invalid("Info of a private torrent or carrying URLs is never stored")
 
 
 def _load(text):
@@ -188,7 +203,9 @@ class ManifestRepo:
         invalid_manifest). A magnet must be 'magnet:?xt=urn:btih:<infohash>' plus
         optional dn and tr parameters, each tr an http/https/udp URL without query,
         fragment or userinfo; info must be the bencoded info dictionary whose SHA-1
-        equals the infohash. first_seen is kept when the row already exists.
+        equals the infohash, decodes canonically (bounded by torrent.decode limits; pass
+        None for larger descriptors), is not private and carries no tracker or web-seed
+        URL keys. first_seen is kept when the row already exists.
         """
         _need(row, "infohash", "name", "total_bytes", "piece_length", "files", "private",
               "protection", "descriptor_sha256", "source")
