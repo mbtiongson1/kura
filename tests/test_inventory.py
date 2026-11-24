@@ -505,6 +505,42 @@ class HostileTreeTests(TreeCase):
         self.assertEqual(title.blocked, ("changed_during_scan:Series",
                                          "changed_during_scan:Series/ep2.bin"))
 
+    def test_top_level_title_renamed_or_replaced_during_scan_is_blocked(self):
+        self.write("Series/ep1.bin")
+        self.write("movie.bin")
+        real = os.scandir
+        done = []
+
+        def swapping(fd):
+            listing = real(fd)
+            if not done and os.path.samestat(os.fstat(fd), (self.root / "Series").stat()):
+                done.append(True)  # the title's own listing: swap it out from under the scan
+                os.rename(self.root / "Series", self.root / "Series-moved")
+                (self.root / "Series").mkdir()
+            return listing
+
+        with patch("kura.inventory.os.scandir", swapping):
+            titles = {t.rel_path: t for t in scan(self.root, "main").titles}
+        self.assertEqual(titles["Series"].blocked, ("changed_during_scan:Series",))
+        self.assertEqual(titles["movie.bin"].blocked, ())
+
+    def test_top_level_file_replaced_during_scan_is_blocked(self):
+        self.write("a.bin", b"1")
+        self.write("b.bin", b"2")
+        real_handle, done = inventory._Walk.handle, []
+
+        def replacing(walk, dir_fd, name, rel, depth, st):
+            real_handle(walk, dir_fd, name, rel, depth, st)
+            if name == "a.bin" and not done:
+                done.append(True)
+                self.write("a.new", b"3")  # created while the old inode lives: never reused
+                os.replace(self.root / "a.new", self.root / "a.bin")
+
+        with patch.object(inventory._Walk, "handle", replacing):
+            titles = {t.rel_path: t for t in scan(self.root, "main").titles}
+        self.assertEqual(titles["a.bin"].blocked, ("changed_during_scan:a.bin",))
+        self.assertEqual(titles["b.bin"].blocked, ())
+
     def test_quiet_directories_are_not_blocked(self):
         self.write("Series/Season 1/ep1.bin")
         self.assertEqual(self.titles()["Series"].blocked, ())

@@ -10,8 +10,10 @@ for anything destructive by later stages.
 
 A directory whose mtime/ctime differ between the start and the end of its own scan
 (entries added, removed or renamed meanwhile) blocks its title as changed_during_scan.
-Top-level entries that appear or vanish while the root is being listed simply show up
-(or not) in the next scan; an absent title can never be acted on.
+A top-level entry that is renamed, removed or replaced while its title is scanned is
+re-checked by name at the end and blocked the same way. Entries that merely appear or
+vanish while the root itself is being listed show up (or not) in the next scan; an absent
+title can never be acted on.
 
 Reasons: symlink, special_file, mount_crossing, undecodable_name, control_name,
 depth_limit, unreadable, changed_during_scan.
@@ -223,10 +225,21 @@ def scan(root: Path, label: str, *, max_entries: int = 500_000, max_depth: int =
                 titles.append(_title(name, "file", walk))
                 continue
             walk.handle(root_fd, name, name, 1, st)
+            if not _still_there(root_fd, name, st):
+                walk.block("changed_during_scan", name)
             titles.append(_title(name, "dir" if stat.S_ISDIR(st.st_mode) else "file", walk))
         return Inventory(label, root_dev, tuple(titles), budget.entries, time.time())
     finally:
         os.close(root_fd)
+
+
+def _still_there(root_fd, name, before):
+    """True if the top-level entry is still the same object after its title was scanned."""
+    try:
+        now = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+    except OSError:
+        return False
+    return (now.st_dev, now.st_ino) == (before.st_dev, before.st_ino)
 
 
 def _title(rel, kind, walk):
