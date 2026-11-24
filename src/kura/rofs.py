@@ -38,14 +38,26 @@ def open_root(path: Path) -> int:
     """Open a library root as a directory fd. The caller closes it.
 
     The path must be absolute, non-traversing and free of symlinks in every component
-    (`safety.no_symlinks`); the final open also refuses a symlink atomically.
+    (`safety.no_symlinks`). That check is only a fast, well-worded pre-check: the actual
+    open then walks from "/" one component at a time with O_NOFOLLOW|O_DIRECTORY relative
+    to the previous fd, so a component swapped for a symlink after the check is refused
+    atomically rather than followed.
     """
     path = Path(path)
     no_symlinks(path)
+    cursor = os.open("/", _DIR_FLAGS)
     try:
-        return os.open(path, _DIR_FLAGS)
-    except OSError as exc:
-        raise _os_error(exc, "Root") from exc
+        for part in path.parts[1:]:
+            try:
+                nxt = os.open(part, _DIR_FLAGS, dir_fd=cursor)
+            except OSError as exc:
+                raise _os_error(exc, "Root") from exc
+            os.close(cursor)
+            cursor = nxt
+        return cursor
+    except BaseException:
+        os.close(cursor)
+        raise
 
 
 def _check_parts(parts: tuple[str, ...]):
@@ -63,7 +75,15 @@ def open_file_ro(root_fd: int, parts: tuple[str, ...]) -> int:
     Directories are walked one component at a time with O_NOFOLLOW|O_DIRECTORY relative
     to the previous fd. The final component is first examined with lstat (so a FIFO or
     device is never opened), then opened O_RDONLY|O_NOFOLLOW|O_NONBLOCK, with O_NOATIME
-    where the platform supports it, and fstat must say regular file. Nothing is created.
+    where the platform supports it, and fstat must say regular file with the same
+    device/inode as the lstat. Nothing is created.
+
+    Residual risk (cannot be closed without kernel support such as openat2 RESOLVE_*
+    or O_PATH tricks): if an attacker with write access to the tree swaps the regular
+    file for a device node between the lstat and the open, that node is opened once,
+    O_RDONLY|O_NONBLOCK, and rejected immediately after by fstat. No data is read.
+    The library trees Kura scans are trusted not to be raced by hostile writers; this
+    module defends against accidents and planted symlinks/specials, not live attackers.
     """
     _check_parts(parts)
     shown = "/".join(parts)
@@ -94,7 +114,9 @@ def open_file_ro(root_fd: int, parts: tuple[str, ...]) -> int:
         except OSError as exc:
             raise _os_error(exc, f"File {shown}") from exc
         try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
+            after = os.fstat(fd)
+            if (not stat.S_ISREG(after.st_mode)
+                    or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)):
                 raise KuraError("unsafe_path", "Expected a regular file", path=shown)
         except BaseException:
             os.close(fd)

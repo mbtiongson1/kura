@@ -79,6 +79,19 @@ class RootTests(TreeCase):
         with self.assertRaises(KuraError):
             rofs.open_root(self.root / "file.bin")
 
+    def test_component_swapped_for_symlink_after_precheck_is_refused(self):
+        real = self.tmp / "real"
+        (real / "library").mkdir(parents=True)
+        link = self.tmp / "swapped"
+        link.symlink_to(real)  # what an attacker plants after no_symlinks() has run
+        with patch("kura.rofs.no_symlinks"):
+            with self.assertRaises(KuraError) as ctx:
+                rofs.open_root(link / "library")
+        self.assertEqual(ctx.exception.code, "unsafe_path")
+        with patch("kura.rofs.no_symlinks"):
+            fd = rofs.open_root(real / "library")
+        os.close(fd)
+
     def test_open_root_returns_directory_fd(self):
         fd = rofs.open_root(self.root)
         try:
@@ -428,6 +441,50 @@ class HostileTreeTests(TreeCase):
             title = {t.rel_path: t for t in scan(self.root, "main").titles}["Series"]
         self.assertEqual(title.blocked, ("mount_crossing:Series/Season 1",))
         self.assertEqual(title.files, ())
+
+    def test_directory_substituted_between_stat_and_open_is_blocked(self):
+        self.write("Series/Season 1/ep.bin")
+        real = os.fstat
+        seen = []
+
+        def swapped(fd):
+            st = real(fd)
+            seen.append(st)
+            if len(seen) == 3:  # same device, different directory than the one listed
+                return os.stat_result((st.st_mode, st.st_ino + 1, *st[2:]))
+            return st
+
+        with patch("kura.inventory.os.fstat", swapped):
+            title = {t.rel_path: t for t in scan(self.root, "main").titles}["Series"]
+        self.assertEqual(title.blocked, ("changed_during_scan:Series/Season 1",))
+        self.assertEqual(title.files, ())
+
+    def test_huge_directory_stops_at_the_budget_while_reading(self):
+        for i in range(60):
+            self.write(f"T/f{i:02d}.bin")
+        real, consumed = os.scandir, []
+
+        class Counting:
+            def __init__(self, fd):
+                self.it = real(fd)
+
+            def __enter__(self):
+                self.it.__enter__()
+                return self
+
+            def __exit__(self, *a):
+                return self.it.__exit__(*a)
+
+            def __iter__(self):
+                for entry in self.it:
+                    consumed.append(entry.name)
+                    yield entry
+
+        with patch("kura.inventory.os.scandir", Counting):
+            with self.assertRaises(KuraError) as ctx:
+                scan(self.root, "main", max_entries=10)
+        self.assertEqual(ctx.exception.code, "inventory_limit")
+        self.assertLessEqual(len(consumed), 10)  # root entry + 9 of 60, then stop
 
     def test_unreadable_directory_blocked(self):
         if os.geteuid() == 0:

@@ -81,17 +81,35 @@ class Inventory:
                 "titles": [t.json(files) for t in self.titles]}
 
 
-class _Walk:
-    def __init__(self, root_dev, max_entries, max_depth):
-        self.root_dev, self.max_entries, self.max_depth = root_dev, max_entries, max_depth
-        self.entries = 0
-        self.files, self.blocked, self.total, self.newest = [], [], 0, 0
+class _Budget:
+    """Shared entry budget. Charged while a directory is read, before anything is kept."""
 
-    def count(self):
+    def __init__(self, max_entries):
+        self.max_entries, self.entries = max_entries, 0
+
+    def charge(self):
         self.entries += 1
         if self.entries > self.max_entries:
             raise KuraError("inventory_limit", "Library has more entries than the scan limit",
                             max_entries=self.max_entries)
+
+
+def _read_dir(fd, budget, skip=()):
+    """List a directory by fd, sorted by raw name, never holding more than the budget."""
+    with os.scandir(fd) as it:
+        items = []
+        for entry in it:
+            if entry.name in skip:
+                continue
+            budget.charge()
+            items.append(entry)
+    return sorted(items, key=lambda e: os.fsencode(e.name))
+
+
+class _Walk:
+    def __init__(self, root_dev, budget, max_depth):
+        self.root_dev, self.budget, self.max_depth = root_dev, budget, max_depth
+        self.files, self.blocked, self.total, self.newest = [], [], 0, 0
 
     def block(self, reason, rel):
         self.blocked.append(f"{reason}:{rel}")
@@ -115,11 +133,11 @@ class _Walk:
         elif stat.S_ISDIR(mode):
             if depth > self.max_depth:
                 return self.block("depth_limit", rel)
-            self.descend(dir_fd, name, rel, depth)
+            self.descend(dir_fd, name, rel, depth, st)
         else:
             self.block("special_file", rel)
 
-    def descend(self, parent_fd, name, rel, depth):
+    def descend(self, parent_fd, name, rel, depth, expected):
         try:
             fd = os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
         except OSError as exc:
@@ -128,9 +146,11 @@ class _Walk:
             return self.block(reason, rel)
         try:
             st = os.fstat(fd)
-            if not stat.S_ISDIR(st.st_mode) or st.st_dev != self.root_dev:
-                return self.block("mount_crossing" if stat.S_ISDIR(st.st_mode)
-                                  else "changed_during_scan", rel)
+            if st.st_dev != self.root_dev and stat.S_ISDIR(st.st_mode):
+                return self.block("mount_crossing", rel)
+            if (not stat.S_ISDIR(st.st_mode)
+                    or (st.st_dev, st.st_ino) != (expected.st_dev, expected.st_ino)):
+                return self.block("changed_during_scan", rel)
             self.seen(st)
             self.listing(fd, rel, depth)
         finally:
@@ -138,12 +158,10 @@ class _Walk:
 
     def listing(self, fd, rel, depth):
         try:
-            with os.scandir(fd) as it:
-                items = sorted(it, key=lambda e: os.fsencode(e.name))
+            items = _read_dir(fd, self.budget)
         except OSError:
             return self.block("unreadable", rel)
         for entry in items:
-            self.count()
             child = f"{rel}/{entry.name}" if rel else entry.name
             try:
                 entry.name.encode("utf-8")
@@ -173,19 +191,14 @@ def scan(root: Path, label: str, *, max_entries: int = 500_000, max_depth: int =
     root_fd = open_root(root)
     try:
         root_dev = os.fstat(root_fd).st_dev
-        probe = _Walk(root_dev, max_entries, max_depth)
+        budget = _Budget(max_entries)
         try:
-            with os.scandir(root_fd) as it:
-                top = sorted(it, key=lambda e: os.fsencode(e.name))
+            top = _read_dir(root_fd, budget, skip)
         except OSError as exc:
             raise KuraError("io_error", f"Root could not be listed: {exc.strerror}") from exc
         titles = []
         for entry in top:
-            if entry.name in skip:
-                continue
-            probe.count()
-            walk = _Walk(root_dev, max_entries, max_depth)
-            walk.entries = probe.entries  # entry budget is shared across titles
+            walk = _Walk(root_dev, budget, max_depth)
             name = entry.name
             try:
                 name.encode("utf-8")
@@ -201,9 +214,8 @@ def scan(root: Path, label: str, *, max_entries: int = 500_000, max_depth: int =
                 titles.append(_title(name, "file", walk))
                 continue
             walk.handle(root_fd, name, name, 1, st)
-            probe.entries = walk.entries
             titles.append(_title(name, "dir" if stat.S_ISDIR(st.st_mode) else "file", walk))
-        return Inventory(label, root_dev, tuple(titles), probe.entries, time.time())
+        return Inventory(label, root_dev, tuple(titles), budget.entries, time.time())
     finally:
         os.close(root_fd)
 
