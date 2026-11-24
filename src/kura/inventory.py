@@ -8,6 +8,11 @@ file or directory on the root's device is left alone and recorded in the title's
 "blocked_truncated"). A title with any blocked entry must never be treated as eligible
 for anything destructive by later stages.
 
+A directory whose mtime/ctime differ between the start and the end of its own scan
+(entries added, removed or renamed meanwhile) blocks its title as changed_during_scan.
+Top-level entries that appear or vanish while the root is being listed simply show up
+(or not) in the next scan; an absent title can never be acted on.
+
 Reasons: symlink, special_file, mount_crossing, undecodable_name, control_name,
 depth_limit, unreadable, changed_during_scan.
 
@@ -153,6 +158,10 @@ class _Walk:
                 return self.block("changed_during_scan", rel)
             self.seen(st)
             self.listing(fd, rel, depth)
+            after = os.fstat(fd)
+            if (after.st_mtime_ns, after.st_ctime_ns) != (st.st_mtime_ns, st.st_ctime_ns):
+                self.seen(after)
+                self.block("changed_during_scan", rel)  # entries may have come or gone
         finally:
             os.close(fd)
 

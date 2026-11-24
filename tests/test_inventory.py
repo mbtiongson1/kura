@@ -459,6 +459,56 @@ class HostileTreeTests(TreeCase):
         self.assertEqual(title.blocked, ("changed_during_scan:Series/Season 1",))
         self.assertEqual(title.files, ())
 
+    def _mutate_after_listing(self, directory, action):
+        """Run `action` once, right after `directory` (a Path) has been listed."""
+        real, done = os.scandir, []
+
+        def wrapped(fd):
+            listing = real(fd)
+            if not done and os.path.samestat(os.fstat(fd), directory.stat()):
+                done.append(True)
+                entries = list(listing)
+                listing.close()
+                action()
+                # Coarse filesystem timestamps must not hide the change from the test.
+                st = directory.stat()
+                os.utime(directory, ns=(st.st_atime_ns, st.st_mtime_ns + 7_000_000))
+                return real_iter(entries)
+            return listing
+
+        class real_iter:
+            def __init__(self, entries):
+                self.entries = entries
+
+            def __enter__(self):
+                return iter(self.entries)
+
+            def __exit__(self, *a):
+                return False
+
+        return patch("kura.inventory.os.scandir", wrapped)
+
+    def test_file_added_during_scan_blocks_the_title(self):
+        self.write("Series/Season 1/ep1.bin")
+        season = self.root / "Series" / "Season 1"
+        with self._mutate_after_listing(season, lambda: (season / "late.bin").write_bytes(b"x")):
+            title = {t.rel_path: t for t in scan(self.root, "main").titles}["Series"]
+        self.assertEqual(title.blocked, ("changed_during_scan:Series/Season 1",))
+        self.assertEqual([f.rel_path for f in title.files], ["Series/Season 1/ep1.bin"])
+
+    def test_file_removed_during_scan_blocks_the_title(self):
+        self.write("Series/ep1.bin")
+        self.write("Series/ep2.bin")
+        series = self.root / "Series"
+        with self._mutate_after_listing(series, lambda: (series / "ep2.bin").unlink()):
+            title = {t.rel_path: t for t in scan(self.root, "main").titles}["Series"]
+        self.assertEqual(title.blocked, ("changed_during_scan:Series",
+                                         "changed_during_scan:Series/ep2.bin"))
+
+    def test_quiet_directories_are_not_blocked(self):
+        self.write("Series/Season 1/ep1.bin")
+        self.assertEqual(self.titles()["Series"].blocked, ())
+
     def test_huge_directory_stops_at_the_budget_while_reading(self):
         for i in range(60):
             self.write(f"T/f{i:02d}.bin")
