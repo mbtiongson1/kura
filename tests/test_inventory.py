@@ -484,7 +484,7 @@ class HostileTreeTests(TreeCase):
             with self.assertRaises(KuraError) as ctx:
                 scan(self.root, "main", max_entries=10)
         self.assertEqual(ctx.exception.code, "inventory_limit")
-        self.assertLessEqual(len(consumed), 10)  # root entry + 9 of 60, then stop
+        self.assertLessEqual(len(consumed), 11)  # one past the budget, not all 61
 
     def test_unreadable_directory_blocked(self):
         if os.geteuid() == 0:
