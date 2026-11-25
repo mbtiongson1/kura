@@ -14,7 +14,7 @@ download.
 | `kura seadex status` | none | none |
 
 `sync` is a full pull on the first run, with `--full`, or when the last full pull is more
-than 7 days old. Otherwise it is incremental: records whose `updated` is newer than the
+than 7 days old. Otherwise it is incremental: records whose `updated` is at or after the
 stored per-collection cursor are upserted. A full pull replaces every `seadex_*` row in one
 transaction, so records deleted upstream disappear; an incremental pull cannot see deletions,
 which is why a full pull is forced weekly. `--max-requests` defaults to 60 (range 1..500).

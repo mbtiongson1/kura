@@ -75,9 +75,9 @@ class Sync(Case):
         self.fake.urls.clear()
         out = self.sync()
         self.assertEqual((out["mode"], out["entries"]["upserted"], out["torrents"]["upserted"]),
-                         ("incremental", 1, 0))
+                         ("incremental", 1, 1))             # the boundary torrent is re-read, harmlessly
         queries = [parse_qs(urlsplit(u).query)["filter"][0] for u in self.fake.urls]
-        self.assertEqual(queries, [f'updated>"{stamp(2)}"', f'updated>"{stamp(13)}"'])
+        self.assertEqual(queries, [f'updated>="{stamp(2)}"', f'updated>="{stamp(13)}"'])
         self.assertEqual(self.rows("SELECT notes FROM seadex_entries WHERE id=?", rid(2)), [("changed",)])
         self.assertEqual(out["entries"]["total"], 2)
         self.assertEqual(json.loads(self.state()[3])["entries"], stamp(500))
@@ -182,6 +182,35 @@ class Sync(Case):
             self.sync()
         self.assertGreaterEqual(self.limiter().state()["penalty_in_s"], 119)
 
+    def test_full_pull_cursor_ignores_the_old_one(self):
+        self.sync()
+        self.store.db.execute("UPDATE sync_state SET cursor=?", (json.dumps(
+            {"entries": "2099-01-01 00:00:00.000Z", "torrents": "2099-01-01 00:00:00.000Z"}),))
+        self.store.db.commit()
+        self.clock.now += 60
+        self.sync(full=True)
+        self.assertEqual(json.loads(self.state()[3]), {"entries": stamp(2), "torrents": stamp(13)})
+
+    def test_concurrent_sync_that_finished_first_is_not_overwritten(self):
+        def transport(url):
+            if "/torrents/" in url:                 # another process commits while this one is mid-run
+                other = sqlite3.connect(self.store.root / "state.sqlite3")
+                other.execute("INSERT INTO sync_state(source, last_ok, status) VALUES ('seadex', 5.0, 'ok')")
+                other.commit()
+                other.close()
+            return self.fake.transport(url)
+        with self.assertRaises(KuraError) as caught:
+            self.sync(transport=transport)
+        self.assertEqual(caught.exception.code, "sync_conflict")
+        self.assertEqual(self.rows("SELECT COUNT(*) FROM seadex_entries"), [(0,)])
+        self.assertEqual(self.state()[0], "ok")     # the other run's result stays
+
+    def test_deeply_nested_json_is_invalid_not_a_crash(self):
+        with self.assertRaises(KuraError) as caught:
+            self.sync(transport=lambda url: b"[" * 100000 + b"]" * 100000)
+        self.assertEqual(caught.exception.code, "seadex_invalid")
+        self.assertEqual(self.state()[0], "failed")
+
     def test_invalid_response_shapes(self):
         for body in (b"not json", b"[]", json.dumps({"items": {}, "totalPages": 1}).encode(),
                      json.dumps({"items": [], "totalPages": 101}).encode(),
@@ -238,7 +267,7 @@ class Builders(unittest.TestCase):
                               filter_=seadex.filter_updated(stamp(5)))
         u = urlsplit(ok)
         self.assertEqual((u.scheme, u.netloc, u.path), ("https", "seadex.moe", "/api/collections/entries/records"))
-        self.assertEqual(parse_qs(u.query)["filter"], [f'updated>"{stamp(5)}"'])
+        self.assertEqual(parse_qs(u.query)["filter"], [f'updated>="{stamp(5)}"'])
         for kw in (dict(collection="users"), dict(collection="../x"), dict(page=0), dict(page=101),
                    dict(page=True), dict(per_page=501), dict(fields=["id,files"]), dict(fields=[]),
                    dict(fields=["id&filter=1"])):
@@ -278,6 +307,8 @@ class Builders(unittest.TestCase):
         many = seadex.parse_files([f(f"Show - {i}.mkv", 1) for i in range(2500)])
         self.assertEqual((len(many["files"]), many["video_files"]), (2000, 2500))
         self.assertEqual(seadex.parse_files([f("Show - 01.mkv", 1), f("Show - 02.mkv", 2)])["median_video_bytes"], 1)
+        huge = [f(f"Show - {i}.mkv", 2**50) for i in range(8200)]     # sums past SQLite's 64-bit integers
+        self.assertIsNone(seadex.parse_files(huge))
 
 
 class Transport(unittest.TestCase):

@@ -59,6 +59,7 @@ MAX_FILES_STORED = 2000
 MAX_FILES_SCANNED = 20000
 MAX_NAME = 255
 MAX_BYTES = 2**50
+MAX_TOTAL = 2**62                # keeps every stored sum inside SQLite's signed 64-bit integers
 MAX_LIBRARY = 200
 
 RECORD_ID = re.compile(r"[a-z0-9]{1,32}")
@@ -100,7 +101,9 @@ def infohash(value) -> str:
 
 
 def filter_updated(since) -> str:
-    return f'updated>"{timestamp(since)}"'
+    """Records at or after `since`: the boundary record is fetched again (upserts are idempotent),
+    so a record sharing the cursor's timestamp is never missed."""
+    return f'updated>="{timestamp(since)}"'
 
 
 def filter_ids(ids) -> str:
@@ -282,6 +285,8 @@ def parse_files(value) -> dict | None:
                 not 0 <= size <= MAX_BYTES):
             continue
         total += size
+        if total > MAX_TOTAL:
+            return None
         if len(stored) < MAX_FILES_STORED:
             stored.append([name, size])
         if name.lower().endswith(VIDEO_EXT) and not is_extra(name):
@@ -339,7 +344,7 @@ class Client:
             raise KuraError("seadex_invalid", "SeaDex response is not bounded bytes")
         try:
             doc = json.loads(data.decode("utf-8"))
-        except (UnicodeError, ValueError) as e:
+        except (UnicodeError, ValueError, RecursionError) as e:
             raise KuraError("seadex_invalid", "SeaDex response must be bounded UTF-8 JSON") from e
         items = doc.get("items") if isinstance(doc, dict) else None
         pages = doc.get("totalPages") if isinstance(doc, dict) else None
@@ -414,6 +419,10 @@ def _write(store, work):
             raise
 
 
+def _state_now(db):
+    return db.execute("SELECT cursor, last_ok FROM sync_state WHERE source=?", (SOURCE,)).fetchone() or (None, None)
+
+
 def _save_state(db, now, **fields):
     row = db.execute("SELECT cursor, last_ok, last_full_ok FROM sync_state WHERE source=?",
                      (SOURCE,)).fetchone() or (None, None, None)
@@ -486,12 +495,15 @@ def _listing(store, client, full: bool, now: float, skipped) -> dict:
                              parse_entry, skipped)
         torrents = _parse_all(client.pages("torrents", TORRENT_FIELDS, filter_updated(cursor["torrents"])),
                               parse_torrent, skipped)
-    new_cursor = {"entries": _newest(entries, cursor.get("entries")),
-                  "torrents": _newest(torrents, cursor.get("torrents"))}
+    # A full pull derives the cursor from what it just read, never from the old one.
+    new_cursor = {"entries": _newest(entries, None if full else cursor.get("entries")),
+                  "torrents": _newest(torrents, None if full else cursor.get("torrents"))}
     if None in new_cursor.values():
         new_cursor = {}         # nothing seen yet: stay without a cursor, so the next run is full
 
     def write(db):
+        if _state_now(db) != (state["cursor"], state["last_ok"]):
+            raise KuraError("sync_conflict", "Another SeaDex sync finished meanwhile; run it again")
         carried = {r[0]: r[1:] for r in db.execute(f"SELECT id, updated, {_FILE_COLUMNS} FROM seadex_torrents")}
         if full:
             for table in ("seadex_entry_torrents", "seadex_entries", "seadex_torrents"):
@@ -582,6 +594,8 @@ def sync(store, *, full=False, files_library=None, max_requests=MAX_REQUESTS, li
     try:
         result = _listing(store, client, full or due, now, skipped)
     except KuraError as e:
+        if e.code == "sync_conflict":
+            raise
         def failed(db):
             _save_state(db, now, status="failed", detail=json.dumps({"error": e.code}))
         try:

@@ -68,9 +68,9 @@ class FakeSeaDex:
     def _match(self, record, expression):
         if expression is None:
             return True
-        m = re.fullmatch(r'updated>"([^"]+)"', expression)
+        m = re.fullmatch(r'updated>="([^"]+)"', expression)
         if m:
-            return record["updated"] > m.group(1)
+            return record["updated"] >= m.group(1)
         ids = re.fullmatch(r'id="[a-z0-9]+"(\|\|id="[a-z0-9]+")*', expression)
         if ids:
             return record["id"] in re.findall(r'id="([a-z0-9]+)"', expression)
