@@ -436,6 +436,15 @@ class KnownDescriptors(Fixture, unittest.TestCase):
         self.assertEqual(result["titles"][0]["candidates"][0]["outcome"], "written")
         self.assertEqual(parse((self.out / (known.infohash + ".torrent")).read_bytes()).infohash, known.infohash)
 
+    def test_an_unreadable_known_row_fails_closed(self):
+        self.feed_for(item(FOLDER, 11, self.right.infohash))
+        self.nyaa.descriptors = {"11": self.right.data}
+        with patch.object(ManifestRepo, "torrent", side_effect=ValueError("bad row")):
+            result = self.resolve()
+        self.assertEqual(self.nyaa.fetched, [])
+        self.assertEqual(result["titles"][0]["candidates"][0]["outcome"], "known_unreadable")
+        self.assertEqual(self.names(), [".kura-resolve.json", ".kura-resolve.lock"])
+
     def test_unknown_infohash_is_fetched_as_before(self):
         self.feed_for(item(FOLDER, 11, self.right.infohash))
         self.nyaa.descriptors = {"11": self.right.data}

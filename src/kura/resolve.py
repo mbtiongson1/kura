@@ -671,13 +671,14 @@ def rebuild_known(repo: ManifestRepo, c: Candidate, policy=None):
     """Descriptor rebuilt from the state database, without any request.
 
     Returns ``(state, cleaned bytes or None, meta or None)``. `state` is ``unknown`` (no usable
-    row: fetch as before), ``protected`` (the row is protected or private: never fetch, never
+    row: fetch as before), ``unreadable`` (the lookup failed: neither fetch nor write),
+    ``protected`` (the row is protected or private: never fetch, never
     write) or ``rebuilt``. The rebuilt bytes go through the same checks as a download.
     """
     try:
         row = repo.torrent(c.infohash)
     except Exception:
-        return "unknown", None, None
+        return "unreadable", None, None         # fail closed: never download what may be protected
     if row is None:
         return "unknown", None, None
     protection = row["protection"]
@@ -768,8 +769,9 @@ def _process(key, row, files, *, pacer, out, core, max_candidates, tolerance, po
             result["candidates"].append(_describe(item, c, "present"))
             continue
         known, cleaned, meta = rebuild_known(repo, c, policy) if repo is not None else ("unknown", None, None)
-        if known == "protected":
-            result["candidates"].append(_describe(item, c, "known_protected"))
+        if known in ("protected", "unreadable"):
+            result["candidates"].append(_describe(item, c, "known_protected" if known == "protected"
+                                                  else "known_unreadable"))
             continue
         if known == "rebuilt":
             try:
