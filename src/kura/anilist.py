@@ -198,15 +198,19 @@ class AniList:
         self.transport, self.sleep, self.clock, self.wall = transport or fetch, sleep, clock, wall
         self.interval = 60.0 / per_minute
         self.next_ok = 0.0      # earliest monotonic time for the next request
+        self.last_start = None  # when the previous request was released
 
-    def _pace(self):
+    def _pace(self, budget: float) -> float:
+        """Sleep until the next request is allowed; refuse if that exceeds `budget` seconds."""
         wait = max(self.next_ok - self.clock(), 0.0)
-        if wait > self.max_wait:
+        if wait > budget:
             raise KuraError("alias_unavailable", "AniList rate limit window is still open",
                             status=429, rate_limited=True)
         if wait:
             self.sleep(wait)
-        self.next_ok = self.clock() + self.interval
+        self.last_start = self.clock()
+        self.next_ok = self.last_start + self.interval
+        return wait
 
     def _penalize(self, headers: dict):
         delay = _number(headers.get("Retry-After"))
@@ -220,6 +224,8 @@ class AniList:
         limit = _number(headers.get("X-RateLimit-Limit"))
         if limit and limit > 0:
             self.interval = 60.0 / min(limit, 90)   # an advertised limit binds in both directions
+            if self.last_start is not None:
+                self.next_ok = max(self.next_ok, self.last_start + self.interval)
         remaining = _number(headers.get("X-RateLimit-Remaining"))
         if remaining is not None and remaining <= 1:
             reset = _number(headers.get("X-RateLimit-Reset"))
@@ -229,9 +235,9 @@ class AniList:
     def resolve(self, title: str):
         if not normalize(title) or len(title) > MAX_TITLE or any(ord(c) < 32 for c in title):
             raise KuraError("invalid_query", "Title must be 1..200 printable characters")
-        throttled = 0
+        throttled, spent = 0, 0.0
         while True:
-            self._pace()
+            spent += self._pace(self.max_wait - spent)   # max_wait bounds the whole lookup
             try:
                 data, headers = self.transport(title)
             except KuraError as e:

@@ -621,6 +621,21 @@ class AniListPacing(unittest.TestCase):
         client.resolve("Kura Sample Series")
         self.assertEqual(clock.slept, [10.0])
 
+    def test_lower_limit_applies_to_the_very_next_request(self):
+        transport = Mock(return_value=(BODY, {"X-RateLimit-Limit": "1", "X-RateLimit-Remaining": "5"}))
+        client, clock = self.make(transport, max_wait=120)
+        client.resolve("Kura Sample Series")
+        client.resolve("Kura Sample Series")
+        self.assertEqual(clock.slept, [60.0])
+
+    def test_max_wait_bounds_the_whole_lookup_across_retries(self):
+        transport = Mock(side_effect=limited("20"))
+        client, clock = self.make(transport, max_wait=30, max_retries=5)
+        with self.assertRaises(KuraError):
+            client.resolve("Kura Sample Series")
+        self.assertLessEqual(sum(clock.slept), 30)
+        self.assertEqual(transport.call_count, 2)           # 20 s slept once, a second 20 s would exceed 30
+
     def test_lower_advertised_limit_slows_the_pace(self):
         transport = Mock(return_value=(BODY, {"X-RateLimit-Limit": "10", "X-RateLimit-Remaining": "9"}))
         client, clock = self.make(transport)
