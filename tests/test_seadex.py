@@ -69,7 +69,7 @@ class Sync(Case):
         first = self.sync()
         self.assertEqual(first["mode"], "full")
         self.assertEqual(json.loads(self.state()[3]),
-                         {"entries": stamp(2), "torrents": stamp(13)})
+                         {"entries": seadex.canonical_stamp(stamp(2)), "torrents": seadex.canonical_stamp(stamp(13))})
         self.clock.now += 3600
         self.fake.entries[rid(2)] = entry(500, AL + 1, trs=[13], id=rid(2), notes="changed")
         self.fake.urls.clear()
@@ -77,10 +77,11 @@ class Sync(Case):
         self.assertEqual((out["mode"], out["entries"]["upserted"], out["torrents"]["upserted"]),
                          ("incremental", 1, 1))             # the boundary torrent is re-read, harmlessly
         queries = [parse_qs(urlsplit(u).query)["filter"][0] for u in self.fake.urls]
-        self.assertEqual(queries, [f'updated>="{stamp(2)}"', f'updated>="{stamp(13)}"'])
+        self.assertEqual(queries, [f'updated>="{seadex.canonical_stamp(stamp(2))}"',
+                           f'updated>="{seadex.canonical_stamp(stamp(13))}"'])
         self.assertEqual(self.rows("SELECT notes FROM seadex_entries WHERE id=?", rid(2)), [("changed",)])
         self.assertEqual(out["entries"]["total"], 2)
-        self.assertEqual(json.loads(self.state()[3])["entries"], stamp(500))
+        self.assertEqual(json.loads(self.state()[3])["entries"], seadex.canonical_stamp(stamp(500)))
         self.clock.now += 8 * 86400                 # last full sync is now older than 7 days
         self.assertEqual(self.sync()["mode"], "full")
 
@@ -123,12 +124,16 @@ class Sync(Case):
         self.assertEqual(self.rows("SELECT infohash FROM seadex_torrents WHERE id=?", rid(14)), [(None,)])
 
     def test_cursor_orders_by_time_not_by_string(self):
-        self.assertEqual(seadex.canonical_stamp("2025-01-01 12:00:00Z"), "2025-01-01 12:00:00.000Z")
-        self.assertEqual(seadex.canonical_stamp("2025-01-01 12:00:00.5Z"), "2025-01-01 12:00:00.500Z")
-        rows = {"a": {"updated": "2025-01-01 12:00:00Z"}, "b": {"updated": "2025-01-01 12:00:00.500Z"}}
-        self.assertEqual(seadex._newest(rows, None), "2025-01-01 12:00:00.500Z")
-        self.assertEqual(seadex._newest(rows, "2025-01-01 12:00:01Z"), "2025-01-01 12:00:01.000Z")
-        self.assertEqual(seadex.filter_updated("2025-01-01 12:00:00Z"), 'updated>="2025-01-01 12:00:00.000Z"')
+        self.assertEqual(seadex.canonical_stamp("2025-01-01 12:00:00Z"), "2025-01-01 12:00:00.000000000Z")
+        self.assertEqual(seadex.canonical_stamp("2025-01-01 12:00:00.5Z"), "2025-01-01 12:00:00.500000000Z")
+        mixed = ["2025-01-01 12:00:00Z", "2025-01-01 12:00:00.123Z", "2025-01-01 12:00:00.1234Z",
+                 "2025-01-01 12:00:00.5Z", "2025-01-01 12:00:00.12345678901Z"]
+        rows = {str(i): {"updated": u} for i, u in enumerate(mixed)}
+        self.assertEqual(seadex._newest(rows, None), "2025-01-01 12:00:00.500000000Z")
+        del rows["3"]
+        self.assertEqual(seadex._newest(rows, None), "2025-01-01 12:00:00.123456789Z")
+        self.assertEqual(seadex._newest(rows, "2025-01-01 12:00:01Z"), "2025-01-01 12:00:01.000000000Z")
+        self.assertEqual(seadex.filter_updated("2025-01-01 12:00:00Z"), 'updated>="2025-01-01 12:00:00.000000000Z"')
 
     def test_malformed_items_are_skipped_and_counted(self):
         bad_entries = [entry(30, True), entry(31, 0), entry(32, AL, id="BAD ID"), entry(33, AL, updated="x"),
@@ -205,7 +210,7 @@ class Sync(Case):
         self.store.db.commit()
         self.clock.now += 60
         self.sync(full=True)
-        self.assertEqual(json.loads(self.state()[3]), {"entries": stamp(2), "torrents": stamp(13)})
+        self.assertEqual(json.loads(self.state()[3]), {"entries": seadex.canonical_stamp(stamp(2)), "torrents": seadex.canonical_stamp(stamp(13))})
 
     def test_concurrent_sync_that_finished_first_is_not_overwritten(self):
         def transport(url):
@@ -220,6 +225,13 @@ class Sync(Case):
         self.assertEqual(caught.exception.code, "sync_conflict")
         self.assertEqual(self.rows("SELECT COUNT(*) FROM seadex_entries"), [(0,)])
         self.assertEqual(self.state()[0], "ok")     # the other run's result stays
+
+    def test_run_byte_budget(self):
+        body = json.dumps({"items": [], "totalPages": 3}).encode()
+        with patch.object(seadex, "RUN_LIMIT", len(body) * 2 - 1):
+            with self.assertRaises(KuraError) as caught:
+                self.sync(transport=lambda url: body)
+        self.assertEqual(caught.exception.code, "seadex_invalid")
 
     def test_deeply_nested_json_is_invalid_not_a_crash(self):
         with self.assertRaises(KuraError) as caught:
@@ -283,7 +295,7 @@ class Builders(unittest.TestCase):
                               filter_=seadex.filter_updated(stamp(5)))
         u = urlsplit(ok)
         self.assertEqual((u.scheme, u.netloc, u.path), ("https", "seadex.moe", "/api/collections/entries/records"))
-        self.assertEqual(parse_qs(u.query)["filter"], [f'updated>="{stamp(5)}"'])
+        self.assertEqual(parse_qs(u.query)["filter"], [f'updated>="{seadex.canonical_stamp(stamp(5))}"'])
         for kw in (dict(collection="users"), dict(collection="../x"), dict(page=0), dict(page=101),
                    dict(page=True), dict(per_page=501), dict(fields=["id,files"]), dict(fields=[]),
                    dict(fields=["id&filter=1"])):

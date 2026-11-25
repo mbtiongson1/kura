@@ -36,6 +36,7 @@ HOST = "seadex.moe"
 COLLECTIONS = ("entries", "torrents")
 USER_AGENT = "Kura/0.1 (+https://github.com/mbtiongson1/kura)"
 LIMIT = 8 * 1024 * 1024          # response cap
+RUN_LIMIT = 64 * 1024 * 1024     # bytes read across one whole run
 INTERVAL = 1.0                   # seconds between request starts
 MAX_REQUESTS = 60                # default per run
 MAX_REQUESTS_CAP = 500
@@ -101,10 +102,12 @@ def infohash(value) -> str:
 
 
 def canonical_stamp(value) -> str:
-    """Validated timestamp with a fixed three-digit minimum fraction, so string order is time order."""
+    """Validated timestamp with a fixed nine-digit fraction, so string order is time order.
+
+    Longer fractions are truncated (an earlier cursor only re-reads more, never less)."""
     value = timestamp(value)
     base, _, rest = value[:-1].partition(".")
-    return f"{base}.{rest.ljust(3, '0')}Z"
+    return f"{base}.{rest.ljust(9, '0')[:9]}Z"
 
 
 def filter_updated(since) -> str:
@@ -312,6 +315,7 @@ class Client:
         self.limiter, self.max_requests, self.wall = limiter, max_requests, wall
         self.transport = transport or fetch
         self.requests = 0
+        self.received = 0
 
     def exhausted(self) -> bool:
         return self.requests >= self.max_requests
@@ -346,10 +350,12 @@ class Client:
                 pass            # acquire already reserved the slot; never mask the outcome
         return self._parse(data)
 
-    @staticmethod
-    def _parse(data: bytes) -> dict:
+    def _parse(self, data: bytes) -> dict:
         if not isinstance(data, bytes) or len(data) > LIMIT:
             raise KuraError("seadex_invalid", "SeaDex response is not bounded bytes")
+        self.received += len(data)
+        if self.received > RUN_LIMIT:
+            raise KuraError("seadex_invalid", "SeaDex responses exceed the per-run size limit")
         try:
             doc = json.loads(data.decode("utf-8"))
         except (UnicodeError, ValueError, RecursionError) as e:
@@ -361,17 +367,24 @@ class Client:
             raise KuraError("seadex_invalid", "SeaDex response has an unexpected shape or too many pages")
         return {"items": items, "pages": pages}
 
-    def pages(self, collection: str, fields, filter_=None) -> list:
-        """Every record of a collection (or filtered subset), at most MAX_PAGES pages."""
-        out, page = [], 1
+    def pages(self, collection: str, fields, parser, skipped, filter_=None) -> dict:
+        """Parsed rows (by id) of a collection or filtered subset, at most MAX_PAGES pages.
+
+        Each page is parsed and dropped before the next one is read, so memory holds rows only."""
+        rows, page = {}, 1
         while True:
             body = self.get(build_url(collection, page=page, per_page=PER_PAGE, fields=fields,
                                       filter_=filter_))
             if len(body["items"]) > PER_PAGE:
                 raise KuraError("seadex_invalid", "SeaDex page exceeds the requested size")
-            out.extend(body["items"])
+            for item in body["items"]:
+                row = parser(item)
+                if row is None:
+                    skipped[0] += 1
+                else:
+                    rows[row["id"]] = row
             if page >= body["pages"]:
-                return out
+                return rows
             page += 1
 
 
@@ -468,17 +481,6 @@ def _insert_torrent(db, t, now, carried):
                 t["is_best"], t["dual_audio"], json.dumps(t["tags"]), *keep, t["updated"], now))
 
 
-def _parse_all(items, parser, skipped):
-    rows = {}
-    for item in items:
-        row = parser(item)
-        if row is None:
-            skipped[0] += 1
-        else:
-            rows[row["id"]] = row
-    return rows
-
-
 def _newest(rows, previous):
     stamps = [canonical_stamp(r["updated"]) for r in rows.values()]
     return max(stamps + ([canonical_stamp(previous)] if previous else []), default=None)
@@ -495,14 +497,11 @@ def _listing(store, client, full: bool, now: float, skipped) -> dict:
     if not full:
         if len(cursor) != len(COLLECTIONS):
             full = True
-    if full:
-        entries = _parse_all(client.pages("entries", ENTRY_FIELDS), parse_entry, skipped)
-        torrents = _parse_all(client.pages("torrents", TORRENT_FIELDS), parse_torrent, skipped)
-    else:
-        entries = _parse_all(client.pages("entries", ENTRY_FIELDS, filter_updated(cursor["entries"])),
-                             parse_entry, skipped)
-        torrents = _parse_all(client.pages("torrents", TORRENT_FIELDS, filter_updated(cursor["torrents"])),
-                              parse_torrent, skipped)
+    since = {} if full else cursor
+    entries = client.pages("entries", ENTRY_FIELDS, parse_entry, skipped,
+                           filter_updated(since["entries"]) if since else None)
+    torrents = client.pages("torrents", TORRENT_FIELDS, parse_torrent, skipped,
+                            filter_updated(since["torrents"]) if since else None)
     # A full pull derives the cursor from what it just read, never from the old one.
     new_cursor = {"entries": _newest(entries, None if full else cursor.get("entries")),
                   "torrents": _newest(torrents, None if full else cursor.get("torrents"))}

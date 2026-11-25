@@ -58,7 +58,9 @@ a NULL infohash and no `nyaa_id`: Kura treats "SeaDex lists it only on a private
   only. The query is built by code; filters accept only integer AniList IDs, 40-hex
   infohashes, record ids `[a-z0-9]{1,32}` and `YYYY-MM-DD HH:MM:SS[.fff]Z` timestamps.
 * No redirects, no proxy inheritance, DNS must resolve to public addresses, responses are
-  capped at 8 MiB and at most 100 pages of 500 per collection.
+  capped at 8 MiB each (64 MiB per run) and at most 100 pages of 500 per collection; every page
+  is parsed and dropped before the next is read. Cursors are stored with a fixed nine-digit
+  fraction so their string order is time order.
 * Every request goes through the shared `seadex` limiter (1 request per second across all
   Kura processes). HTTP 429 records a penalty honouring `Retry-After`. User agent carries the
   repository URL. No credentials are sent.
