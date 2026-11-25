@@ -26,6 +26,13 @@ class Tokens(unittest.TestCase):
         self.assertEqual(names.parse("Show - 01 1080p BluRay-Example.mkv")["group"], "Example")
         self.assertEqual(names.parse("Show.01.720p.x265-Example")["group"], "Example")
 
+    def test_scene_groups_after_numeric_tags_and_years_are_not_episodes(self):
+        n = names.parse("Show.S01E01.1080p.WEB-DL.DDP5.1.H.264-GROUP.mkv")
+        self.assertEqual((n["group"], n["episode"]), ("GROUP", 1))
+        self.assertEqual(names.parse("Show.1080p.AAC2.0-GROUP.mkv")["group"], "GROUP")
+        self.assertIsNone(names.parse("[Gr] Show - 2019 Special (BD 1080p).mkv")["episode"])
+        self.assertEqual(names.parse("[Gr] Show - 1080 [720p]")["episode"], None)
+
     def test_season_and_ordinal_titles(self):
         self.assertEqual(names.parse("Show S02E05v2.mkv")["season"], 2)
         self.assertIsNone(names.parse("Show - 05.mkv")["season"])
@@ -39,7 +46,7 @@ class Tokens(unittest.TestCase):
     def test_sources(self):
         for text, expected in (("[Example Subs] Show - 01 (BDRip 1080p).mkv", "BDRip"),
                                ("Show - 01 [BD 1080p Hi10P]", "BD"), ("Show - 01 [BD Remux]", "Remux"),
-                               ("Show - 01 (WEBRip 720p)", "WEBRip"), ("Show - 01 WEB 1080p", "WEB-DL"),
+                               ("Show - 01 (WEBRip 720p)", "WEBRip"), ("Show - 01 WEB 1080p", "WEB"),
                                ("Show - 01 [TV]", "TV"), ("Show - 01 DVDRip", "DVD"), ("Show - 01", None)):
             with self.subTest(text=text):
                 self.assertEqual(names.parse(text)["source"], expected)

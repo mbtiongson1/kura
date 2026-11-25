@@ -247,7 +247,8 @@ class Flags(Lab):
         self.eps(1)
         self.probe(ep(1), result(bits=8, kbps=1500, library="x264", settings=X264_STREAM))
         flag = self.codes()["low_bpp_8bit"]
-        self.assertEqual(flag["detail"]["style"], "untouched_stream")
+        self.assertEqual((flag["detail"]["style"], flag["severity"]), ("untouched_stream", "info"))
+        self.assertEqual(self.doc()["suggestion"], "none")
 
     def test_ass_missing_fonts(self):
         self.eps(1)
@@ -299,6 +300,12 @@ class Flags(Lab):
         self.seadex(A, [{"files": [[f"Season 2/{ep(1, ver='v2')}", 1000]]}])
         self.assertNotIn("v2_known_upstream", self.codes())
         self.seadex(A, [{"files": [[f"Season 1/{ep(1, ver='v2')}", 1000]]}])
+        self.assertIn("v2_known_upstream", self.codes())
+
+    def test_v2_upstream_flat_held_names_match_season_tagged_upstream(self):
+        self.title(files=[(ep(1), 250 * MB)])
+        self.identify()
+        self.seadex(A, [{"files": [[f"[{GROUP}] {SHOW} S01E01v2 [1080p].mkv", 1000]]}])
         self.assertIn("v2_known_upstream", self.codes())
 
     def test_invalid_probe_row_is_not_a_probe(self):
@@ -587,7 +594,13 @@ class Probe(Lab):
         self.probe(f"{SHOW} - 01 [1080p WEB-DL].mkv", result(encoder=False))
         e = self.doc()["probe"]["encoder"]
         self.assertEqual((e["library"], e["style"]), (None, "untouched_stream"))
-        self.assertEqual(e["notes"], ["untouched_stream_video", "no_encoder_settings"])
+        self.assertEqual(e["notes"], ["untouched_stream_video"])
+
+    def test_bare_web_without_settings_is_not_assumed_untouched(self):
+        self.title(files=[(f"{SHOW} - 01 [WEB 1080p x265].mkv", 250 * MB)])
+        self.probe(f"{SHOW} - 01 [WEB 1080p x265].mkv", result(encoder=False))
+        e = self.doc()["probe"]["encoder"]
+        self.assertEqual((e["style"], e["notes"]), ("unknown", ["no_encoder_settings"]))
 
     def test_no_settings_elsewhere_is_unknown(self):
         self.probe(ep(1), result(encoder=False))

@@ -28,8 +28,9 @@ kura audit --library NAME [--retain FILE] [--policy-overrides FILE] [--user NAME
   and the newest 30 per library are kept.
 
 A library with no inventory is refused (`no_inventory`): run `manifest build` first. The audit reads
-state in one snapshot and does not take the state lock, so a running probe or sync does not block
-it; only storing the report takes the lock (`busy` if another mutation runs).
+state in one snapshot and does not take the state lock, so it is not refused while a probe or sync
+runs; those writers wait for the read to finish (up to their busy timeout). Only storing the
+report takes the lock (`busy` if another mutation runs).
 
 ## Policy
 
@@ -97,7 +98,7 @@ view of the encoder settings plus the track facts:
 - `crf_band` (informational, never a flag) places an x265 10-bit CRF against the efficient
   18 to 24 range: `below`, `within`, `above`; null otherwise.
 - `notes`: `untouched_stream_video`, `crf_below_band`, `crf_within_band`, `crf_above_band`,
-  `no_encoder_settings`.
+  `no_encoder_settings` (not given to an untouched stream).
 
 x265 option keys are hyphenated and x264's use underscores (`psy-rd` versus `psy_rd`); the
 summary reads both. `writing_app` is not used: remuxers rewrite it.
@@ -115,7 +116,7 @@ else `review` when it has any `warn` or `action` flag, else `none`.
 | `mixed_groups` | warn | two or more known release groups across episode files (extras excluded) |
 | `superseded_version_present` | action | the same group, season and episode held as v1 and as vN (season from `SxxExx` or a `Season N` directory) |
 | `v2_known_upstream` | warn | a public SeaDex file list has `vN` of an episode (same group) for which a v1 is held |
-| `low_bpp_8bit` | warn, action below 0.035 | a sampled 8-bit file has bits per pixel below 0.06; `detail.style` says whether it is an untouched stream |
+| `low_bpp_8bit` | warn, action below 0.035; info for an untouched stream | a sampled 8-bit file has bits per pixel below 0.06; `detail.style` says whether it is an untouched stream |
 | `ass_missing_fonts` | warn | an ASS track with no attached fonts and no `Fonts/` directory in the title (skipped when the attachment scan was cut short) |
 | `seadex_best_differs` | warn archival, info efficient | a public SeaDex best exists and what is held is comparable (`held_matches` `none` or `alt`) and not a best |
 | `seadex_alt_held` | info | the held group or infohash is a SeaDex alternative |

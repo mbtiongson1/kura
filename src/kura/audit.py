@@ -175,7 +175,7 @@ def _sample(path, result) -> dict:
         notes.append("untouched_stream_video")
     if band:
         notes.append("crf_" + band + "_band")
-    if video and not enc:
+    if video and not enc and style != "untouched_stream":
         notes.append("no_encoder_settings")
     subs = [s for s in (result.get("subtitles") or []) if isinstance(s, dict)]
     attach = result.get("attachments") if isinstance(result.get("attachments"), dict) else {}
@@ -327,9 +327,9 @@ def _upstream_revisions(torrents, videos):
             group = _norm(n["group"]) or _norm(t["group"])
             if n["extra"] or n["episode"] is None or (n["version"] or 1) < 2:
                 continue
-            # A file list that names no season matches whatever season the held file is in.
+            # A name without a season matches any season, on either side.
             season = _season({"n": n, "local": name})
-            if any(h == (group, season, n["episode"]) or (season is None and h[0] == group and h[2] == n["episode"])
+            if any(h[0] == group and h[2] == n["episode"] and (None in (h[1], season) or h[1] == season)
                    for h in held):
                 found.add(n["episode"])
     return sorted(found)
@@ -424,9 +424,12 @@ def _audit_title(ctx, title):
     low = [s for s in media if s["video"]["bit_depth"] == 8 and s["bpp"] is not None and s["bpp"] < BPP_LOW]
     if low:
         worst = min(low, key=lambda s: (s["bpp"], s["path"]))
-        flags.add("low_bpp_8bit", "action" if worst["bpp"] < BPP_ACTION else "warn", files=len(low),
+        style = worst["encoder"]["style"]
+        # The bitrate of an untouched stream belongs to the service, not to a re-encoder: informational.
+        severity = "info" if style == "untouched_stream" else "action" if worst["bpp"] < BPP_ACTION else "warn"
+        flags.add("low_bpp_8bit", severity, files=len(low),
                   min_bpp=worst["bpp"], bitrate_kbps=worst["video"]["bitrate_kbps"],
-                  style=worst["encoder"]["style"])
+                  style=style)
     nofonts = [s for s in samples if s["has_ass"] and s["fonts"] == 0 and s["complete_attachments"]]
     if nofonts and not sidecar:
         flags.add("ass_missing_fonts", "warn", files=len(nofonts))
@@ -534,7 +537,7 @@ def run(store, *, library, retain=None, overrides=None, user=None, titles=None, 
     db = store.db
     began = not db.in_transaction
     if began:
-        db.execute("BEGIN")             # one read snapshot; the state lock is only needed to store the report
+        db.execute("BEGIN")             # one read snapshot (writers wait on it, up to their busy timeout); the state lock is only needed to store the report
     try:
         repo = ManifestRepo(db)
         every = repo.titles(library)

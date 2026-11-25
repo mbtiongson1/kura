@@ -22,12 +22,12 @@ _SEASON = re.compile(r"(?<![A-Za-z0-9])S(\d{1,2})E\d{1,4}(?![0-9])", re.I)
 _TAGLIKE = re.compile(
     r"(?:\d{3,4}[pi]|\d{3,4}x\d{3,4}|4k|x26[45]|h\.?26[45]|hevc|avc|av1|vp9|flac|aac|opus|ac-?3|dts|"
     r"hi10p?|10-?bits?|8-?bits?|bd|bdrip|blu-?ray|remux|web|webrip|web-?dl|dl|rip|tv|hdtv|dvd|"
-    r"multi-?subs?|batch|[0-9a-f]{8})", re.I)
+    r"multi-?subs?|ddp?\d?|truehd|atmos|h|ray|audio|subs?|batch|[0-9a-f]{8})", re.I)
 _VER = r"(?:v(\d{1,2}))?"
 _EPISODES = (
     re.compile(r"(?<![A-Za-z0-9])S\d{1,2}E(\d{1,4})" + _VER + r"(?![A-Za-z0-9])", re.I),
     re.compile(r"(?<![A-Za-z0-9])EP?\.?\s?(\d{1,4})" + _VER + r"(?![A-Za-z0-9])", re.I),
-    re.compile(r"\s-\s(\d{1,4})" + _VER + r"(?![0-9A-Za-z]|-[0-9])"),
+    re.compile(r"\s-\s(\d{1,3})" + _VER + r"(?![0-9A-Za-z]|-[0-9])"),
     re.compile(r"(?<![A-Za-z0-9.#])#?(\d{2,3})v(\d{1,2})(?![A-Za-z0-9])", re.I),
     re.compile(r"#(\d{1,4})" + _VER + r"(?![A-Za-z0-9])"),
 )
@@ -45,7 +45,7 @@ _SOURCES = (
     ("WEBRip", re.compile(r"(?<![0-9a-z])web[ ._-]?rip(?![0-9a-z])", re.I)),
     ("BDRip", re.compile(r"(?<![0-9a-z])(?:bd|br|blu-?ray)[ ._-]?rip(?![0-9a-z])", re.I)),
     ("BD", re.compile(r"(?<![0-9a-z])(?:bd|blu-?ray|bdmv)(?![0-9a-z])", re.I)),
-    ("WEB-DL", re.compile(r"(?<![0-9a-z])web(?![0-9a-z])", re.I)),
+    ("WEB", re.compile(r"(?<![0-9a-z])web(?![0-9a-z])", re.I)),
     ("TV", re.compile(r"(?<![0-9a-z])(?:hdtv|tv[ ._-]?rip)(?![0-9a-z])|[\[(]tv[\])]", re.I)),
     ("DVD", re.compile(r"(?<![0-9a-z])dvd(?:[ ._-]?rip)?(?![0-9a-z])", re.I)),
 )
@@ -60,8 +60,8 @@ def _group(stem: str):
     if trail and not _TAGLIKE.fullmatch(trail.group(1)):
         # Scene style "...x264-Group": only when a release tag precedes the hyphen, so hyphenated
         # words ("Anti-Hero", "Blu-ray") are never read as groups.
-        before = re.search(r"([A-Za-z0-9]+)$", stem[:trail.start()])
-        if before and _TAGLIKE.fullmatch(before.group(1)):
+        tokens = [t for t in re.split(r"[\s._\[\]()-]+", stem[:trail.start()]) if t][-6:]
+        if any(_TAGLIKE.fullmatch(t) for t in tokens):      # "...H.264-Group", "...DDP5.1-Group" too
             return trail.group(1)
     return None
 
