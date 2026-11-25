@@ -263,10 +263,18 @@ infohash and descriptors with an announce URL that could carry a credential are 
 never written. What is saved is rebuilt from the verbatim info dictionary and the vetted announce
 URLs only; web seeds, comments and any other field of the response are dropped. With the optional policy files, a title covered by a `path:` entry is never searched, a protected infohash is never requested and a
 descriptor on a denylisted tracker is discarded. Output contains no announce URLs.
-Requests are spaced 2 seconds apart, back off exponentially on HTTP 429/5xx and network errors,
+Requests (searches and descriptor downloads alike) are spaced 5 seconds apart, the provider's
+published crawl delay, and nothing can lower it. The provider's `robots.txt` disallows
+`/download`, and descriptors are fetched there at that 5 second pace: this was accepted by the
+owner. The spacing is shared through the state database, so two Kura processes talking to the
+same service never add up to more than one request per interval, and a backoff in one pauses the
+other. Requests back off exponentially on HTTP 429/5xx and network errors,
 and stop after three exhausted requests in a row or when `--budget-minutes` is spent. A title
 attempted in the last 7 days is skipped unless `--refresh`; failed or unfinished titles are
-not recorded and are retried by the next run. `manifest build` links a torrent only when its
+not recorded and are retried by the next run. A candidate whose infohash is already in the state
+database is not downloaded again: a public torrent whose info dictionary is kept is rebuilt locally
+(outcome `rebuilt`), a protected or private one is neither requested nor written
+(`known_protected`), and `requests.saved_known` counts both. `manifest build` links a torrent only when its
 name equals the folder name, so a candidate saved under another name is verified only after
 the folder is named like it.
 

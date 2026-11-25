@@ -167,7 +167,7 @@ class SchemaV3(Case):
 
 class Registry(Case):
     STUBS = ("cli_anilist", "cli_seadex", "cli_probe", "cli_identity", "cli_audit")
-    LIVE = ("cli_probe",)           # modules that have since gained real commands
+    IMPLEMENTED = ("cli_anilist", "cli_seadex", "cli_probe", "cli_identity")       # modules that no longer are stubs
 
     def test_registry_order_and_contract(self):
         self.assertEqual([m.__name__.rsplit(".", 1)[1] for m in cli.COMMAND_MODULES],
@@ -176,7 +176,7 @@ class Registry(Case):
             self.assertTrue(callable(module.register) and callable(module.dispatch))
 
     def test_stubs_register_nothing_and_handle_nothing(self):
-        for name in (n for n in self.STUBS if n not in self.LIVE):
+        for name in (n for n in self.STUBS if n not in self.IMPLEMENTED):
             module = getattr(cli, name)
             with self.subTest(module=name):
                 p = cli.Parser(prog="kura")
@@ -188,8 +188,8 @@ class Registry(Case):
     def test_command_set_is_unchanged(self):
         sub = next(a for a in cli.parser()._actions if isinstance(a, argparse._SubParsersAction))
         self.assertEqual(sorted(sub.choices),
-                         ["aliases", "download", "downloads", "library", "manifest", "prefs", "probe", "search",
-                          "torrent"])
+                         ["aliases", "anilist", "download", "downloads", "identity", "library", "manifest", "prefs",
+                          "probe", "retain", "seadex", "search", "torrent"])
 
     def test_dispatch_falls_through_in_order(self):
         calls = []

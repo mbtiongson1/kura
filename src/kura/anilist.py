@@ -6,7 +6,9 @@ release on their own. Failures are structured and never grant extra trust.
 """
 from dataclasses import dataclass
 import ipaddress
+import http.client
 import json
+import re
 import socket
 import time
 import urllib.error
@@ -141,15 +143,48 @@ def _headers(source) -> dict:
     return out
 
 
+def _check_public_dns() -> tuple[str, ...]:
+    """Resolve the endpoint, require public addresses only, and return them in resolver order."""
+    addresses = socket.getaddrinfo(HOST, 443, type=socket.SOCK_STREAM)
+    if not addresses or any(not ipaddress.ip_address(a[4][0]).is_global for a in addresses):
+        raise KuraError("unsafe_url", "AniList DNS resolved to a non-public address")
+    return tuple(dict.fromkeys(a[4][0] for a in addresses))
+
+
+class _PinnedHTTPS(http.client.HTTPSConnection):
+    """HTTPS to already validated IPs, with certificate and SNI checked against the real hostname."""
+
+    def __init__(self, *args, addresses: tuple[str, ...], **kwargs):
+        super().__init__(*args, **kwargs)
+        self._addresses = addresses
+
+    def connect(self):
+        failure = None
+        for address in self._addresses:         # dual stack: fall through to the next validated address
+            try:
+                sock = socket.create_connection((address, self.port), self.timeout)
+                break
+            except OSError as e:
+                failure = e
+        else:
+            raise failure or OSError("no address")
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+
+def _pinned_opener(addresses):
+    """Opener whose HTTPS connections go to the validated `addresses`: DNS cannot change between check and use."""
+    class Handler(urllib.request.HTTPSHandler):
+        def https_open(self, req):
+            return self.do_open(lambda host, **kw: _PinnedHTTPS(host, addresses=tuple(addresses), **kw), req)
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), Handler(), NoRedirect())
+
+
 def fetch(title: str) -> tuple[bytes, dict]:
     """One bounded request. Returns (body, rate-limit headers). HTTP 429 carries Retry-After."""
     validate_endpoint(ENDPOINT)
     try:
-        addresses = socket.getaddrinfo(HOST, 443, type=socket.SOCK_STREAM)
-        if not addresses or any(not ipaddress.ip_address(a[4][0]).is_global for a in addresses):
-            raise KuraError("unsafe_url", "AniList DNS resolved to a non-public address")
+        opener = _pinned_opener(_check_public_dns())
         body = json.dumps({"query": QUERY, "variables": {"search": title}}).encode()
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
         request_ = urllib.request.Request(ENDPOINT, data=body, method="POST", headers={
             "Content-Type": "application/json", "Accept": "application/json",
             "User-Agent": "Kura/0.1 (+https://github.com/mbtiongson1/kura)"})
@@ -170,6 +205,59 @@ def fetch(title: str) -> tuple[bytes, dict]:
 
 def request(title: str) -> bytes:
     return fetch(title)[0]
+
+
+GQL_LIMIT = 8 * 1024 * 1024         # list/media responses
+ERROR_BODY_LIMIT = 64 * 1024
+TOKEN_RE = re.compile(r"^[A-Za-z0-9._~+/=-]{16,8192}$")   # base64url/JWT alphabet, no whitespace
+
+
+def valid_token(token) -> bool:
+    return isinstance(token, str) and TOKEN_RE.fullmatch(token) is not None
+
+
+def _error_message(error) -> str | None:
+    """The first GraphQL error message of an HTTP error body (bounded, cleaned), or None."""
+    try:
+        document = json.loads(error.read(ERROR_BODY_LIMIT).decode("utf-8"))
+        return clean(document["errors"][0]["message"])
+    except Exception:       # any unreadable body just means "no message"
+        return None
+
+
+def graphql_fetch(query: str, variables: dict, token: str | None = None,
+                  limit: int = GQL_LIMIT) -> tuple[bytes, dict]:
+    """One bounded GraphQL POST to the pinned endpoint. Returns (body, rate-limit headers).
+
+    ``Authorization: Bearer`` is attached only here, only when `token` is given, and only to the
+    pinned HTTPS endpoint (no redirects, no proxy, public DNS only). Failures carry the HTTP
+    status and AniList's own error message, never the request headers.
+    """
+    validate_endpoint(ENDPOINT)
+    if token is not None and not valid_token(token):
+        raise KuraError("anilist_token_invalid", "The stored token has an invalid format")
+    try:
+        addresses = _check_public_dns()
+        body = json.dumps({"query": query, "variables": variables}).encode()
+        headers = {"Content-Type": "application/json", "Accept": "application/json",
+                   "User-Agent": "Kura/0.1 (+https://github.com/mbtiongson1/kura)"}
+        if token is not None:
+            headers["Authorization"] = "Bearer " + token
+        with _pinned_opener(addresses).open(
+                urllib.request.Request(ENDPOINT, data=body, method="POST", headers=headers), timeout=30) as response:
+            data = response.read(limit + 1)
+            received = _headers(getattr(response, "headers", None))
+        if len(data) > limit:
+            raise KuraError("anilist_response_too_large", "AniList response exceeds the size limit")
+        return data, received
+    except urllib.error.HTTPError as e:
+        reason = _error_message(e)
+        if reason is not None and token is not None and token in reason:
+            reason = None       # never repeat server text that echoes the credential
+        raise KuraError("anilist_http", "AniList rejected the request", status=e.code,
+                        reason=reason, **_headers(e.headers)) from e
+    except (OSError, urllib.error.URLError) as e:
+        raise KuraError("anilist_unavailable", "AniList request failed; retry later") from e
 
 
 def _number(value, default=None):
@@ -197,11 +285,12 @@ class AniList:
 
     def __init__(self, *, per_minute: int = 30, max_wait: float = 30.0, max_retries: int = 2,
                  transport=None, sleep=time.sleep, clock=time.monotonic, wall=time.time,
-                 limiter: SharedLimiter | None = None):
+                 limiter: SharedLimiter | None = None, gql_transport=None):
         if per_minute < 1 or max_wait < 0 or max_retries < 0:
             raise KuraError("invalid_argument", "Invalid AniList pacing parameters")
         self.per_minute, self.max_wait, self.max_retries = per_minute, max_wait, max_retries
         self.transport, self.sleep, self.clock, self.wall = transport or fetch, sleep, clock, wall
+        self.gql = gql_transport or graphql_fetch   # (query, variables, token, limit) -> (body, headers)
         self.limiter = limiter
         self.interval = 60.0 / per_minute
         self.next_ok = 0.0      # earliest monotonic time for the next request
@@ -234,7 +323,8 @@ class AniList:
         except KuraError as e:
             raise KuraError("alias_unavailable", "AniList rate-limit state is unavailable; retry later") from e
 
-    def _penalize(self, headers: dict):
+    def _penalize(self, headers: dict) -> float:
+        """Record a 429 penalty; returns the delay in seconds."""
         delay = _number(headers.get("Retry-After"))
         if delay is None:
             reset = _number(headers.get("X-RateLimit-Reset"))
@@ -242,8 +332,9 @@ class AniList:
         delay = min(max(delay, 1.0), 3600.0)
         if self.limiter is not None:
             self._shared(self.limiter.penalize, self.wall() + delay)
-            return
+            return delay
         self.next_ok = max(self.next_ok, self.clock() + delay)
+        return delay
 
     def _observe(self, headers: dict):
         limit = _number(headers.get("X-RateLimit-Limit"))
@@ -268,9 +359,9 @@ class AniList:
             delay = reset - self.wall() if reset is not None else 60.0
             self.next_ok = max(self.next_ok, self.clock() + min(max(delay, 0.0), 3600.0))
 
-    def _send(self, title: str):
+    def _send(self, call, *args):
         try:
-            return self.transport(title)
+            return call(*args)
         finally:
             if self.limiter is not None:
                 try:
@@ -285,7 +376,7 @@ class AniList:
         while True:
             spent += self._pace(self.max_wait - spent)   # max_wait bounds the whole lookup
             try:
-                data, headers = self._send(title)
+                data, headers = self._send(self.transport, title)
             except KuraError as e:
                 if e.details.get("status") != 429:
                     raise
@@ -296,3 +387,42 @@ class AniList:
                 continue
             self._observe(headers)
             return choose(parse_response(data), title)
+
+    def penalize(self, headers: dict) -> float:
+        """Record a rate-limit penalty reported inside a response body. Returns the delay in seconds."""
+        try:
+            return self._penalize({k: v for k, v in headers.items() if isinstance(v, str)})
+        except KuraError as e:
+            raise KuraError("anilist_unavailable", e.message) from e
+
+    def query(self, query: str, variables: dict, *, token: str | None = None, limit: int = GQL_LIMIT):
+        """One paced GraphQL request through the shared budget. Returns (body, headers).
+
+        Never retries: a 429 records the penalty and raises ``anilist_rate_limited`` (with
+        ``retry_after``); a closed window longer than ``max_wait`` raises the same without a request.
+        """
+        try:
+            try:
+                self._pace(self.max_wait)
+            except KuraError as e:
+                if e.code != "alias_unavailable":
+                    raise
+                if not e.details.get("rate_limited"):
+                    raise KuraError("anilist_unavailable", e.message) from e
+                after = getattr(e.__cause__, "details", {}).get("retry_after")
+                raise KuraError("anilist_rate_limited", "AniList rate limit window is still open",
+                                **({"retry_after": after} if after is not None else {})) from e
+            try:
+                data, headers = self._send(self.gql, query, variables, token, limit)
+            except KuraError as e:
+                if e.details.get("status") != 429:
+                    raise
+                delay = self._penalize({k: v for k, v in e.details.items() if isinstance(v, str)})
+                raise KuraError("anilist_rate_limited", "AniList rate limit reached; retry later",
+                                retry_after=delay) from e
+            self._observe(headers)
+            return data, headers
+        except KuraError as e:
+            if e.code == "alias_unavailable":   # limiter-state failures from _observe/_penalize
+                raise KuraError("anilist_unavailable", e.message) from e
+            raise
