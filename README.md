@@ -222,6 +222,46 @@ garbage or does not list the torrent is recorded as `unavailable` and never fail
 and stored detail name tracker hosts only, never full URLs. UDP trackers (BEP 15) are not
 queried yet; a torrent with only UDP trackers is `unavailable` (`no_tracker`).
 
+### Finding candidate torrents (network, descriptors only)
+```sh
+kura manifest resolve --library home --torrents-out /path/to/kura-owned/dir \
+  [--title media/Some\ Title ...] [--max-titles N] [--max-candidates 3] \
+  [--budget-minutes 30] [--refresh] [--no-anilist] [--tracker-denylist F] [--protected F] \
+  [--root LABEL=PATH ...]
+```
+Most titles end up `unmatched` because nobody kept a `.torrent` for them. `manifest resolve`
+searches Nyaa for candidates and saves their **descriptors** (small metadata files, never
+media) as `<infohash>.torrent` in `--torrents-out`; run `kura manifest build --torrents` on that
+directory afterwards. A wrong candidate is harmless: `build` verifies piece hashes and only a
+100% match makes a title `reacquirable`. Resolve itself never marks anything eligible.
+
+Run it where there is network. It reads only the state database (title names, file names and
+sizes), never the library, and writes only inside `--torrents-out`: a Kura-owned directory that
+must already exist, must not be a symlink, and is refused when it holds a subdirectory or a media file (it looks like a library). Pass
+each library `--root` as well and an output directory equal to, inside or above one is refused too
+(the state database does not record root paths, so this cannot be checked otherwise). Besides descriptors it keeps a small `.kura-resolve.json`
+attempt ledger and a lock file there, and the existing AniList alias cache in the state database
+is updated. Only `unmatched` titles are searched, so the names of protected or blocked titles are never sent
+anywhere. Search terms are the folder name without group, resolution, codec, source and batch
+tags (a season marker is kept as one extra variant) plus up to two AniList titles
+(`--no-anilist` to skip), at most four queries per title. The search is a separate, batch-aware
+path over the same hardened transport as acquisition (canonical HTTPS origin, public DNS, no
+redirects or proxies, size caps); the acquisition search, which refuses anything but a single
+episode, is unchanged. A candidate must fit the title's total size within 2% (or the rounding of
+the size Nyaa shows) and contain the title's words; candidates are ranked by size, an
+identical name, a release group found in the folder or file names, then seeders, and at most
+`--max-candidates` descriptors are fetched per title. Private descriptors, descriptors that do not hash to the advertised
+infohash and descriptors with an announce URL that could carry a credential are discarded and
+never written. What is saved is rebuilt from the verbatim info dictionary and the vetted announce
+URLs only; web seeds, comments and any other field of the response are dropped. With the optional policy files, a title covered by a `path:` entry is never searched, a protected infohash is never requested and a
+descriptor on a denylisted tracker is discarded. Output contains no announce URLs.
+Requests are spaced 2 seconds apart, back off exponentially on HTTP 429/5xx and network errors,
+and stop after three exhausted requests in a row or when `--budget-minutes` is spent. A title
+attempted in the last 7 days is skipped unless `--refresh`; failed or unfinished titles are
+not recorded and are retried by the next run. `manifest build` links a torrent only when its
+name equals the folder name, so a candidate saved under another name is verified only after
+the folder is named like it.
+
 ## Storage, interruption and status
 Default state: `~/.local/share/kura/state.sqlite3` (preferences, receipts, audit events
 and validated sanitized descriptors for explicit offline resume). This is private data,

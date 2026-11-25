@@ -105,6 +105,11 @@ the "photos cleared once safely in the cloud" model: Kura proposes, the owner pu
 Statuses are recomputed from stored evidence (size, mtime, device, inode per file), so a
 changed file turns a title `stale`. Private or unparsable material is protected, never
 eligible. Quarantine planning and swarm-health checks build on this in later stages.
+Candidate discovery (`manifest resolve`) is separate and untrusted by design: it only fetches
+public torrent *descriptors* for unmatched titles into a Kura-owned directory, through a
+verification-purpose search that is distinct from the single-episode acquisition path (same
+hardened transport, paced, budgeted, resumable). It decides nothing; the piece-hash
+verification in `manifest build` is the only thing that can make a title eligible.
 Target lifecycle: discovered -> proposed -> acquiring -> staged -> ready -> watched ->
 archive_candidate -> quarantined -> reclaimed -> reacquirable.
 MVP stops at verified acquisition. Future organization uses approved roots, collision
