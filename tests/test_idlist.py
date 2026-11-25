@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from kura.idlist import IdList, MAX_BYTES, MAX_LINES, parse
+from kura.idlist import IdList, MAX_BYTES, MAX_LINES, parse, parse_pins
 from kura.models import KuraError
 
 
@@ -96,3 +96,36 @@ class Tags(Case):
 
 if __name__ == "__main__":
     unittest.main()
+
+class Pins(Case):
+    def refused_pins(self, path):
+        with self.assertRaises(KuraError) as caught:
+            parse_pins(path)
+        self.assertEqual(caught.exception.code, "invalid_policy")
+        return caught.exception.details
+
+    def test_ids_not_anime_comments_and_verbatim_keys(self):
+        path = self.write("# owner pins\n\n999000001\tmain/Kura Alpha #1 (2019)\n"
+                          "  # indented comment\nnot-anime\tmain/[x] Kura  Beta.mkv\n", "pins.tsv")
+        pins = parse_pins(path)
+        self.assertEqual(pins.entries, {"main/Kura Alpha #1 (2019)": 999000001, "main/[x] Kura  Beta.mkv": None})
+        self.assertEqual(pins.summary(), {"sha256": pins.sha256, "pins": 2})
+        reordered = self.write("not-anime\tmain/[x] Kura  Beta.mkv\n999000001\tmain/Kura Alpha #1 (2019)\n",
+                               "again.tsv")
+        self.assertEqual(parse_pins(reordered).sha256, pins.sha256)
+        self.assertEqual(parse_pins(self.write("", "empty.tsv")).entries, {})
+        odd = self.write("999000001\tmain/Kura Alpha \r\n999000002\tmain/a\tb\x0c\n999000003\tmain/c", "odd.tsv")
+        self.assertEqual(parse_pins(odd).entries, {"main/Kura Alpha ": 999000001, "main/a\tb\x0c": 999000002,
+                                                   "main/c": 999000003})
+
+    def test_bad_lines_refuse_the_whole_file(self):
+        for text in ("999000001 main/Kura Alpha\n",            # no tab
+                     "abc\tmain/Kura Alpha\n", "0\tmain/Kura Alpha\n", "1000000000\tmain/Kura Alpha\n",
+                     "999000001\t\n", "999000001\r\n",
+                     "999000001\tmain/Kura Alpha\nnot-anime\tmain/Kura Alpha\n",
+                     "999000001\tmain/Kura Alpha\n999000001\tmain/Kura Alpha\n"):
+            details = self.refused_pins(self.write(text, "bad.tsv"))
+            self.assertIn("line", details, text)
+        self.assertEqual(self.refused_pins(self.write("", "bin.tsv", raw=b"\xff\tmain/x\n")), {})
+        self.assertEqual(self.refused_pins(self.write("", "big.tsv", raw=b"#" * (MAX_BYTES + 1))), {})
+
