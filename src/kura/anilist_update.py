@@ -124,15 +124,17 @@ def _pick(rows: list[dict], title: str, where: str, *, exact: bool):
 def resolve_target(db, req, title: str, *, search: bool):
     """Resolve a title to one AniList ID, never by guessing.
 
-    The viewer's own list accepts an exact title, or else the one entry containing every word of
-    it (two such entries refuse; there is no ranking); every stored media row and the opt-in online search accept only an exact
-    title (any of romaji, English, native or a synonym). Anything else refuses with candidates.
+    In order: an exact title (romaji, English, native or a synonym) on the viewer's list; an exact
+    title on any stored media row; the one entry on the viewer's list containing every word of the
+    title (two such entries refuse; there is no ranking); with ``search``, an exact title in one
+    public lookup. A tie at any stage, or no match, refuses with candidates.
     """
-    anilist_id, record = _pick(list_snapshot(db), title, "list", exact=False)
-    if anilist_id is not None:
-        return anilist_id, record
-    media_rows = _media_rows(db)
-    anilist_id, record = _pick(media_rows, title, "media", exact=True)
+    list_rows, media_rows = list_snapshot(db), _media_rows(db)
+    for rows, where in ((list_rows, "list"), (media_rows, "media")):
+        anilist_id, record = _pick(rows, title, where, exact=True)
+        if anilist_id is not None:
+            return anilist_id, record
+    anilist_id, record = _pick(list_rows, title, "list", exact=False)
     if anilist_id is not None:
         return anilist_id, record
     if not search:

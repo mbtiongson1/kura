@@ -149,6 +149,15 @@ class Update(Lab):
         self.fake.media_overrides[IDS[4]] = {**media(IDS[4]), "synonyms": ["Kura Sample Series 3"]}
         self.refused("anilist_title_ambiguous", title="Kura Sample Series 3", progress=1, search=True)
 
+    def test_an_exact_stored_title_beats_a_partial_list_match(self):
+        self.fake.entries = [entry(IDS[0], "CURRENT", progress=1)]
+        self.sync()
+        self.store.db.execute("INSERT INTO anilist_media(anilist_id,title_romaji,fetched_at) VALUES(?,?,1)",
+                              (IDS[4], "Sample Series"))
+        self.store.db.commit()
+        out = self.update(title="Sample Series", progress=2, dry_run=True)
+        self.assertEqual((out["anilist_id"], out["resolved"]["via"]), (IDS[4], "media"))
+
     def test_a_unique_partial_title_resolves_only_from_the_viewers_list(self):
         self.fake.entries = [entry(IDS[0], "CURRENT", progress=1)]
         self.sync()

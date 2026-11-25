@@ -52,13 +52,13 @@ error code. Authentication errors, unknown or private users and bad arguments ra
 `kura anilist update` changes one entry of the logged-in account's list, for example
 `kura anilist update --title "Some Show" --progress 8` after watching episode 8.
 
-1. **Target.** `--id N` is exact. `--title` is matched against the stored snapshot, never guessed:
-   on your own list an exact title, or else the one entry that contains every word of it (two
-   such entries refuse: there is no ranking); then an
-   exact title (romaji, English, native or a synonym) on any stored media row; then, only with
-   `--search`, an exact title in one public AniList search (sent without the token). A tie
-   refuses with `anilist_title_ambiguous`, a miss with `anilist_title_unknown`; both list the
-   candidates so you can retry with `--id`. `resolved` in the output says which rule matched.
+1. **Target.** `--id N` is exact. `--title` is matched against the stored snapshot, never guessed,
+   in this order: an exact title (romaji, English, native or a synonym) on your own list; an
+   exact title on any stored media row; the one entry on your list that contains every word of
+   the title (two such entries refuse: there is no ranking); then, only with `--search`, an
+   exact title in one public AniList search (sent without the token). A tie refuses with
+   `anilist_title_ambiguous`, a miss with `anilist_title_unknown`; both list the candidates so
+   you can retry with `--id`. `resolved` in the output says which rule matched.
 2. **Read.** One authenticated request fetches the media and your current entry.
 3. **Plan.** Progress never goes down without `--allow-decrease`
    (`anilist_progress_decrease`) and never past a known episode count
