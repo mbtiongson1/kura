@@ -416,6 +416,8 @@ def _audit_title(ctx, title):
 
     # probe
     rows, changed = _probe_rows(db, title, files)
+    counted = {f["rel"] for f in videos}              # episode videos only: no extras, no audio sidecars
+    rows = {path: row for path, row in rows.items() if path in counted}
     samples = []
     for path, (st, result) in sorted(rows.items()):
         samples.append({"path": path, **_sample(path, result)} | {"_status": st})
@@ -428,13 +430,13 @@ def _audit_title(ctx, title):
     sidecar = any(part.casefold() in SIDECAR_FONT_DIRS for f in files for part in f["local"].split("/")[:-1])
     low = [s for s in media if s["video"]["bit_depth"] == 8 and s["bpp"] is not None and s["bpp"] < BPP_LOW]
     if low:
-        worst = min(low, key=lambda s: (s["bpp"], s["path"]))
+        reencodes = [s for s in low if s["encoder"]["style"] != "untouched_stream"]
+        worst = min(reencodes or low, key=lambda s: (s["bpp"], s["path"]))
         style = worst["encoder"]["style"]
         # The bitrate of an untouched stream belongs to the service, not to a re-encoder: informational.
-        severity = "info" if style == "untouched_stream" else "action" if worst["bpp"] < BPP_ACTION else "warn"
-        flags.add("low_bpp_8bit", severity, files=len(low),
-                  min_bpp=worst["bpp"], bitrate_kbps=worst["video"]["bitrate_kbps"],
-                  style=style)
+        severity = "info" if not reencodes else "action" if worst["bpp"] < BPP_ACTION else "warn"
+        flags.add("low_bpp_8bit", severity, files=len(low), min_bpp=worst["bpp"],
+                  bitrate_kbps=worst["video"]["bitrate_kbps"], style=style)
     nofonts = [s for s in samples if s["has_ass"] and s["fonts"] == 0 and s["complete_attachments"]]
     if nofonts and not sidecar:
         flags.add("ass_missing_fonts", "warn", files=len(nofonts))
@@ -553,8 +555,8 @@ def run(store, *, library, retain=None, overrides=None, user=None, titles=None, 
         if titles:
             known = {t["rel_path"] for t in every}
             for key in titles:
-                if key not in known:
-                    raise _bad("Unknown title key", title=key)
+                if key not in known or key not in {t["rel_path"] for t in present}:
+                    raise _bad("Unknown title key (or no longer present in the library)", title=key)
             wanted = set(titles)
             chosen = [t for t in chosen if t["rel_path"] in wanted]
         identities = identity.load(db, library)

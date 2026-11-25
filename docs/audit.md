@@ -116,7 +116,7 @@ else `review` when it has any `warn` or `action` flag, else `none`.
 | `mixed_groups` | warn | two or more known release groups across episode files (extras excluded) |
 | `superseded_version_present` | action | the same group, season and episode held as v1 and as vN (season from `SxxExx` or a `Season N` directory) |
 | `v2_known_upstream` | warn | a public SeaDex file list has `vN` of an episode (same group) for which a v1 is held |
-| `low_bpp_8bit` | warn, action below 0.035; info for an untouched stream | a sampled 8-bit file has bits per pixel below 0.06; `detail.style` says whether it is an untouched stream |
+| `low_bpp_8bit` | warn, action below 0.035; info when every low file is an untouched stream | a sampled 8-bit file has bits per pixel below 0.06; `detail.style` says whether it is an untouched stream |
 | `ass_missing_fonts` | warn | an ASS track with no attached fonts and no `Fonts/` directory in the title (skipped when the attachment scan was cut short) |
 | `seadex_best_differs` | warn archival, info efficient | a public SeaDex best exists and what is held is comparable (`held_matches` `none` or `alt`) and not a best |
 | `seadex_alt_held` | info | the held group or infohash is a SeaDex alternative |

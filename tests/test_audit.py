@@ -308,6 +308,25 @@ class Flags(Lab):
         self.seadex(A, [{"files": [[f"[{GROUP}] {SHOW} S01E01v2 [1080p].mkv", 1000]]}])
         self.assertIn("v2_known_upstream", self.codes())
 
+    def test_probed_extras_and_sidecars_do_not_count(self):
+        self.title(files=[(ep(1), 250 * MB), (f"Extras/[{GROUP}] {SHOW} - NCOP1.mkv", 40 * MB),
+                          (f"[{GROUP}] {SHOW} - 01.mka", 5 * MB)])
+        self.probe("Extras/" + f"[{GROUP}] {SHOW} - NCOP1.mkv", result(bits=8, kbps=100, fonts=0), size=40 * MB)
+        self.probe(f"[{GROUP}] {SHOW} - 01.mka", result(), size=5 * MB)
+        report = self.audit()
+        codes = self.codes(report)
+        self.assertIn("probe_missing", codes)
+        self.assertFalse({"low_bpp_8bit", "ass_missing_fonts"} & set(codes))
+        self.assertEqual(report["inputs"]["probe"]["files_probed"], 0)
+
+    def test_low_bpp_severity_comes_from_re_encodes(self):
+        self.title(files=[(f"{SHOW} - 01 [WEB-DL].mkv", 250 * MB), (ep(2), 250 * MB)])
+        kbps = lambda bpp: round(bpp * 1920 * 1080 * 23.976 / 1000)
+        self.probe(f"{SHOW} - 01 [WEB-DL].mkv", result(bits=8, kbps=kbps(0.02), library="x264", settings=X264_STREAM))
+        self.probe(ep(2), result(bits=8, kbps=kbps(0.04), library="x264", settings={"rc": "crf", "crf": "23"}))
+        flag = self.codes()["low_bpp_8bit"]
+        self.assertEqual((flag["severity"], flag["detail"]["style"], flag["detail"]["files"]), ("warn", "crf", 2))
+
     def test_superseded_without_a_season_pairs_with_a_season_tagged_file(self):
         self.title(files=[(ep(5), 1), (f"[{GROUP}] {SHOW} S01E05v2 [1080p].mkv", 1)])
         self.assertIn("superseded_version_present", self.codes())
@@ -333,6 +352,8 @@ class Flags(Lab):
         self.db.commit()
         report = self.audit()
         self.assertEqual((report["counts"]["titles"], report["titles"]), (0, []))
+        with self.assertRaises(KuraError):
+            self.audit(titles=[KEY])
 
     def test_invalid_probe_row_is_not_a_probe(self):
         self.eps(1)
