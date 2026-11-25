@@ -45,6 +45,7 @@ spent, ``--offline``) ends up weaker than ``resolved``, never stale. The module 
 writes only Kura's private state database and never touches a library.
 """
 from contextlib import contextmanager
+import hashlib
 import json
 import re
 import time
@@ -383,69 +384,99 @@ _FAILURES = ("alias_unavailable", "alias_invalid", "unsafe_url")
 
 
 def alias_queries(base: str, season: int | None) -> list[str]:
-    """What the alias pass asks for one name, in order."""
+    """What the alias pass asks for one name, in order (the season variant first)."""
     return [f"{base} Season {season}", base] if season is not None and season >= 2 else [base]
 
 
-def _alias(lookup, base: str, season: int | None, budget: int):
-    """Alias fallback for one title: ``(record, stop, out_of_budget)``. The season variant is
-    asked first; the returned page is matched here with the same rules as the offline pass."""
-    queries = alias_queries(base, season)
-    rejected: set[int] = set()
-    for query in queries:
+def plan_steps(base: str, season: int | None, alt) -> list[tuple[str, str, int | None]]:
+    """The whole planned query sequence of a title: ``(query, name, season)`` per step. The folder
+    name's queries come first, then those of the file-name fallback ``alt`` (``(name, season)``
+    or None). ``name`` and ``season`` are what the returned page is matched against."""
+    steps = [(q, base, season) for q in alias_queries(base, season)]
+    if alt is not None:
+        steps += [(q, alt[0], alt[1]) for q in alias_queries(*alt)]
+    return steps
+
+
+_KEY = re.compile(r"v2:(\d+)/(\d+):")
+MAX_QUERY = 200
+
+
+def _key(steps, done: int) -> str:
+    """The ``query`` of a negative or undecided alias row: how many steps of the plan are finished
+    and the plan itself, ``v2:<done>/<total>:<query>@<season> | ...`` (``-`` for no season). A plan
+    too long for the column is replaced by its hash. Rows without this format are not trusted."""
+    plan = " | ".join(f"{q}@{'-' if s is None else s}" for q, _, s in steps)
+    head = f"v2:{done}/{len(steps)}:"
+    if len(head) + len(plan) > MAX_QUERY:
+        plan = "#" + hashlib.sha256(plan.encode()).hexdigest()[:32]
+    return head + plan
+
+
+def _done(text: str | None, steps) -> int | None:
+    """Steps finished according to a row's ``query``, or None unless it describes exactly ``steps``
+    (same queries, same order, same seasons): an older format or a changed plan is not remembered."""
+    found = _KEY.match(text or "")
+    if found is None:
+        return None
+    done, total = int(found.group(1)), int(found.group(2))
+    return done if total == len(steps) and 0 <= done <= total and text == _key(steps, done) else None
+
+
+def _memory(row: dict | None, moment: float, steps) -> int | None:
+    """How many steps of ``steps`` a recent alias row already settles, or None when it settles
+    none. ``len(steps)`` means nothing is asked: the plan is finished with no match, the answer
+    was ambiguous, or an outage is too recent to try again. Fewer is where to resume."""
+    if row is None or row["source"] != "alias" or moment - row["updated_at"] < 0:
+        return None
+    done, age, total = _done(row["query"], steps), moment - row["updated_at"], len(steps)
+    if done is None:
+        return None
+    if row["status"] == "unresolved":
+        return done if age < ALIAS_TTL else None
+    if row["status"] == "ambiguous":
+        return total if age < ALIAS_TTL else None
+    if row["status"] == "unavailable":
+        return total if age < ALIAS_FAILURE_TTL else (done if age < ALIAS_TTL else None)
+    return None
+
+
+_FAILURES = ("alias_unavailable", "alias_invalid", "unsafe_url")
+
+
+def _alias(lookup, steps, start: int, budget: int):
+    """Alias fallback for one title from step ``start``: ``(record, stop, out_of_budget)``.
+
+    Each step's page is matched here with the same rules as the offline pass, against the name
+    and season of that step. A record is None only when nothing new was learned; when the budget
+    ends part-way, the record keeps the finished steps (``_key``) so the next run resumes."""
+    total, rejected = len(steps), set()
+
+    def record(status, query, found=None, candidates=None):
+        base = found or {"status": status, "anilist_id": None, "matched": None,
+                         "candidates": sorted(rejected) if candidates is None else candidates}
+        return _record(base, "alias", query)
+
+    for i in range(start, total):
+        query, name, season = steps[i]
         if lookup.made >= budget:
-            return None, False, True
+            return (None if i == start else record("unresolved", _key(steps, i))), False, True
         try:
             rows = lookup.page(query)
         except KuraError as e:
-            if e.code == "invalid_query":
-                return _record({"status": "unresolved", "anilist_id": None, "matched": None,
-                                "candidates": []}, "alias", None), False, False
+            if e.code == "invalid_query":       # cannot be asked: nothing more to try for this title
+                return record("unresolved", _key(steps, total)), False, False
             if e.code not in _FAILURES:
                 raise
-            return _record({"status": "unavailable", "anilist_id": None, "matched": None,
-                            "candidates": []}, "alias", query), True, False
-        found = match(rows, base, season)
-        if found["status"] != "unresolved":
-            return _record(found, "alias", query), False, False
-        loose = match(rows, base, None)         # entries only the season rule turned away
+            return record("unavailable", _key(steps, i)), True, False
+        found = match(rows, name, season)
+        if found["status"] == "resolved":
+            return record(None, query, found), False, False
+        if found["status"] == "ambiguous":
+            return record(None, _key(steps, i + 1), found), False, False
+        loose = match(rows, name, None)         # entries only the season rule turned away
         rejected.update(loose["candidates"] + ([loose["anilist_id"]] if loose["anilist_id"] else []))
-    found = {"status": "unresolved", "anilist_id": None, "matched": None, "candidates": sorted(rejected)}
-    return _record(found, "alias", queries[-1]), False, False
-
-
-def _fresh(row: dict | None, moment: float) -> bool:
-    """A recent negative alias answer is not asked again before its old cache time would run out."""
-    if row is None or row["source"] != "alias":
-        return False
-    ttl = {"unresolved": ALIAS_TTL, "ambiguous": ALIAS_TTL, "unavailable": ALIAS_FAILURE_TTL}.get(row["status"])
-    return ttl is not None and 0 <= moment - row["updated_at"] < ttl
-
-
-def _plan_key(folder_last: str, alt) -> str:
-    """The ``query`` a finished negative alias answer carries: the folder name's last query, and
-    the file-name fallback's last query when there is one. It ties the memory to what was asked."""
-    return (f"{folder_last} | {alias_queries(*alt)[-1]}" if alt is not None else folder_last)[:200]
-
-
-def _memory(row: dict | None, moment: float, base: str, season: int | None, alt) -> str | None:
-    """What a recent negative alias row already settles for the current queries: ``"all"`` (ask
-    nothing), ``"folder"`` (the folder name was asked, only the file-name query remains) or None.
-    A negative answer is remembered together with the queries it was for, so a changed fallback
-    (new files) is looked up again; an unavailable or ambiguous row stays fresh by time alone."""
-    if not _fresh(row, moment):
-        return None
-    if row["status"] != "unresolved":
-        return "all"
-    folder_last, asked = alias_queries(base, season)[-1], row["query"]
-    if asked is None:
-        return "all" if alt is None else None
-    if asked == _plan_key(folder_last, alt):
-        return "all"
-    folder_done = asked == folder_last or asked.startswith(folder_last + " | ")
-    if folder_done:
-        return "all" if alt is None else "folder"
-    return None
+    return record("unresolved", _key(steps, total)), False, False
 
 
 def check_sync_args(library, titles, max_lookups):
@@ -587,12 +618,13 @@ def sync(store, *, library: str, titles: list[str] | None = None, aliases=None,
                 if again["status"] != "unresolved":
                     found, query, alt = again, alt[0], None
         if found["status"] == "unresolved":
-            memory = None if refresh else _memory(current, moment, base, season, alt)
-            if memory == "all":
+            steps = plan_steps(base, season, alt)
+            memory = None if refresh else _memory(current, moment, steps)
+            if memory == len(steps):
                 continue                    # asked recently and nothing new offline
-            need.append((key, base, season, alt, memory == "folder"))   # a refresh drops what it cannot reconfirm
-            if memory == "folder":
-                continue                    # keep the row that remembers the folder answer
+            need.append((key, steps, memory or 0))      # a refresh drops what it cannot reconfirm
+            if memory:
+                continue                    # keep the row that remembers the finished steps
         record = _carry(_record(found, "list", query), current)
         if not _same(current, record):
             offline[key] = record
@@ -603,31 +635,18 @@ def sync(store, *, library: str, titles: list[str] | None = None, aliases=None,
     if counter is not None:
         found_now, stop = {}, False
         try:
-            for key, base, season, alt, folder_done in need:
+            for key, steps, start in need:
                 if stop:
                     pending += 1
                     continue
-                if not normalize(base):
+                if not normalize(steps[0][1]):
                     continue
-                if folder_done:             # the folder name was asked in an earlier run
-                    record, exhausted = _record({"status": "unresolved", "anilist_id": None, "matched": None,
-                                                 "candidates": []}, "alias", alias_queries(base, season)[-1]), False
-                else:
-                    record, stop, exhausted = _alias(counter, base, season, max_lookups)
-                if exhausted:
+                record, stop, exhausted = _alias(counter, steps, start, max_lookups)
+                if exhausted:               # nothing is lost: finished steps are in the record
                     stop = True
                     pending += 1
+                if record is None:
                     continue
-                if not stop and alt is not None and record["status"] == "unresolved":
-                    folder_record = record
-                    second, stop, exhausted = _alias(counter, alt[0], alt[1], max_lookups)
-                    if exhausted:           # keep the folder answer: the next run asks only the file-name query
-                        stop = True
-                        pending += 1
-                    else:                   # the file-name query settles it, or adds what it rejected
-                        record = second if second["status"] != "unresolved" else _record(
-                            {**folder_record, "candidates": sorted(set(folder_record["candidates"]) | set(second["candidates"]))},
-                            "alias", _plan_key(alias_queries(base, season)[-1], alt))
                 record = _carry(record, before.get(key))
                 if not _same(existing.get(key), record):
                     found_now[key] = record

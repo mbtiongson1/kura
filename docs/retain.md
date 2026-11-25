@@ -62,11 +62,17 @@ folders and OP/ED/PV-style files are ignored). They are used only when every vid
 yields a series name and all agree on name and season, and a season the folder marks does
 not contradict them; any disagreement keeps the folder result. The name goes through the
 same offline matching, then (after the folder name) the alias pass, which costs one more
-lookup from the budget; the `query` column records the name that matched. A negative alias
-answer is remembered together with the queries it was for (`folder query | file-name query`
-in `query`): when the budget ends between the two lookups the folder answer is kept and the
-next run asks only the file-name query, and when the files change so the file-name query is
-a different one, it is asked again without `--refresh` (the folder answer is not).
+lookup from the budget; the `query` column records the name that matched. Every title has a planned query sequence: the folder name's queries (the season variant
+`<title> Season N` first, then the plain title), then the file-name fallback's queries. A
+negative or undecided alias row records the plan and how much of it is finished in `query`,
+for example `v2:1/3:Foo Season 2@2 | Foo@2 | Bar@-` (`@` is the season the returned page is
+filtered by, `-` for none; a plan too long for the column is replaced by its hash). When the
+budget ends part-way, the finished queries are kept and the next run resumes at the first one
+not yet asked, so even `--max-lookups 1` gets there. A recent row is trusted only while the plan
+is exactly the same (same queries, order and seasons): new files, a different file-name query or a
+changed season marker look the title up again without `--refresh`, and a row in any other format
+(written by an earlier version) is looked up again. A resolved row's `query` is the query that
+matched.
 
 Root entries that are not titles. A loose file that is not a video (poster or logo images,
 `.nfo`, dotfiles, `*.ffs_db`) and a folder that holds files but no video (a `fonts` folder)

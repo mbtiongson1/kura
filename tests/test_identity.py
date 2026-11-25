@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -286,6 +287,68 @@ class AliasFallback(Base):
         self.assertEqual((self.row("Kura Gamma S02")["anilist_id"], self.row("Kura Gamma S02")["query"]),
                          (C, "Kura Gamma Season 2"))
 
+    def test_a_season_title_needing_two_queries_progresses_with_a_budget_of_one(self):
+        resolver = Resolver({"Kura Gamma": (C, ["Kura Gamma Season 2"])})
+        out = self.sync(aliases=resolver, max_lookups=1, titles=["main/Kura Gamma S02"])
+        self.assertEqual((resolver.queries, out["pending"]), (["Kura Gamma Season 2"], 1))
+        row = self.row("Kura Gamma S02")
+        self.assertEqual((row["status"], row["query"]), ("unresolved", "v2:1/2:Kura Gamma Season 2@2 | Kura Gamma@2"))
+        out = self.sync(aliases=resolver, max_lookups=1, titles=["main/Kura Gamma S02"])
+        self.assertEqual((resolver.queries, out["pending"]), (["Kura Gamma Season 2", "Kura Gamma"], 0))
+        row = self.row("Kura Gamma S02")
+        self.assertEqual((row["status"], row["anilist_id"], row["query"]), ("resolved", C, "Kura Gamma"))
+
+    def test_candidates_rejected_before_the_budget_ended_survive_the_resume(self):
+        resolver = Resolver({"Kura Gamma Season 2": (A, ["Kura Gamma"]), "Kura Gamma": []})
+        self.sync(aliases=resolver, max_lookups=1, titles=["main/Kura Gamma S02"])
+        self.assertEqual(self.row("Kura Gamma S02")["candidates"], [A])
+        self.sync(aliases=resolver, max_lookups=1, titles=["main/Kura Gamma S02"])
+        row = self.row("Kura Gamma S02")
+        self.assertEqual((row["status"], row["candidates"], row["query"]),
+                         ("unresolved", [A], "v2:2/2:Kura Gamma Season 2@2 | Kura Gamma@2"))
+        self.sync(aliases=resolver, max_lookups=5, titles=["main/Kura Gamma S02"])
+        self.assertEqual(len(resolver.queries), 2)                          # finished, remembered
+
+    def test_the_remembered_plan_must_match_exactly(self):
+        steps = identity.plan_steps("Foo", 2, None)
+        key = identity._key(steps, 1)
+        self.assertEqual(key, "v2:1/2:Foo Season 2@2 | Foo@2")
+        self.assertEqual(identity._done(key, steps), 1)
+        for other in (identity.plan_steps("Foo", None, None),                   # unmarked -> season 2 (same name)
+                      identity.plan_steps("Foo", 3, None), identity.plan_steps("Foo", 2, ("Bar", None)),
+                      identity.plan_steps("Foo", 2, ("Bar", 2)), identity.plan_steps("Fo", 2, None),
+                      steps[::-1], steps[:1]):
+            self.assertIsNone(identity._done(key, other), other)
+        # the same queries asked for a different season filter are a different plan
+        self.assertIsNone(identity._done(identity._key([("Foo", "Foo", None)], 1), [("Foo", "Foo", 2)]))
+        for text in (None, "", "Foo", "Foo | Bar", "v2:3/2:Foo Season 2@2 | Foo@2", "v2:1/2:Foo Season 2@2", "v1:1/2:x",
+                     "v2:-1/2:x"):
+            self.assertIsNone(identity._done(text, steps), text)
+
+    def test_a_long_plan_is_hashed_to_fit_and_still_compares(self):
+        long = "Kura " + "Epic " * 24
+        steps = identity.plan_steps(long, 2, (long + "Other", None))
+        key = identity._key(steps, 3)
+        self.assertLessEqual(len(key), identity.MAX_QUERY)
+        self.assertEqual(identity._done(key, steps), 3)
+        self.assertIsNone(identity._done(key, identity.plan_steps(long, 3, (long + "Other", None))))
+        self.assertIsNone(identity._done(key.replace("/3:", "/4:"), steps))
+        self.assertIsNone(identity._done(key[:-1] + "0", steps))
+
+    def test_rows_of_an_unknown_or_older_format_are_looked_up_again(self):
+        for query in ("Kura Delta", "Kura Delta | Other", None, "v9:1/1:Kura Delta@-"):
+            self.store.db.execute("DELETE FROM title_identities")
+            self.store.db.execute(
+                "INSERT INTO title_identities(library, title, status, source, query, candidates, updated_at)"
+                " VALUES ('home', 'main/Kura Delta', 'unresolved', 'alias', ?, '[]', ?)", (query, time.time()))
+            self.store.db.commit()
+            resolver = Resolver({})
+            self.sync(aliases=resolver, titles=["main/Kura Delta"])
+            self.assertEqual(resolver.queries, ["Kura Delta"], query)
+            self.assertEqual(self.row("Kura Delta")["query"], "v2:1/1:Kura Delta@-")
+            self.sync(aliases=resolver, titles=["main/Kura Delta"])
+            self.assertEqual(resolver.queries, ["Kura Delta"], query)      # and remembered from then on
+
     def test_an_answer_for_the_wrong_season_is_rejected_and_remembered_as_a_candidate(self):
         resolver = Resolver({"Kura Gamma": (A, ["Kura Gamma"])})
         self.sync(aliases=resolver, titles=["main/Kura Gamma S02"])
@@ -510,11 +573,12 @@ class FileNames(Tree):
         resolver = Resolver({})
         out = self.sync(aliases=resolver, max_lookups=1, titles=["main/Misc Folder"])
         self.assertEqual((resolver.queries, out["pending"]), (["Misc Folder"], 1))
-        row = self.row("Misc Folder")           # the folder answer is kept, so the next run asks only the rest
-        self.assertEqual((row["status"], row["source"], row["query"]), ("unresolved", "alias", "Misc Folder"))
+        row = self.row("Misc Folder")           # the finished steps are kept, so the next run asks only the rest
+        self.assertEqual((row["status"], row["source"], row["query"]),
+                         ("unresolved", "alias", "v2:1/2:Misc Folder@- | Show Six@-"))
         out = self.sync(aliases=resolver, max_lookups=5, titles=["main/Misc Folder"])
         self.assertEqual((resolver.queries, out["pending"]), (["Misc Folder", "Show Six"], 0))
-        self.assertEqual(self.row("Misc Folder")["query"], "Misc Folder | Show Six")
+        self.assertEqual(self.row("Misc Folder")["query"], "v2:2/2:Misc Folder@- | Show Six@-")
         out = self.sync(aliases=resolver, max_lookups=5, titles=["main/Misc Folder"])
         self.assertEqual((resolver.queries, out["lookups"]["made"]), (["Misc Folder", "Show Six"], 0))   # settled
 
@@ -534,47 +598,43 @@ class FileNames(Tree):
         self.assertEqual((resolver.queries[3:], out["pending"]), (["Show Six"], 0))
         self.assertEqual(self.row("Misc Folder")["anilist_id"], 999000011)
 
-    def test_an_old_negative_row_for_the_folder_name_goes_straight_to_the_file_name_query(self):
-        resolver = Resolver({"Dungeon Meshi": (999000010, ["Dungeon Meshi"])})
-        self.store.db.execute("DELETE FROM anilist_list_entries")
-        self.store.db.execute("INSERT INTO title_identities(library, title, status, source, query, candidates, updated_at)"
-                              " VALUES ('home', 'main/Dragon Meshi', 'unresolved', 'alias', 'Dragon Meshi', '[]', ?)",
-                              (__import__("time").time(),))
-        self.store.db.commit()
-        self.sync(aliases=resolver, titles=["main/Dragon Meshi"])
-        self.assertEqual(resolver.queries, ["Dungeon Meshi"])
-
-    def test_offline_keeps_the_remembered_folder_answer(self):
+    def test_offline_keeps_the_remembered_progress(self):
         resolver = Resolver({})
         self.sync(aliases=resolver, max_lookups=1, titles=["main/Misc Folder"])
         self.sync(aliases=None, titles=["main/Misc Folder"])
-        self.assertEqual((self.row("Misc Folder")["source"], self.row("Misc Folder")["query"]), ("alias", "Misc Folder"))
+        row = self.row("Misc Folder")
+        self.assertEqual((row["source"], row["query"]), ("alias", "v2:1/2:Misc Folder@- | Show Six@-"))
 
-    def test_a_negative_answer_is_tied_to_the_queries_it_was_for(self):
+    def test_a_negative_answer_is_tied_to_the_queries_and_seasons_it_was_for(self):
         resolver = Resolver({})
         self.store.db.execute("DELETE FROM anilist_list_entries")
         self.store.db.commit()
         self.sync(aliases=resolver, titles=["main/Misc Folder"])
         self.assertEqual(resolver.queries, ["Misc Folder", "Show Six"])
-        self.assertEqual(self.row("Misc Folder")["query"], "Misc Folder | Show Six")
         self.sync(aliases=resolver, titles=["main/Misc Folder"])
         self.assertEqual(len(resolver.queries), 2)                      # same files: still remembered
-        # the files change, so the fallback is a different name: it is asked without --refresh
-        for f in (self.lab.lib / "Misc Folder").iterdir():
-            f.unlink()
-        for n in (1, 2):
-            (self.lab.lib / "Misc Folder" / f"[ASW] Show Eight - {n:02d} [1080p].mkv").write_bytes(b"x" * 100)
-        self.lab.build()
+
+        def replace_files(*names):
+            for f in (self.lab.lib / "Misc Folder").iterdir():
+                f.unlink()
+            for name in names:
+                (self.lab.lib / "Misc Folder" / name).write_bytes(b"x" * 100)
+            self.lab.build()
+        # the files change, so the fallback is a different name: asked without --refresh
+        replace_files(*(f"[ASW] Show Eight - {n:02d} [1080p].mkv" for n in (1, 2)))
         self.sync(aliases=resolver, titles=["main/Misc Folder"])
-        self.assertEqual(resolver.queries[2:], ["Show Eight"])           # the folder answer is not asked again
-        self.assertEqual(self.row("Misc Folder")["query"], "Misc Folder | Show Eight")
-        # and when the files stop giving a name, the remembered folder answer still holds
-        for f in (self.lab.lib / "Misc Folder").iterdir():
-            f.unlink()
-        (self.lab.lib / "Misc Folder" / "notes.mkv").write_bytes(b"x" * 100)
-        self.lab.build()
+        self.assertEqual(resolver.queries[2:], ["Misc Folder", "Show Eight"])
+        self.assertEqual(self.row("Misc Folder")["query"], "v2:2/2:Misc Folder@- | Show Eight@-")
+        # same series name, now marked season 2: a different plan (two queries, season filter 2)
+        replace_files(*(f"[ASW] Show Eight S2 - {n:02d} [1080p].mkv" for n in (1, 2)))
         self.sync(aliases=resolver, titles=["main/Misc Folder"])
-        self.assertEqual(len(resolver.queries), 3)
+        self.assertEqual(resolver.queries[4:], ["Misc Folder", "Show Eight Season 2", "Show Eight"])
+        self.assertEqual(self.row("Misc Folder")["query"],
+                         "v2:3/3:Misc Folder@- | Show Eight Season 2@2 | Show Eight@2")
+        # and when the files stop giving a name, that is a plan change too
+        replace_files("notes.mkv")
+        self.sync(aliases=resolver, titles=["main/Misc Folder"])
+        self.assertEqual(resolver.queries[7:], ["Misc Folder"])
 
     def test_conflicting_or_mixed_season_markers_prevent_the_fallback(self):
         two, three = "[G] Show [Season 2] - 01.mkv", "[G] Show [Season 3] - 02.mkv"
