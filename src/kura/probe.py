@@ -84,7 +84,8 @@ def check_state_dir(state_root, roots):
     state = os.path.realpath(os.path.abspath(state_root))
     for root in roots.values():
         base = os.path.realpath(os.path.abspath(root))
-        if state == base or state.startswith(base + os.sep) or base.startswith(state + os.sep):
+        common = os.path.commonpath([state, base])
+        if common in (state, base):                     # equal, inside or above (works for "/" too)
             raise KuraError("unsafe_state_dir", "The state directory overlaps a library root")
 
 

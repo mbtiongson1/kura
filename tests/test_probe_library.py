@@ -350,10 +350,17 @@ class ReadOnly(Lib):
         self.assertEqual(sorted(p.name for p in self.lib.iterdir()), ["Kura Loose Movie.mkv", "Kura Sample Series"])
 
     def test_state_directory_inside_or_above_a_root_is_refused(self):
-        for root in (self.tmp, self.tmp / "state", self.tmp / "state" / "deeper"):
+        for root in (self.tmp, self.tmp / "state", self.tmp / "state" / "deeper", Path("/")):
             with self.subTest(root=str(root)), self.assertRaises(KuraError) as caught:
                 self.probe(roots={"main": root})
             self.assertEqual(caught.exception.code, "unsafe_state_dir")
+
+    def test_cli_refuses_an_overlapping_state_directory_before_creating_it(self):
+        home = self.tmp / "home2"
+        home.mkdir()
+        code, out = run("probe", "library", "--library", "home", "--root", f"main={home}", home=str(home))
+        self.assertEqual((code, out["error"]["code"]), (2, "unsafe_state_dir"))
+        self.assertEqual(list(home.iterdir()), [])                            # nothing was created under the root
 
     def test_cached_results_still_need_a_valid_root(self):
         self.probe()

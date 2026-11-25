@@ -9,6 +9,7 @@ from pathlib import Path
 
 from . import mkvprobe, probe, rofs
 from .models import KuraError
+from .safety import private_root
 
 DEFAULT_MAX_READ_KIB = 2048
 MAX_READ_KIB = 16384
@@ -80,6 +81,7 @@ def _library(args, open_store):
     roots = _roots(args.root)
     probe.check_args(args.library, args.sample, args.title, args.max_files,
                      args.max_read_mib << 20, 1)
+    probe.check_state_dir(private_root(), roots)       # before the store creates anything
     store = open_store()
     try:
         return probe.probe_library(store, library=args.library, roots=roots, sample=args.sample,
