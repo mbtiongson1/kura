@@ -14,7 +14,8 @@ Sampling
 
 Cache: a row is a hit when the inventory's size and mtime and ``PROBE_VERSION`` equal the
 stored ones, the stored status describes the content (ok, partial, unsupported_container,
-invalid), the probe was not cut by the per-file byte limit and ``reprobe`` is off. A hit costs no I/O at all. The cache is as fresh as the
+invalid), the probe was not cut by the per-file byte limit (or was cut at an allowance no smaller than
+the current one; the stored result then carries an ``allowance`` key) and ``reprobe`` is off. A hit costs no I/O at all. The cache is as fresh as the
 inventory: re-run ``manifest build`` after files change. Rows describing an access problem
 (unsafe, changed, io_error) are recorded but never count as hits, so they are retried.
 
@@ -99,16 +100,19 @@ def _select(repo, library, titles, sample):
     return picked, used
 
 
-def _cached(db, title_id, f):
+def _cached(db, title_id, f, per_file_bytes):
     row = db.execute("SELECT size, mtime_ns, probe_version, status, result FROM probe_results"
                      " WHERE title_id=? AND rel_path=?", (title_id, f["rel_path"])).fetchone()
     if (row is None or row[3] not in CONTENT_STATUSES or row[2] != mkvprobe.PROBE_VERSION
             or row[0] != f["size"] or row[1] != f["mtime_ns"]):
         return False
     try:
-        # A probe cut by the per-file byte limit says nothing about a larger allowance: retry it.
-        return "budget_exhausted" not in json.loads(row[4]).get("warnings", [])
-    except (ValueError, AttributeError):
+        stored = json.loads(row[4])
+        if "budget_exhausted" not in stored.get("warnings", []):
+            return True
+        # Cut by the per-file byte limit: valid only for an allowance no larger than the one used.
+        return per_file_bytes <= stored["allowance"]
+    except (ValueError, AttributeError, KeyError, TypeError):
         return False
 
 
@@ -149,7 +153,7 @@ def probe_library(store, *, library, roots, sample="groups", titles=None, max_fi
             for title, f in selected:
                 if should_stop is not None and should_stop():
                     break
-                if not reprobe and _cached(store.db, title["id"], f):
+                if not reprobe and _cached(store.db, title["id"], f, per_file_bytes):
                     stats["cached"] += 1
                     handled += 1
                     continue
@@ -181,6 +185,8 @@ def probe_library(store, *, library, roots, sample="groups", titles=None, max_fi
                     exhausted = True
                     break
                 status, result, used = outcome
+                if result is not None and "budget_exhausted" in result["warnings"]:
+                    result = {**result, "allowance": per_file_bytes}      # so a larger one retries it
                 stats["bytes_read"] += used
                 _store(store.db, title["id"], f, status, result, used)
                 handled += 1

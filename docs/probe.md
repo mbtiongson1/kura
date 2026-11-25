@@ -87,8 +87,8 @@ inventory row, else the file is reported `changed` and not probed. Results are u
 
 Cache: a stored result is reused, at no I/O cost, when the inventory's size and mtime and
 `PROBE_VERSION` match and the stored status describes content (`ok`, `partial`,
-`unsupported_container`, `invalid`) and the probe was not cut by the per-file byte limit (such
-a result is retried, since a larger allowance could finish it). `unsafe`, `changed` and
+`unsupported_container`, `invalid`) and the probe was not cut by the per-file byte limit (a cut
+result is stored with the `allowance` it ran under and is retried only when a larger one is asked for). `unsafe`, `changed` and
 `io_error` rows record why a file was not probed and are retried every run. Re-run `manifest build` after files change.
 
 Budget: `--max-files` (default 2000) bounds the files that need I/O in one run (cache hits are free, so

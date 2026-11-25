@@ -235,11 +235,26 @@ class Budget(Lib):
         keys = {"titles": ["main/Kura Big Show"]}
         self.assertEqual(self.probe(per_file_bytes=200, **keys)["probed"], 1)
         again = self.probe(per_file_bytes=200, **keys)
-        self.assertEqual((again["cached"], again["probed"]), (0, 1))          # still cut, so still retried
+        self.assertEqual((again["cached"], again["probed"]), (1, 0))          # same allowance: nothing new to learn
+        self.assertEqual(self.probe(per_file_bytes=100, **keys)["cached"], 1)
+        larger = self.probe(per_file_bytes=300, **keys)
+        self.assertEqual((larger["cached"], larger["probed"]), (0, 1))        # a larger allowance retries it
         full = self.probe(**keys)
         self.assertEqual(full["probed"], 1)
         self.assertEqual(self.probe(**keys)["cached"], 1)                      # complete result is cached
         self.assertEqual(self.rows()["Kura Big Show/Kura Big Show - 01 [1080p].mkv"][0], "ok")
+
+    def test_a_cut_file_does_not_starve_later_files_under_max_files(self):
+        self.write("Kura Big Show/Kura Big Show - 01 [1080p].mkv",
+                   mkvgen.build(attach=[("big.ttf", "font/ttf", 3 * (1 << 20))]))
+        self.inventory()
+        total = 5
+        for _ in range(total + 1):
+            out = self.probe(per_file_bytes=200, max_files=1)
+            if out["pending"] == 0:
+                break
+        self.assertEqual(out["pending"], 0)
+        self.assertEqual(len(self.rows()), total)
 
     def test_bytes_read_before_a_read_error_are_charged(self):
         real = os.pread
