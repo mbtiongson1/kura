@@ -400,6 +400,18 @@ class EndToEnd(Fixture, unittest.TestCase):
         bare = torrentgen.build("Kura Bare", GOOD)                 # no trackers at all still round-trips
         self.assertEqual(parse(resolve.clean_descriptor(parse(bare.data))).infohash, bare.infohash)
 
+    def test_titles_protected_by_the_current_policy_are_never_searched(self):
+        from kura.protect import load_policy
+        for lines in (["path:" + FOLDER], ["path:main/" + FOLDER], ["path:" + FOLDER + "/ep02.mkv"],
+                      ["path:main/" + FOLDER + "/ep01.mkv"]):
+            with self.subTest(lines=lines):
+                self.lab.prot.write_text("\n".join(lines) + "\n")
+                result = self.resolve(policy=load_policy(self.lab.deny, self.lab.prot), refresh=True)
+                self.assertEqual((result["skipped"]["protected_by_policy"], result["processed"]), (1, 0))
+        self.assertEqual(self.nyaa.calls, [])
+        self.lab.prot.write_text("path:Unrelated Title\n")
+        self.assertEqual(self.resolve(policy=load_policy(self.lab.deny, self.lab.prot))["processed"], 1)
+
     def test_protected_infohash_is_never_requested_and_denylisted_trackers_are_discarded(self):
         from kura.protect import load_policy
         listed = torrentgen.build(FOLDER, [("ep01.mkv", P("p", 30000)), ("ep02.mkv", P("q", 20000))],

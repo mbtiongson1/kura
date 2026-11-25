@@ -253,7 +253,7 @@ identical name, a release group found in the folder or file names, then seeders,
 `--max-candidates` descriptors are fetched per title. Private descriptors, descriptors that do not hash to the advertised
 infohash and descriptors with an announce URL that could carry a credential are discarded and
 never written. What is saved is rebuilt from the verbatim info dictionary and the vetted announce
-URLs only; web seeds, comments and any other field of the response are dropped. With the optional policy files, a protected infohash is never requested and a
+URLs only; web seeds, comments and any other field of the response are dropped. With the optional policy files, a title covered by a `path:` entry is never searched, a protected infohash is never requested and a
 descriptor on a denylisted tracker is discarded. Output contains no announce URLs.
 Requests are spaced 2 seconds apart, back off exponentially on HTTP 429/5xx and network errors,
 and stop after three exhausted requests in a row or when `--budget-minutes` is spent. A title

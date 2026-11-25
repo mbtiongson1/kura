@@ -71,7 +71,7 @@ from .core import Core
 from .manifest import show
 from .manifest_store import ManifestRepo
 from .models import KuraError
-from .protect import _public_tracker, classify
+from .protect import _public_tracker, classify, path_protected
 from .releases import normalize
 from .torrent import encode
 from .torrentmeta import parse, release_group
@@ -550,6 +550,18 @@ def check_args(library, titles, max_titles, max_candidates, budget_seconds, inte
             raise _bad(f"{name} must be a positive number of at most {high}")
 
 
+def policy_protects(policy, key: str, files: list[dict]) -> bool:
+    """Does a ``path:`` entry of the *current* policy cover the title or any file in it?
+
+    Checked against root-relative and label-prefixed forms, because the stored status may
+    predate this policy.
+    """
+    label, _, entry = key.partition("/")
+    paths = [entry, key] + [f["rel_path"] for f in files]
+    paths += [f"{label}/{f['rel_path']}" for f in files]
+    return any(path_protected(policy, p) for p in paths)
+
+
 def _recent(row, now: float, refresh: bool) -> bool:
     if refresh or not row:
         return False
@@ -729,7 +741,8 @@ def resolve(store, *, library: str, torrents_out, max_titles: int | None = None,
         ledger = out.load_ledger()
         mine = ledger.setdefault(library, {})
         now = wall()
-        skipped = {"not_unmatched": 0, "attempted_recently": 0, "empty": 0, "not_in_manifest": 0}
+        skipped = {"not_unmatched": 0, "attempted_recently": 0, "empty": 0, "not_in_manifest": 0,
+                   "protected_by_policy": 0}
         notes: list[dict] = []
         work: list[tuple[str, dict, list[dict]]] = []
         with store.lock():       # a consistent read; released before any network I/O
@@ -756,7 +769,11 @@ def resolve(store, *, library: str, torrents_out, max_titles: int | None = None,
                     continue
                 if max_titles is not None and len(work) >= max_titles:
                     continue
-                work.append((key, row, repo.title_files(row["id"])))
+                files = repo.title_files(row["id"])
+                if policy is not None and policy_protects(policy, key, files):
+                    skipped["protected_by_policy"] += 1      # its name is never sent anywhere
+                    continue
+                work.append((key, row, files))
 
         core = Core(store, None, aliases) if aliases is not None else None
         results, outcomes = [], Counter()
