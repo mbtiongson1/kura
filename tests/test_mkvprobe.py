@@ -346,6 +346,17 @@ class Limits(unittest.TestCase):
         result, _ = run(mkvgen.wrap(mkvgen.info() + mkvgen.el(0x1654AE6B, nested)))
         self.assertNotIn("internal_error", result["warnings"])
 
+    def test_damaged_nested_headers_make_the_result_partial(self):
+        track = mkvgen.track_entry(1, 1, "V_MPEG4/ISO/AVC", video={})
+        for junk in (b"\xae", b"\xae\x90\x01", b"\xae\xff\xd7\x81\x01"):         # id only, short, size past the parent
+            with self.subTest(junk):
+                result, _ = run(mkvgen.wrap(mkvgen.info() + mkvgen.el(0x1654AE6B, track + junk)))
+                self.assertEqual(result["status"], "partial")
+                self.assertIn("truncated", result["warnings"])
+                self.assertEqual(result["video"]["track"], 1)
+        clean, _ = run(mkvgen.wrap(mkvgen.info() + mkvgen.el(0x1654AE6B, track)))
+        self.assertEqual((clean["status"], clean["warnings"]), ("ok", []))
+
     def test_chapter_bomb_reports_the_depth_limit(self):
         seg = mkvgen.info() + mkvgen.nested_chapters(50)
         result, _ = run(mkvgen.wrap(seg))

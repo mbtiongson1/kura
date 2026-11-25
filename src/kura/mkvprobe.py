@@ -428,20 +428,28 @@ class _Probe:
             yield eid, body, body + size, True
             pos = body + size
 
-    def children(self, buf, start, end):
-        """Same shape over an in-memory buffer. Offsets are into `buf`."""
+    def children(self, buf, start, end, strict=True):
+        """Same shape over an in-memory buffer. Offsets are into `buf`.
+
+        A header or element that does not fit inside its parent is damage and marks the result
+        partial; `strict=False` is for a buffer that was cut at a read cap (the first Cluster),
+        where running out of bytes is expected."""
         pos, end = start, min(end, len(buf))
         while pos < end:
             self.count()
             try:
                 eid, size, hl = _header(buf, pos, end)
             except _Short:
+                if strict:
+                    self.truncated()
                 return
             except _Bad:
                 self.warn("invalid_element", partial=True)
                 return
             body = pos + hl
             if size is None or size > end - body:
+                if strict:
+                    self.truncated()
                 yield eid, body, end, False
                 return
             yield eid, body, body + size, True
@@ -736,11 +744,11 @@ class _Probe:
 
     def blocks(self, buf):
         """Yield the raw payload of each (Simple)Block of a cluster buffer, in file order."""
-        for eid, b, e, full in self.children(buf, 0, len(buf)):
+        for eid, b, e, full in self.children(buf, 0, len(buf), strict=False):
             if eid == SIMPLEBLOCK:
                 yield buf[b:e]
             elif eid == BLOCKGROUP:
-                for cid, cb, ce, cfull in self.children(buf, b, e):
+                for cid, cb, ce, cfull in self.children(buf, b, e, strict=False):
                     if cid == BLOCK:
                         yield buf[cb:ce]
             elif eid in LEVEL1:

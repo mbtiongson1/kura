@@ -91,11 +91,12 @@ Cache: a stored result is reused, at no I/O cost, when the inventory's size and 
 a result is retried, since a larger allowance could finish it). `unsafe`, `changed` and
 `io_error` rows record why a file was not probed and are retried every run. Re-run `manifest build` after files change.
 
-Budget: `--max-read-mib` is a hard cap on bytes read per run; a file gets the smaller of the
+Budget: `--max-files` (default 2000) bounds the files that need I/O in one run (cache hits are free, so
+repeated runs progress through a larger selection); `--max-read-mib` is a hard cap on bytes read per run; a file gets the smaller of the
 per-file allowance (2 MiB) and what is left, and a probe cut short by the run budget is
 discarded and stays `pending`. A second run continues where the first stopped.
 
-Output: `{"library", "sample": {"strategy", "titles", "files_selected", "files_capped"},
+Output: `{"library", "sample": {"strategy", "titles", "files_selected"},
 "probed", "cached", "changed", "failed": {code: n}, "bytes_read", "budget_exhausted",
 "pending"}`. `failed` codes: `unsafe` (symlink, FIFO or other non-regular file), `io_error`,
 `no_root` (a title's root label was not given with `--root`).

@@ -67,7 +67,7 @@ class Lib(unittest.TestCase):
 class Sampling(Lib):
     def test_groups_probe_the_first_file_of_each_cluster(self):
         out = self.probe()
-        self.assertEqual(out["sample"], {"strategy": "groups", "titles": 2, "files_selected": 4, "files_capped": 0})
+        self.assertEqual(out["sample"], {"strategy": "groups", "titles": 2, "files_selected": 4})
         self.assertEqual((out["probed"], out["cached"], out["changed"], out["failed"]), (4, 0, 0, {}))
         self.assertEqual((out["budget_exhausted"], out["pending"]), (False, 0))
         self.assertGreater(out["bytes_read"], 0)
@@ -115,9 +115,14 @@ class Sampling(Lib):
             self.probe(titles=["main/Nonexistent"])
         self.assertEqual(caught.exception.code, "invalid_arguments")
 
-    def test_max_files_caps_the_selection(self):
+    def test_max_files_bounds_the_work_per_run_and_repeated_runs_progress(self):
         out = self.probe(sample="all", max_files=2)
-        self.assertEqual((out["sample"]["files_selected"], out["sample"]["files_capped"], out["probed"]), (2, 3, 2))
+        self.assertEqual((out["sample"]["files_selected"], out["probed"], out["pending"]), (5, 2, 3))
+        self.assertFalse(out["budget_exhausted"])
+        out = self.probe(sample="all", max_files=2)
+        self.assertEqual((out["cached"], out["probed"], out["pending"]), (2, 2, 1))
+        out = self.probe(sample="all", max_files=2)
+        self.assertEqual((out["cached"], out["probed"], out["pending"]), (4, 1, 0))
 
     def test_unlabelled_root_counts_as_failed(self):
         out = self.probe(roots={"elsewhere": self.lib})

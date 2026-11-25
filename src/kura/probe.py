@@ -18,6 +18,9 @@ invalid), the probe was not cut by the per-file byte limit and ``reprobe`` is of
 inventory: re-run ``manifest build`` after files change. Rows describing an access problem
 (unsafe, changed, io_error) are recorded but never count as hits, so they are retried.
 
+``max_files`` bounds the files that need I/O in one run (cache hits are free), so repeated runs
+walk through a selection larger than the cap. Files left over stay pending.
+
 Budget: ``max_read_bytes`` is a hard cap on bytes read in one run. A file gets
 ``min(per_file_bytes, what is left)``; if the smaller allowance cuts a probe short, that result
 is discarded (not cached) and the file stays pending for the next run.
@@ -72,8 +75,8 @@ def check_args(library, sample, titles, max_files, max_read_bytes, per_file_byte
         raise KuraError("invalid_arguments", f"per_file_bytes must be 1..{MAX_PER_FILE}")
 
 
-def _select(repo, library, titles, sample, max_files):
-    """Deterministic ``[(title, file)]`` in (title key, file path) order, plus counts."""
+def _select(repo, library, titles, sample):
+    """Deterministic ``[(title, file)]`` in (title key, file path) order, plus the title count."""
     rows = repo.titles(library)
     if titles:
         known = {t["rel_path"] for t in rows}
@@ -93,7 +96,7 @@ def _select(repo, library, titles, sample, max_files):
         if videos:
             used += 1
         picked.extend((title, f) for f in videos)
-    return picked[:max_files], used, max(len(picked) - max_files, 0)
+    return picked, used
 
 
 def _cached(db, title_id, f):
@@ -132,10 +135,10 @@ def probe_library(store, *, library, roots, sample="groups", titles=None, max_fi
     check_args(library, sample, titles, max_files, max_read_bytes, per_file_bytes)
     repo = ManifestRepo(store.db)
     with store.lock():
-        selected, title_count, capped = _select(repo, library, titles, sample, max_files)
+        selected, title_count = _select(repo, library, titles, sample)
         stats = {"probed": 0, "cached": 0, "changed": 0, "bytes_read": 0}
         failed: dict[str, int] = {}
-        handled = 0
+        handled = worked = 0            # worked: files that needed I/O this run (bounded by max_files)
         exhausted = False
         root_fds: dict[str, int | KuraError] = {}
 
@@ -150,6 +153,8 @@ def probe_library(store, *, library, roots, sample="groups", titles=None, max_fi
                     stats["cached"] += 1
                     handled += 1
                     continue
+                if worked >= max_files:
+                    break
                 remaining = max_read_bytes - stats["bytes_read"]
                 if remaining <= 0:
                     exhausted = True
@@ -169,6 +174,7 @@ def probe_library(store, *, library, roots, sample="groups", titles=None, max_fi
                     fail(root.code)
                     handled += 1
                     continue
+                worked += 1
                 outcome = _probe_file(root, f, min(per_file_bytes, remaining), per_file_bytes)
                 if outcome[0] == "budget":
                     stats["bytes_read"] += outcome[1]
@@ -189,8 +195,7 @@ def probe_library(store, *, library, roots, sample="groups", titles=None, max_fi
                 if isinstance(fd, int):
                     os.close(fd)
         return {"library": library,
-                "sample": {"strategy": sample, "titles": title_count, "files_selected": len(selected),
-                           "files_capped": capped},
+                "sample": {"strategy": sample, "titles": title_count, "files_selected": len(selected)},
                 **stats, "failed": failed, "budget_exhausted": exhausted,
                 "pending": len(selected) - handled}
 
