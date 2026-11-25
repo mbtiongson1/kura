@@ -214,6 +214,19 @@ class ListSync(Lab):
         out = self.sync(refresh=True)
         self.assertEqual((out["warnings"], out["favourites"]), (["anilist_favourites_failed"], 2))
 
+    def test_forced_refresh_with_failing_favourites_does_not_leave_old_ones_fresh(self):
+        self.fake.favourites = IDS[:2]
+        self.sync()
+        original = self.fake.respond
+        self.fake.respond = lambda q, v: (_ for _ in ()).throw(http_error(500)) if "User(id" in q else original(q, v)
+        out = self.sync(refresh=True)
+        self.assertEqual((out["warnings"], out["favourites"]), (["anilist_favourites_failed"], 2))
+        self.fake.respond = original
+        made = len(self.fake.calls)
+        self.sync()                                         # list fresh, favourites not: exactly one request
+        self.assertEqual(len(self.fake.calls) - made, 1)
+        self.assertIn("User(id", self.fake.calls[-1]["query"])
+
     def test_failed_favourites_are_retried_on_the_next_cached_call(self):
         self.fake.favourites = IDS[:2]
         original = self.fake.respond

@@ -389,6 +389,8 @@ def list_sync(store, ani, *, user_name=None, max_age_h=12.0, refresh=False, entr
             save_favourites(db, user_id, fetch_favourites(req, user_id), now)
         except KuraError:
             warnings.append("anilist_favourites_failed")
+            with db:        # the old rows stay, but they no longer count as fresh: the next call retries
+                db.execute("UPDATE anilist_users SET favourites_fetched_at=NULL WHERE user_id=?", (user_id,))
     data = read_snapshot(db, user_id, with_entries=entries)
     return {**data, "from_cache": not fetched_now, "stale": error is not None,
             "error": error, "requests": req.info(), "warnings": warnings, "rate_limit": _limiter_state(ani)}
