@@ -121,8 +121,8 @@ def _pair(tfiles: list, locals_: list[tuple[str, ...]]) -> dict[int, tuple[str, 
 class _ContentIndex:
     """Size indexes over every inventory file, built in one pass.
 
-    A signature shared by more than MAX_BUCKET files is not distinctive (it names nothing
-    in particular) and is dropped, which also bounds the work any one torrent can cause.
+    A signature shared by files of more than MAX_BUCKET titles is not distinctive (it names nothing
+    in particular) and is dropped, which also bounds the cross-title work any one torrent can cause.
     """
 
     MAX_BUCKET = 256
@@ -141,7 +141,8 @@ class _ContentIndex:
                     if entry.size >= SIZE_ONLY_MIN:
                         self.big_by_size.setdefault(entry.size, []).append(item)
         for table in (self.by_name_size, self.big_by_size):
-            for sig in [s for s, items in table.items() if len(items) > self.MAX_BUCKET]:
+            for sig in [s for s, items in table.items() if len(items) > self.MAX_BUCKET
+                        and len({key for key, _ in items}) > self.MAX_BUCKET]:
                 del table[sig]
 
     def best(self, meta: TorrentMeta):
