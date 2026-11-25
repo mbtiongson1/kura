@@ -395,6 +395,18 @@ class Limits(unittest.TestCase):
         self.assertEqual(silent["status"], "invalid")
         self.assertNotIn("internal_error", silent["warnings"])
 
+    def test_the_cap_counts_bytes_requested_even_when_reads_come_back_short(self):
+        data = mkvgen.build()
+        asked = []
+
+        def stingy(offset, n):
+            asked.append(n)
+            return data[offset:offset + min(n, 2)]
+
+        result = probe(stingy, len(data), max_bytes=400)
+        self.assertLessEqual(sum(asked), 400)
+        self.assertLessEqual(result["bytes_read"], sum(asked))
+
     def test_read_errors_propagate_and_are_not_swallowed(self):
         def broken(offset, n):
             raise OSError("boom")

@@ -314,14 +314,15 @@ class _Reader:
     """Budgeted, bounds-clamped positional reader around the caller's ``read``."""
 
     def __init__(self, read, size, max_bytes):
-        self._read, self.size, self.max, self.used = read, size, max_bytes, 0
+        self._read, self.size, self.max, self.used, self.asked = read, size, max_bytes, 0, 0
 
     def read(self, offset, n):
         if n <= 0 or offset < 0 or offset >= self.size:
             return b""
         n = min(n, self.size - offset)
-        if self.used + n > self.max:
+        if self.asked + n > self.max:                  # the cap is on bytes asked for, not just received
             raise _Budget
+        self.asked += n
         data = bytes(self._read(offset, n))[:n]
         self.used += len(data)
         return data
