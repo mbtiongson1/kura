@@ -109,12 +109,18 @@ class OfflineMatch(Base):
                                         ("Kura Show 2", 3, False), ("2", 2, False)):
             self.assertEqual(identity.carries_season(title, season), expected, (title, season))
         self.assertTrue(identity.names_later_season("Kura Show Season 2"))
+        self.assertTrue(identity.names_later_season("Kura Show 2", "Kura Show"))
+        self.assertFalse(identity.names_later_season("Kura Show 100", "Kura Show 100"))
+        self.assertFalse(identity.names_later_season("Kura Show 1", "Kura Show"))
         self.assertFalse(identity.names_later_season("Kura Show Season 1"))
 
     def test_season_one_folder_refuses_an_entry_for_a_later_season(self):
         rows = [{"id": B, "titles": ["Kura Show Season 2"]}]
         self.assertEqual(identity.match(rows, "Kura Show", 1)["status"], "unresolved")
         self.assertEqual(identity.match(rows, "Kura Show", None)["anilist_id"], B)
+        trailing = [{"id": B, "titles": ["Kura Show 2"]}]
+        self.assertEqual(identity.match(trailing, "Kura Show", 1)["status"], "unresolved")
+        self.assertEqual(identity.match([{"id": B, "titles": ["Kura Show 100"]}], "Kura Show 100", 1)["anilist_id"], B)
 
     def test_ties_are_ambiguous_with_their_candidates(self):
         self.sync(aliases=None)
@@ -233,17 +239,21 @@ class AliasFallback(Base):
             self.sync(aliases=Resolver({}), titles=["main/Kura Alpha"])
         self.assertEqual(self.row("Kura Alpha")["anilist_id"], A)
 
-    def test_offline_refresh_revalidates_list_rows_but_cannot_judge_alias_rows(self):
+    def test_refresh_without_budget_or_network_leaves_nothing_stale(self):
         seed(self.store.db, [(B, "Kura Beta", None, [])])
         self.sync(aliases=Resolver({"Kura Alpha": (A, ["Kura Alpha"])}))
-        self.assertEqual(self.row("Kura Beta")["source"], "list")
+        self.assertEqual((self.row("Kura Alpha")["source"], self.row("Kura Beta")["source"]), ("alias", "list"))
+        out = self.sync(aliases=Resolver({"Kura Alpha": (A, ["Kura Alpha"])}), refresh=True, max_lookups=0)
+        self.assertEqual((self.row("Kura Alpha")["status"], self.row("Kura Alpha")["anilist_id"]), ("unresolved", None))
+        self.assertEqual(self.row("Kura Beta")["anilist_id"], B)              # the list still confirms it
+        self.assertGreaterEqual(out["pending"], 1)
+        self.sync(aliases=Resolver({"Kura Alpha": (A, ["Kura Alpha"])}))       # a normal sync restores it
+        self.assertEqual(self.row("Kura Alpha")["anilist_id"], A)
         self.store.db.execute("DELETE FROM anilist_list_entries")
         self.store.db.commit()
-        self.sync(aliases=None)                                    # no refresh: both kept
-        self.assertEqual((self.row("Kura Alpha")["anilist_id"], self.row("Kura Beta")["anilist_id"]), (A, B))
         self.sync(aliases=None, refresh=True)
-        self.assertEqual(self.row("Kura Beta")["status"], "unresolved")
-        self.assertEqual(self.row("Kura Alpha")["anilist_id"], A)
+        self.assertEqual((self.row("Kura Alpha")["status"], self.row("Kura Beta")["status"]),
+                         ("unresolved", "unresolved"))
 
     def test_refresh_asks_again(self):
         resolver = Resolver({"Kura Alpha": (A, ["Kura Alpha"])})

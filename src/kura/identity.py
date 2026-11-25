@@ -18,8 +18,9 @@ ambiguous, never guessed: a wrong binding is the one way a retained title could 
 
 Owner rows (``pinned`` and ``not_anime``, source ``owner``) are never overwritten by a sync;
 only ``pin`` changes them. A resolved row is kept as it is until ``refresh`` asks to revalidate
-it; a refresh that cannot reconfirm it (no match, failed lookup, or an offline refresh of a
-row that came from the list) replaces it with the weaker status, never keeps it. The module reads and
+it. A refresh first drops every resolved row the offline pass cannot reconfirm, then tries the
+network within the budget, so whatever it cannot reconfirm (no match, failed lookup, budget
+spent, ``--offline``) ends up weaker than ``resolved``, never stale. The module reads and
 writes only Kura's private state database and never touches a library.
 """
 from contextlib import contextmanager
@@ -93,16 +94,22 @@ def carries_season(title: str, season: int) -> bool:
     return len(tokens) > 1 and tokens[-1] == str(season)
 
 
-def names_later_season(title: str) -> bool:
+def names_later_season(title: str, base: str = "") -> bool:
+    """True when a title names season 2 or later: an explicit marker, or a trailing number
+    (unless the folder title itself ends in that same number, as in a title like "... 100")."""
     text = normalize(title)
-    return any(p.search(text) for p in _LATER)
+    if any(p.search(text) for p in _LATER):
+        return True
+    tokens, own = text.split(), normalize(base).split()
+    return (len(tokens) > 1 and tokens[-1].isdecimal() and 2 <= int(tokens[-1]) <= 99
+            and tokens[-1] != (own[-1] if own else None))
 
 
-def _title_ok(title: str, season: int | None) -> bool:
+def _title_ok(title: str, season: int | None, base: str = "") -> bool:
     if season is not None and season >= 2:
         return carries_season(title, season)
     if season == 1:
-        return not names_later_season(title)
+        return not names_later_season(title, base)
     return True
 
 
@@ -142,7 +149,7 @@ def match(rows: list[dict], base: str, season: int | None) -> dict:
     for row in rows:
         best = None
         for title in row["titles"]:
-            if not _title_ok(title, season):
+            if not _title_ok(title, season, base):
                 continue
             candidate = normalize(title)
             words = set(candidate.split())
@@ -252,7 +259,7 @@ def _alias(core, counter, base: str, season: int | None, refresh: bool, budget: 
                             "candidates": []}, "alias", query), False, False
         identity = result.get("identity") if status == "resolved" else None
         if identity:
-            if _title_ok(identity["matched"], season):
+            if _title_ok(identity["matched"], season, base):
                 return _record({"status": "resolved", "anilist_id": identity["anilist_id"],
                                 "matched": clean(identity["matched"]), "candidates": []},
                                "alias", query), False, False
@@ -314,9 +321,7 @@ def sync(store, *, library: str, titles: list[str] | None = None, aliases=None,
         if found["status"] == "unresolved":
             if known and not refresh:
                 continue                    # keep the earlier identity; no new lookup
-            need.append((key, base, season))
-            if known and (aliases is not None or current["source"] == "alias"):
-                continue                    # a refresh replaces it only with a network answer
+            need.append((key, base, season))    # a refresh drops what it cannot reconfirm
         record = _record(found, "list", base)
         if not _same(current, record):
             offline[key] = record

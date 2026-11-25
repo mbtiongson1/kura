@@ -46,15 +46,16 @@ Titles are matched in two passes, cheapest first.
 Season rule. A folder marked season 2 or higher binds only to an entry whose matched title
 carries that season (`Season N`, `Nth Season`, `SN`, or a trailing `N`); the season-1 entry
 is never accepted for it. A folder marked season 1 never binds to an entry titled for a
-later season. A folder spanning several seasons (`S01-S03`) or season 0 is `ambiguous`.
+later season (an explicit marker, or a trailing number 2 to 99 that the folder name does not
+share). A folder spanning several seasons (`S01-S03`) or season 0 is `ambiguous`.
 For the alias pass the season variant (`<title> Season N`) is asked first, and an answer
 that fails the season check is `unresolved` with the rejected ID kept as a candidate.
 
 Statuses: `resolved` (source `list` or `alias`), `pinned` and `not_anime` (owner),
-`ambiguous`, `unresolved`, `unavailable`. Unchanged resolved rows are kept, not looked up again,
-unless `--refresh`, which revalidates them: a row it cannot reconfirm (no match, failed
-lookup, or an offline refresh of a row that came from the list) is replaced by the weaker
-status. An offline refresh cannot judge an alias row and keeps it. Owner rows are never overwritten by a sync.
+`ambiguous`, `unresolved`, `unavailable`. Unchanged resolved rows are kept, not looked up again, unless `--refresh`, which revalidates
+them: it first drops every resolved row the offline pass cannot reconfirm, then tries the
+network within the budget, so anything it cannot reconfirm (no match, failed lookup, spent
+budget, `--offline`) ends up `unresolved` or `unavailable`, never stale. Owner rows are never overwritten by a sync.
 
 `kura identity pin --library NAME --title KEY (--anilist-id N | --not-anime | --clear)`
 records the owner's decision; `--clear` removes only an owner row.
