@@ -21,15 +21,15 @@ def encode(value) -> bytes:
     raise ValueError("Unsupported bencode type")
 
 
-def decode(data: bytes):
-    if not data or len(data) > 4 * 1024**2:
+def decode(data: bytes, *, max_bytes: int = 4 * 1024**2, max_depth: int = 12, max_nodes: int = 50000):
+    if not data or len(data) > max_bytes:
         raise KuraError("invalid_torrent", "Torrent descriptor is empty or too large")
     pos, nodes = 0, 0
 
     def parse(depth=0):
         nonlocal pos, nodes
         nodes += 1
-        if depth > 12 or nodes > 50000 or pos >= len(data):
+        if depth > max_depth or nodes > max_nodes or pos >= len(data):
             raise ValueError("Complexity limit")
         first = data[pos:pos+1]
         if first == b"i":
