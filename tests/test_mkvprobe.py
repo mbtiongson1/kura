@@ -133,6 +133,17 @@ class Encoder(unittest.TestCase):
         self.assertEqual(result["attachments"]["bytes"], size)
         self.assertNotIn("internal_error", result["warnings"])
 
+    def test_unknown_size_cluster_read_stops_at_the_next_seekhead_element(self):
+        size = 8192
+        data = mkvgen.build(unknown_cluster=True, attach=[("a.ttf", "font/ttf", size)], tag_values={1001: {"BPS": "9"}})
+        tags_at = data.rindex(mkvgen.eid(0x1254C367))
+        src = Source(data)
+        result = probe(src, len(data))
+        cluster_at = data.rindex(mkvgen.eid(0x1F43B675))
+        reads = [(o, n) for o, n in src.reads if cluster_at < o < tags_at + 10 and n > 64]
+        self.assertTrue(all(o + n <= tags_at for o, n in reads), (reads, tags_at))
+        self.assertEqual(result["video"]["bitrate_source"], "tags")
+
     def test_audio_block_first_in_the_cluster_is_ignored(self):
         result, _ = run(mkvgen.build(decoy_audio=True))
         self.assertEqual(result["encoder"]["settings"]["crf"], "18.0")

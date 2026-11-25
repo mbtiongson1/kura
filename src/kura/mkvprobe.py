@@ -540,7 +540,8 @@ class _Probe:
     def segment(self):
         cluster = None
         for eid, body, bend, full in self.file_children(self.seg0, self.seg_end):
-            self.walked.append((body, self.seg_end if bend is None else bend))
+            if bend is not None:                     # an unknown-size element has no known extent
+                self.walked.append((body, bend))
             if eid == CLUSTER:
                 cluster = (body, bend)
                 break
@@ -780,6 +781,8 @@ class _Probe:
         if video is None:
             return
         end = self.seg_end if bend is None else bend
+        if bend is None:        # unknown size: stop at the next element the SeekHead names
+            end = min([end] + [p for p in self.seek.values() if p > body])
         capped = end - body > CLUSTER_CAP
         buf = self.rd.read(body, min(end - body, CLUSTER_CAP))
         if video["encoded"]:

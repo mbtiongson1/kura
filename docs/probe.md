@@ -110,6 +110,9 @@ Output: `{"library", "sample": {"strategy", "titles", "files_selected"},
 A state directory equal to, inside or above a library root is refused (`unsafe_state_dir`), so the
 database and lock file can never be created under a library.
 
+The one read that is not bounded by a known element is the capped (256 KiB) read of an
+unknown-size first Cluster; it is trimmed at the next element the SeekHead names.
+
 Library files are reached only through `rofs.open_root` and `rofs.open_file_ro` and read with
 `os.pread`; no write, create, rename or delete happens under a root, and `mkvprobe` imports no
 I/O module. The tests patch `os.open` and assert no input is opened with a write flag and that
