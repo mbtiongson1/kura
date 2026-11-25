@@ -483,6 +483,18 @@ class HiddenTerminalRead(unittest.TestCase):
         self.assertEqual(self.read(b"junk\x15good\n"), "good")
         self.assertEqual(self.read(b"tok\x04"), "tok")
 
+    def test_control_v_is_kept_as_data(self):
+        self.assertEqual(self.read(b"a\x16b\n"), "a\x16b")    # clean_token later refuses it
+
+    def test_a_terminal_error_is_a_clear_refusal(self):
+        from kura import cli_anilist
+        r, w = os.pipe()
+        self.addCleanup(os.close, r)
+        self.addCleanup(os.close, w)
+        with self.assertRaises(KuraError) as caught:
+            cli_anilist._read_tty_line(r, "prompt: ")
+        self.assertEqual(caught.exception.code, "anilist_login_needs_tty")
+
     def test_empty_and_oversized_input_refuse(self):
         for typed in (b"\x04", b"x" * (anilist_auth.TOKEN_MAX_BYTES + 1)):
             with self.subTest(n=len(typed)), self.assertRaises(KuraError) as caught:

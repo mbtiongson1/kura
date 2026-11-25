@@ -74,14 +74,22 @@ def _read_tty_line(fd: int, prompt: str) -> str:
     stay on). The terminal settings are always restored.
     """
     import termios
-    old = termios.tcgetattr(fd)
-    new = termios.tcgetattr(fd)
-    new[3] &= ~(termios.ECHO | termios.ICANON)
+    try:
+        old = termios.tcgetattr(fd)
+        new = termios.tcgetattr(fd)
+    except termios.error:
+        raise KuraError("anilist_login_needs_tty",
+                        "This terminal cannot hide input: pipe the token with --token-stdin") from None
+    new[3] &= ~(termios.ECHO | termios.ICANON | termios.IEXTEN)   # IEXTEN: no Ctrl-V/Ctrl-O handling
     new[6][termios.VMIN], new[6][termios.VTIME] = 1, 0
-    print(prompt, end="", file=sys.stderr, flush=True)
     typed = bytearray()
     try:
-        termios.tcsetattr(fd, termios.TCSANOW, new)    # keep a paste that arrived before the prompt
+        try:
+            termios.tcsetattr(fd, termios.TCSANOW, new)    # before the prompt: an early paste is not echoed
+        except termios.error:
+            raise KuraError("anilist_login_needs_tty",
+                            "This terminal cannot hide input: pipe the token with --token-stdin") from None
+        print(prompt, end="", file=sys.stderr, flush=True)
         while True:
             chunk = os.read(fd, 4096)
             if not chunk:
@@ -103,7 +111,10 @@ def _read_tty_line(fd: int, prompt: str) -> str:
                     raise KuraError("anilist_token_invalid", "The token input is too long")
         return typed.decode("ascii", "replace")
     finally:
-        termios.tcsetattr(fd, termios.TCSAFLUSH, old)
+        try:
+            termios.tcsetattr(fd, termios.TCSAFLUSH, old)
+        except termios.error:
+            pass                                        # nothing more can be done for this terminal
         print(file=sys.stderr, flush=True)
         typed[:] = b"\0" * len(typed)
 
