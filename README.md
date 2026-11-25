@@ -214,8 +214,9 @@ Private and protected torrents are never scraped and get no row. Trackers are ta
 stored magnet link, which holds only credential-free `/announce` URLs; the scrape URL is derived
 by replacing `announce` with `scrape` in the last path component. At most 3 trackers are tried per
 torrent (the first that lists it decides), at most 74 infohashes go into one request, requests to
-one host are spaced, and a run is capped by `--max-requests`. Every request is bounded: 5 seconds
-in total, 256 KiB, no redirects, no proxy settings, and the DNS answers must all be public
+one host are spaced, and a run is capped by `--max-requests`. The state lock is held for the
+whole run, so a concurrent `manifest build` or `plan` is refused as `busy`. Every request is bounded: 5 seconds
+in total (DNS, connect, TLS and read), 256 KiB, no redirects, no proxy settings, and the DNS answers must all be public
 addresses; the connection is made to the validated address itself. A tracker that fails, answers
 garbage or does not list the torrent is recorded as `unavailable` and never fails the run. Output
 and stored detail name tracker hosts only, never full URLs. UDP trackers (BEP 15) are not

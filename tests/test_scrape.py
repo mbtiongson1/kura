@@ -265,6 +265,64 @@ class Transport(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 2.0)
 
 
+    def test_stalled_dns_is_abandoned_at_the_deadline(self):
+        gate = threading.Event()
+
+        def slow(*a, **k):
+            gate.wait(3)
+            return [(socket.AF_INET, 1, 6, "", (PUBLIC, 80))]
+
+        with patch("kura.scrape.socket.getaddrinfo", slow), \
+             patch("kura.scrape.socket.create_connection", side_effect=AssertionError("connected")):
+            started = time.monotonic()
+            with self.assertRaises(KuraError) as caught:
+                self.get(timeout=0.2)
+            gate.set()
+        self.assertEqual(caught.exception.code, "scrape_unavailable")
+        self.assertLess(time.monotonic() - started, 1.5)
+
+    def test_many_dead_addresses_share_one_budget(self):
+        timeouts = []
+
+        def connect(address, timeout=None, *a, **k):
+            timeouts.append(timeout)
+            time.sleep(0.12)
+            raise TimeoutError("dead")
+
+        many = [f"8.8.{n}.8" for n in range(1, 9)]
+        with patch("kura.scrape.socket.getaddrinfo",
+                   return_value=[(socket.AF_INET, 1, 6, "", (a, 80)) for a in many]), \
+             patch("kura.scrape.socket.create_connection", connect):
+            started = time.monotonic()
+            with self.assertRaises(KuraError) as caught:
+                self.get(timeout=0.3)
+        self.assertEqual(caught.exception.code, "scrape_unavailable")
+        self.assertLess(time.monotonic() - started, 1.0)
+        self.assertLess(len(timeouts), len(many))
+        self.assertEqual(timeouts, sorted(timeouts, reverse=True))
+        self.assertLessEqual(max(timeouts), 0.3)
+
+    def test_https_handshake_socket_is_reachable_by_the_deadline_timer(self):
+        raw = FakeSocket()
+        context = Mock()
+        seen = []
+
+        def handshake(sock, server_hostname):
+            seen.append(sock)
+            raise OSError("handshake stalled")
+
+        context.wrap_socket.side_effect = handshake
+        with patch("kura.scrape.socket.getaddrinfo",
+                   return_value=[(socket.AF_INET, 1, 6, "", (PUBLIC, 443))]), \
+             patch("kura.scrape.socket.create_connection", return_value=raw), \
+             patch("kura.scrape.ssl.create_default_context", return_value=context):
+            with self.assertRaises(KuraError) as caught:
+                scrape.fetch("https", "t.example", 443, "/scrape?info_hash=%01")
+        self.assertEqual(caught.exception.code, "scrape_unavailable")
+        self.assertEqual(seen, [raw])
+        self.assertTrue(raw.closed)
+
+
 class Query(unittest.TestCase):
     """The tracker rounds, batching and budgets, below the database layer."""
 
@@ -501,6 +559,30 @@ class Library(unittest.TestCase):
             scrape.scrape(self.lab.store, library="home", fetcher=fetcher, sleep=lambda s: None)
         self.assertEqual(self.repo.latest_swarm(self.a.infohash)["seeders"], 5)
         self.assertIsNone(self.repo.latest_swarm(self.b.infohash))
+
+    def test_state_lock_is_held_for_the_whole_run(self):
+        seen = []
+
+        def fetcher(scheme, host, port, target):
+            with self.assertRaises(KuraError) as caught:
+                with self.lab.store.lock():
+                    pass
+            seen.append(caught.exception.code)
+            return self.fetcher(scheme, host, port, target)
+
+        scrape.scrape(self.lab.store, library="home", fetcher=fetcher, sleep=lambda s: None)
+        self.assertTrue(seen and set(seen) == {"busy"})
+        with self.lab.store.lock():         # released afterwards
+            pass
+
+    def test_a_torrent_protected_during_the_run_cannot_be_reclassified_underneath_it(self):
+        """The lock refuses a concurrent build (which is what reclassifies torrents)."""
+        with self.lab.store.lock():
+            with self.assertRaises(KuraError) as caught:
+                self.scrape()
+        self.assertEqual(caught.exception.code, "busy")
+        self.assertEqual(self.requests, [])
+        self.assertIsNone(self.repo.latest_swarm(self.a.infohash))
 
     def test_argument_validation(self):
         for kw in ({"max_requests": 0}, {"max_requests": True}, {"max_requests": 10_001},

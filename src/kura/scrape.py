@@ -197,12 +197,26 @@ def _public(address: str) -> bool:
     return ip.is_global and not ip.is_multicast
 
 
-def resolve_public(host: str, port: int) -> list[str]:
-    """All addresses of `host`, or ``unsafe_url`` if any is not globally routable."""
-    try:
-        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    except (OSError, UnicodeError) as e:
-        raise KuraError("scrape_unavailable", "Tracker host did not resolve") from e
+def resolve_public(host: str, port: int, timeout: float = TIMEOUT) -> list[str]:
+    """All addresses of `host`, or ``unsafe_url`` if any is not globally routable.
+
+    The system resolver cannot be interrupted, so it runs in a daemon thread and a lookup
+    that outlives `timeout` seconds is abandoned.
+    """
+    box: dict = {}
+
+    def lookup():
+        try:
+            box["infos"] = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except BaseException as e:      # reported below, never raised inside the thread
+            box["error"] = e
+
+    worker = threading.Thread(target=lookup, daemon=True)
+    worker.start()
+    worker.join(max(timeout, 0.0))
+    infos = box.get("infos")
+    if worker.is_alive() or "error" in box or not infos:
+        raise KuraError("scrape_unavailable", "Tracker host did not resolve in time")
     addresses = []
     for info in infos:
         address = info[4][0]
@@ -210,42 +224,49 @@ def resolve_public(host: str, port: int) -> list[str]:
             raise KuraError("unsafe_url", "Tracker resolved to a non-public address")
         if address not in addresses:
             addresses.append(address)
-    if not addresses:
-        raise KuraError("scrape_unavailable", "Tracker host did not resolve")
     return addresses
 
 
-def _pin(timeout: float, addresses: list[str], port: int):
-    """Open a socket to the first reachable validated address (no second DNS lookup)."""
+def _pin(deadline: float, addresses: list[str], port: int):
+    """Open a socket to the first reachable validated address (no second DNS lookup).
+
+    Every attempt gets only the time left before `deadline`, so several dead addresses
+    cannot add up to more than one request's budget.
+    """
     last = None
     for address in addresses:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            break
         try:
-            return socket.create_connection((address, port), timeout)
+            return socket.create_connection((address, port), left)
         except OSError as e:
             last = e
     raise KuraError("scrape_unavailable", "Tracker connection failed") from last
 
 
 class _Plain(http.client.HTTPConnection):
-    def __init__(self, host, port, addresses, timeout):
-        super().__init__(host, port, timeout=timeout)
-        self._addresses = addresses
+    def __init__(self, host, port, addresses, deadline):
+        super().__init__(host, port, timeout=TIMEOUT)
+        self._addresses, self._deadline = addresses, deadline
 
     def connect(self):
-        self.sock = _pin(self.timeout, self._addresses, self.port)
+        self.sock = _pin(self._deadline, self._addresses, self.port)
 
 
 class _Secure(http.client.HTTPSConnection):
-    def __init__(self, host, port, addresses, timeout, context):
-        super().__init__(host, port, timeout=timeout, context=context)
-        self._addresses, self._ctx = addresses, context
+    def __init__(self, host, port, addresses, deadline, context):
+        super().__init__(host, port, timeout=TIMEOUT, context=context)
+        self._addresses, self._deadline, self._ctx = addresses, deadline, context
 
     def connect(self):
-        raw = _pin(self.timeout, self._addresses, self.port)
+        raw = self.sock = _pin(self._deadline, self._addresses, self.port)   # the deadline timer can reach it
         try:
+            raw.settimeout(max(self._deadline - time.monotonic(), 0.001))
             self.sock = self._ctx.wrap_socket(raw, server_hostname=self.host)
         except BaseException:
             raw.close()
+            self.sock = None
             raise
 
 
@@ -254,13 +275,14 @@ def fetch(scheme: str, host: str, port: int, target: str, *, timeout: float = TI
     """One bounded GET. Returns the body of a 200 response; every failure is a KuraError.
 
     Never follows a redirect, never reads proxy settings, never resolves a host twice and
-    never lets one request run past `timeout` seconds in total.
+    never lets one request (DNS, connect, TLS and read together) run past `timeout` seconds.
     """
     if scheme not in ("http", "https") or not 0 < port < 65536:
         raise KuraError("unsafe_url", "Only http and https trackers are scraped")
-    addresses = resolve_public(host, port)
-    conn = (_Secure(host, port, addresses, timeout, ssl.create_default_context())
-            if scheme == "https" else _Plain(host, port, addresses, timeout))
+    deadline = time.monotonic() + timeout        # one budget for DNS, connect, TLS and the read
+    addresses = resolve_public(host, port, timeout)
+    conn = (_Secure(host, port, addresses, deadline, ssl.create_default_context())
+            if scheme == "https" else _Plain(host, port, addresses, deadline))
 
     def expire():     # unblock a stalled read: the socket timeout only bounds each recv
         sock = conn.sock
@@ -270,7 +292,7 @@ def fetch(scheme: str, host: str, port: int, target: str, *, timeout: float = TI
             except OSError:
                 pass
 
-    timer = threading.Timer(timeout, expire)
+    timer = threading.Timer(max(deadline - time.monotonic(), 0.0), expire)
     timer.daemon = True
     timer.start()
     try:
@@ -387,20 +409,26 @@ def scrape(store, *, library: str, titles: list[str] | None = None,
 
     `fetcher(scheme, host, port, target)` returns response bytes or raises ``KuraError``
     (injectable for offline tests). Nothing here raises for a tracker problem. Rows are
-    appended even when the run is interrupted, for every torrent already answered.
+    appended even when the run is interrupted, for every torrent already answered. The
+    state lock is held throughout (a concurrent ``manifest build`` or ``plan`` is refused
+    as ``busy``), so protection cannot change between the check and the request.
     """
     check_args(library, titles, max_requests)
     fetcher = fetcher or fetch     # late-bound so tests can replace the transport
-    with store.lock():      # a consistent read of the manifest; released before any network I/O
-        repo = ManifestRepo(store.db)
-        hashes, skipped = _candidates(store, repo, library, titles)
-        work = {}           # infohash -> scrape targets of a public, unprotected torrent
-        for infohash in hashes:
-            row = repo.torrent(infohash)
-            if _eligible(row):
-                work[infohash] = targets_from_magnet(row.get("magnet"))
-            else:
-                skipped["torrents_protected"] += 1   # no request and no row
+    with store.lock():      # held for the whole run: a build cannot reclassify a torrent mid-scrape
+        return _run(store, library, titles, max_requests, fetcher, now, sleep, clock)
+
+
+def _run(store, library, titles, max_requests, fetcher, now, sleep, clock) -> dict:
+    repo = ManifestRepo(store.db)
+    hashes, skipped = _candidates(store, repo, library, titles)
+    work = {}               # infohash -> scrape targets of a public, unprotected torrent
+    for infohash in hashes:
+        row = repo.torrent(infohash)
+        if _eligible(row):
+            work[infohash] = targets_from_magnet(row.get("magnet"))
+        else:
+            skipped["torrents_protected"] += 1   # no request and no row
     outcome = {h: {"reason": "no_tracker"} for h, targets in work.items() if not targets}
     trail: dict[str, list] = {h: [] for h in work}   # infohash -> [{host, error}]
     requests = 0
