@@ -295,7 +295,7 @@ def rank(candidates, *, local_bytes: int, names, groups, entry: str | None = Non
 
     Fit = total size within `tolerance` (or the displayed size's rounding) of `local_bytes`
     and a title containing every word of at least one of `names`. Order: closer size
-    (essentially exact first), a title identical to the folder name `entry` (``manifest
+    (steps: essentially exact, within 0.5%, 1%, then the full window), a title identical to the folder name `entry` (``manifest
     build`` only links a torrent whose name equals the folder name), group match, more
     seeders, then infohash for determinism.
     """
@@ -310,11 +310,13 @@ def rank(candidates, *, local_bytes: int, names, groups, entry: str | None = Non
             continue
         if not any(w <= set(normalize(c.title).split()) for w in wanted):
             continue
+        ratio = diff / local_bytes
         exact = diff <= max(0.002 * local_bytes, c.slack)
-        rows.append({"candidate": c, "size_ratio": round(diff / local_bytes, 6), "exact_size": exact,
+        step = 0 if exact else 1 if ratio <= 0.005 else 2 if ratio <= 0.01 else 3
+        rows.append({"candidate": c, "size_ratio": round(ratio, 6), "exact_size": exact, "size_step": step,
                      "name_match": entry is not None and c.title == _EXT.sub("", entry),
                      "group_match": bool(c.group and c.group.casefold() in local_groups)})
-    rows.sort(key=lambda r: (not r["exact_size"], not r["name_match"], not r["group_match"],
+    rows.sort(key=lambda r: (r["size_step"], not r["name_match"], not r["group_match"],
                              -r["candidate"].seeders, r["size_ratio"], r["candidate"].infohash))
     return rows
 
@@ -394,7 +396,9 @@ class OutDir:
     """``--torrents-out`` as a directory fd: every write is relative to it, nothing else exists.
 
     Refuses a missing directory, a symlink anywhere in the path, a concurrent resolve and a
-    directory that looks like a library (a subdirectory or a media file inside it).
+    directory that looks like a library (a subdirectory or a media file inside it). The state
+    database holds no root paths, so ``check_out_dir`` additionally compares against the
+    ``--root`` paths the caller supplies.
     """
 
     def __init__(self, path):
@@ -517,6 +521,15 @@ class OutDir:
 
 
 # ---- the run ---------------------------------------------------------------------------
+
+def check_out_dir(torrents_out, library_roots):
+    """Refuse an output directory equal to, inside or above any given library root."""
+    out = os.path.realpath(os.path.abspath(torrents_out))
+    for root in library_roots or ():
+        base = os.path.realpath(os.path.abspath(root))
+        if out == base or out.startswith(base + os.sep) or base.startswith(out + os.sep):
+            raise KuraError("unsafe_output_dir", "Output directory overlaps a library root")
+
 
 def check_args(library, titles, max_titles, max_candidates, budget_seconds, interval=INTERVAL):
     if not isinstance(library, str) or not library:
@@ -679,10 +692,11 @@ def _process(key, row, files, *, pacer, out, core, max_candidates, tolerance, po
 def resolve(store, *, library: str, torrents_out, max_titles: int | None = None,
             max_candidates: int = 3, titles: list[str] | None = None, refresh: bool = False,
             aliases=None, budget_seconds: float = BUDGET_SECONDS, tolerance: float = TOLERANCE,
-            interval: float = INTERVAL, policy=None, fetcher=None, sleep=time.sleep,
+            interval: float = INTERVAL, policy=None, library_roots=(), fetcher=None, sleep=time.sleep,
             clock=time.monotonic, wall=time.time, should_stop=lambda: False) -> dict:
     """Search for and fetch candidate descriptors for ``unmatched`` titles. See module docstring."""
     check_args(library, titles, max_titles, max_candidates, budget_seconds, interval)
+    check_out_dir(torrents_out, library_roots)
     pacer = Pacer(fetcher or provider.fetch, interval=interval, budget=float(budget_seconds),
                   sleep=sleep, clock=clock)
     with OutDir(torrents_out) as out:

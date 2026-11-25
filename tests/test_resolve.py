@@ -190,6 +190,13 @@ class Ranking(unittest.TestCase):
         self.assertEqual(resolve.rank(shown, local_bytes=local - 200 * 1024**2,
                                       names=("kura sample series",), groups=()), [])
 
+    def test_closer_size_beats_group_and_seeders_across_steps(self):
+        rows = [self.cand("[GroupX] Kura Sample Series", self.LOCAL * 1.018, 1, seeders=999, group="GroupX"),
+                self.cand("[GroupY] Kura Sample Series", self.LOCAL * 1.008, 2, seeders=1, group="GroupY"),
+                self.cand("[GroupZ] Kura Sample Series", self.LOCAL * 1.004, 3, seeders=1, group="GroupZ")]
+        out = self.rank(rows, groups=("GroupX",), entry="Kura Sample Series")
+        self.assertEqual([r["candidate"].nyaa_id for r in out], ["3", "2", "1"])
+
     def test_order_size_name_group_seeders(self):
         entry = "Kura Sample Series"
         rows = [self.cand("Kura Sample Series", self.LOCAL * 1.015, 1, seeders=900, group="GroupX"),   # close, not exact
@@ -611,6 +618,22 @@ class Boundaries(Fixture, unittest.TestCase):
             resolve.OutDir(self.lab.lib)                                   # a real library root
         self.assertEqual(sorted(p.name for p in self.lab.lib.iterdir()), [FOLDER])
 
+    def test_output_directory_overlapping_a_library_root_is_refused(self):
+        inside = self.lab.lib / "empty-subdir"
+        inside.mkdir()
+        for out, root in ((inside, self.lab.lib), (self.lab.lib, self.lab.lib), (self.lab.tmp, self.lab.lib)):
+            with self.subTest(out=out.name), self.assertRaises(KuraError) as caught:
+                resolve.resolve(self.lab.store, library="home", torrents_out=out, library_roots=[root],
+                                fetcher=self.nyaa)
+            self.assertEqual(caught.exception.code, "unsafe_output_dir")
+        self.assertEqual(sorted(p.name for p in inside.iterdir()), [])
+        self.assertEqual(sorted(p.name for p in self.lab.lib.iterdir()), [FOLDER, "empty-subdir"])
+        self.assertEqual(self.nyaa.calls, [])
+        self.resolve(library_roots=[self.lab.lib])                  # a sibling directory is fine
+        similar = self.lab.tmp / "lib-sibling"                     # prefix-alike names do not overlap
+        similar.mkdir()
+        resolve.check_out_dir(similar, [self.lab.lib])
+
     def test_concurrent_resolve_is_refused(self):
         with resolve.OutDir(self.out):
             with self.assertRaises(KuraError) as caught:
@@ -696,6 +719,12 @@ class Cli(Fixture, unittest.TestCase):
             run("manifest", "resolve", "--library", "home", "--torrents-out", str(self.out), "--no-anilist",
                 "--protected", str(self.lab.prot))
             self.assertTrue(call.call_args.kwargs["policy"].has_protected_list)
+
+    def test_root_flag_feeds_the_overlap_check(self):
+        with patch("kura.cli.private_root", return_value=self.lab.state):
+            code, out = run("manifest", "resolve", "--library", "home", "--torrents-out", str(self.out),
+                            "--no-anilist", "--root", f"main={self.lab.tmp}")
+        self.assertEqual((code, out["error"]["code"]), (2, "unsafe_output_dir"))
 
     def test_errors(self):
         base = ["manifest", "resolve", "--library", "home", "--torrents-out", str(self.out)]

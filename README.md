@@ -226,7 +226,8 @@ queried yet; a torrent with only UDP trackers is `unavailable` (`no_tracker`).
 ```sh
 kura manifest resolve --library home --torrents-out /path/to/kura-owned/dir \
   [--title media/Some\ Title ...] [--max-titles N] [--max-candidates 3] \
-  [--budget-minutes 30] [--refresh] [--no-anilist] [--tracker-denylist F] [--protected F]
+  [--budget-minutes 30] [--refresh] [--no-anilist] [--tracker-denylist F] [--protected F] \
+  [--root LABEL=PATH ...]
 ```
 Most titles end up `unmatched` because nobody kept a `.torrent` for them. `manifest resolve`
 searches Nyaa for candidates and saves their **descriptors** (small metadata files, never
@@ -236,7 +237,9 @@ directory afterwards. A wrong candidate is harmless: `build` verifies piece hash
 
 Run it where there is network. It reads only the state database (title names, file names and
 sizes), never the library, and writes only inside `--torrents-out`: a Kura-owned directory that
-must already exist, must not be a symlink, and is refused when it holds a subdirectory or a media file (it looks like a library). Besides descriptors it keeps a small `.kura-resolve.json`
+must already exist, must not be a symlink, and is refused when it holds a subdirectory or a media file (it looks like a library). Pass
+each library `--root` as well and an output directory equal to, inside or above one is refused too
+(the state database does not record root paths, so this cannot be checked otherwise). Besides descriptors it keeps a small `.kura-resolve.json`
 attempt ledger and a lock file there, and the existing AniList alias cache in the state database
 is updated. Only `unmatched` titles are searched, so the names of protected or blocked titles are never sent
 anywhere. Search terms are the folder name without group, resolution, codec, source and batch
