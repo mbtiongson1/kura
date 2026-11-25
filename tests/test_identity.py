@@ -223,6 +223,17 @@ class AliasFallback(Base):
         row = self.row("Kura Alpha")
         self.assertEqual((row["anilist_id"], row["candidates"], row["source"]), (A, [B], "alias"))
 
+    def test_candidates_found_by_alias_survive_later_syncs_and_refreshes(self):
+        page = [(A, ["Kura Alpha"]), (B, ["Kura Alpha Season 2"])]
+        self.sync(aliases=Resolver({"Kura Alpha": page}), titles=["main/Kura Alpha"])
+        seed(self.store.db, [(A, "Kura Alpha", None, [])])              # a narrower list: only the winner
+        self.sync(aliases=None, titles=["main/Kura Alpha"])
+        row = self.row("Kura Alpha")
+        self.assertEqual((row["source"], row["candidates"]), ("alias", [B]))   # ordinary sync keeps the row
+        self.sync(aliases=None, titles=["main/Kura Alpha"], refresh=True)
+        row = self.row("Kura Alpha")
+        self.assertEqual((row["anilist_id"], row["source"], row["candidates"]), (A, "list", [B]))
+
     def test_a_tie_inside_the_page_is_ambiguous_with_candidates(self):
         self.sync(aliases=Resolver({"Kura Alpha": "ambiguous"}), titles=["main/Kura Alpha"])
         row = self.row("Kura Alpha")

@@ -232,6 +232,17 @@ def _record(found: dict, source: str, query: str | None) -> dict:
     return {**found, "source": source, "query": query[:200] if query else None}
 
 
+def _carry(record: dict, before: dict | None) -> dict:
+    """A refreshed record keeps what an earlier resolved row knew: its weaker candidates and its
+    own ID (when the new answer differs) stay candidates, so a retain list can still see them.
+    Only ``identity pin`` clears candidates."""
+    if before is None or before["status"] != "resolved":
+        return record
+    extra = set(before["candidates"]) | {before["anilist_id"]}
+    extra.discard(record["anilist_id"])
+    return {**record, "candidates": sorted(set(record["candidates"]) | extra)}
+
+
 def _same(old: dict | None, new: dict) -> bool:
     return old is not None and all(
         old[k] == new[k] for k in ("anilist_id", "status", "source", "matched", "candidates"))
@@ -346,23 +357,23 @@ def sync(store, *, library: str, titles: list[str] | None = None, aliases=None,
         raise KuraError("not_found", "Title not in the manifest", titles=missing[:20])
     moment = now()
     existing = load(store.db, library)
+    before = dict(existing)
     snapshot = list_snapshot(store.db)
     offline, need = {}, []
     for key in wanted:
         current = existing.get(key)
         if current is not None and current["source"] == "owner":
             continue
+        if current is not None and current["status"] == "resolved" and not refresh:
+            continue                        # kept as it is, with its candidates, until a refresh
         base, season, undecidable = folder_terms(key)
         found = ({"status": "ambiguous", "anilist_id": None, "matched": None, "candidates": []}
                  if undecidable else match(snapshot, base, season))
-        known = current is not None and current["status"] == "resolved"
         if found["status"] == "unresolved":
-            if known and not refresh:
-                continue                    # keep the earlier identity; no new lookup
             if _fresh(current, moment) and not refresh:
                 continue                    # asked recently and nothing new offline
             need.append((key, base, season))    # a refresh drops what it cannot reconfirm
-        record = _record(found, "list", base)
+        record = _carry(_record(found, "list", base), current)
         if not _same(current, record):
             offline[key] = record
     _store(store.db, library, offline, moment)
@@ -383,6 +394,7 @@ def sync(store, *, library: str, titles: list[str] | None = None, aliases=None,
                     stop = True
                     pending += 1
                     continue
+                record = _carry(record, before.get(key))
                 if not _same(existing.get(key), record):
                     found_now[key] = record
         finally:
