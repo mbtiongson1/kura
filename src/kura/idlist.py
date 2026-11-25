@@ -11,6 +11,11 @@ just its sha256 and the number of IDs. Anything unexpected is refused with
 
 Duplicates merge; a duplicate with a different tag is refused. Reading is bounded (1 MiB,
 10,000 lines) and uses a no-follow, regular-file open.
+
+A pins file (``parse_pins``) holds the owner's title identity decisions, one per line:
+``<AniList ID or not-anime><TAB><title key>``. The key is everything after the first tab, taken
+verbatim (it may contain spaces and ``#``), so only whole-line comments are allowed. A title
+listed twice is refused, even with the same value.
 """
 from dataclasses import dataclass
 import hashlib
@@ -100,3 +105,50 @@ def parse(path: Path, *, tags: tuple[str, ...] = ()) -> IdList:
     body = sorted(ids.items()) if tags else sorted(ids)
     digest = hashlib.sha256(json.dumps(body, separators=(",", ":")).encode("ascii")).hexdigest()
     return IdList(ids, digest)
+
+
+NOT_ANIME = "not-anime"
+
+
+@dataclass(frozen=True)
+class Pins:
+    entries: dict[str, int | None]      # title key -> AniList ID, or None for not-anime
+    sha256: str
+
+    def summary(self) -> dict:
+        return {"sha256": self.sha256, "pins": len(self.entries)}
+
+
+def parse_pins(path: Path) -> Pins:
+    """Parse a pins file (see the module docstring). Any bad line refuses the whole file."""
+    raw = _read(Path(path))
+    if len(raw) > MAX_BYTES:
+        _error(None, "Pins file is too large")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        _error(None, "Pins file is not UTF-8")
+    lines = text.splitlines()
+    if len(lines) > MAX_LINES:
+        _error(None, f"Pins file exceeds {MAX_LINES} lines")
+    entries: dict[str, int | None] = {}
+    for number, line in enumerate(lines, 1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        value, sep, title = line.partition("\t")
+        value = value.strip()
+        if not sep or not title or title != title.strip() or "\t" in title:
+            _error(number, "Expected <AniList ID or not-anime>, one tab, then the title key")
+        if value == NOT_ANIME:
+            target = None
+        elif _ID.fullmatch(value):
+            target = int(value)
+        else:
+            _error(number, "Expected a positive AniList ID below 1000000000 or not-anime")
+        if title in entries:
+            _error(number, "The same title is listed twice")
+        entries[title] = target
+    body = sorted(entries.items(), key=lambda kv: kv[0])
+    digest = hashlib.sha256(json.dumps(body, separators=(",", ":"), ensure_ascii=False)
+                            .encode("utf-8")).hexdigest()
+    return Pins(entries, digest)

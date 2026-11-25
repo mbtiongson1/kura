@@ -459,6 +459,44 @@ def pin(store, library: str, title: str, anilist_id: int | None = None, *,
     return {"library": library, "title": title, "status": status, "anilist_id": anilist_id}
 
 
+def apply_pins(store, library: str, pins, *, now=time.time) -> dict:
+    """Apply a parsed pins file (``idlist.Pins``) as owner decisions, in one transaction.
+
+    Titles missing from the manifest are reported and skipped (a title can be absent for a
+    while); a title whose owner decision already matches is left untouched. Nothing is ever
+    cleared here: dropping a line from the file keeps the earlier decision (use ``pin --clear``).
+    """
+    if not isinstance(library, str) or not library:
+        raise _bad("A library is required")
+    applied = {"pinned": 0, "not_anime": 0}
+    unchanged, missing = 0, []
+    with store.lock():
+        known = set(_manifest_titles(store, library))
+        current = {title: (status, anilist_id) for title, status, anilist_id in store.db.execute(
+            "SELECT title, status, anilist_id FROM title_identities WHERE library=? AND source='owner'",
+            (library,))}
+        moment = now()
+        with _tx(store.db):
+            for title, anilist_id in pins.entries.items():
+                if title not in known:
+                    missing.append(title)
+                    continue
+                status = "pinned" if anilist_id is not None else "not_anime"
+                if current.get(title) == (status, anilist_id):
+                    unchanged += 1
+                    continue
+                store.db.execute(
+                    "INSERT INTO title_identities(library, title, anilist_id, status, source, query,"
+                    " matched, candidates, updated_at) VALUES (?,?,?,?,'owner',NULL,NULL,'[]',?)"
+                    " ON CONFLICT(library, title) DO UPDATE SET anilist_id=excluded.anilist_id,"
+                    " status=excluded.status, source='owner', query=NULL, matched=NULL,"
+                    " candidates='[]', updated_at=excluded.updated_at",
+                    (library, title, anilist_id, status, moment))
+                applied[status] += 1
+    return {"library": library, "pins": pins.summary(), "applied": applied, "unchanged": unchanged,
+            "missing": sorted(missing)}
+
+
 def show(store, library: str, status: str | None = None) -> dict:
     """Recorded identities, newest state; read-only. ``unrecorded`` counts manifest titles with no row."""
     if status is not None and status not in STATUSES:

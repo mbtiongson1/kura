@@ -10,7 +10,7 @@ from unittest.mock import patch
 import kura.cli as cli
 from kura import identity
 from kura.anilist import AniList, choose
-from kura.idlist import parse
+from kura.idlist import parse, parse_pins
 from kura.models import KuraError
 from test_manifest import GOOD, Lab
 
@@ -433,6 +433,40 @@ class Owner(Base):
         return path
 
 
+class PinsFile(Base):
+    NAMES = ("Kura Alpha", "Kura Beta", "Kura Gamma")
+
+    def pins(self, text):
+        path = self.lab.tmp / "pins.tsv"
+        path.write_text(text)
+        return parse_pins(path)
+
+    def test_apply_reports_missing_and_is_idempotent(self):
+        pins = self.pins(f"{A}\tmain/Kura Alpha\nnot-anime\tmain/Kura Beta\n{C}\tmain/Not Here\n")
+        out = identity.apply_pins(self.store, "home", pins, now=lambda: 5.0)
+        self.assertEqual((out["applied"], out["unchanged"], out["missing"]),
+                         ({"pinned": 1, "not_anime": 1}, 0, ["main/Not Here"]))
+        self.assertEqual(out["pins"], pins.summary())
+        self.assertEqual((self.row("Kura Alpha")["status"], self.row("Kura Alpha")["anilist_id"],
+                          self.row("Kura Alpha")["source"]), ("pinned", A, "owner"))
+        self.assertEqual(self.row("Kura Beta")["status"], "not_anime")
+        again = identity.apply_pins(self.store, "home", pins, now=lambda: 9.0)
+        self.assertEqual((again["applied"], again["unchanged"]), ({"pinned": 0, "not_anime": 0}, 2))
+        self.assertEqual(self.row("Kura Alpha")["updated_at"], 5.0)        # an unchanged pin is not rewritten
+
+    def test_pins_beat_sync_replace_older_decisions_and_never_clear(self):
+        seed(self.store.db, [(A, "Kura Alpha", None, []), (B, "Kura Gamma", None, [])])
+        self.sync(aliases=None)
+        identity.pin(self.store, "home", "main/Kura Beta", D)
+        identity.apply_pins(self.store, "home", self.pins(f"{E}\tmain/Kura Alpha\n{C}\tmain/Kura Beta\n"))
+        self.sync(aliases=None, refresh=True)
+        self.assertEqual((self.row("Kura Alpha")["status"], self.row("Kura Alpha")["anilist_id"]), ("pinned", E))
+        self.assertEqual(self.row("Kura Beta")["anilist_id"], C)              # the file replaced the older pin
+        identity.apply_pins(self.store, "home", self.pins(""))
+        self.assertEqual(self.row("Kura Alpha")["status"], "pinned")         # leaving a line out clears nothing
+        self.assertEqual((self.row("Kura Gamma")["status"], self.row("Kura Gamma")["source"]), ("resolved", "list"))
+
+
 class RetainCheck(Base):
     NAMES = ("Kura Alpha", "Kura Beta", "Kura Gamma", "Kura Delta")
 
@@ -510,6 +544,19 @@ class CommandLine(Base):
         path.write_text("oops\n")
         code, out = self.cli("retain", "check", "--library", "home", "--retain", str(path))
         self.assertEqual((code, out["error"]["code"], out["data"]), (2, "invalid_policy", {"line": 1}))
+
+    def test_pins_command(self):
+        path = self.lab.tmp / "pins.tsv"
+        path.write_text(f"{E}\tmain/Kura Alpha\nnot-anime\tmain/Kura Gone\n")
+        code, out = self.cli("identity", "pins", "--library", "home", "--from", str(path))
+        self.assertEqual((code, out["success"], out["phase"]), (0, True, "identity"))
+        self.assertEqual((out["data"]["applied"], out["data"]["missing"]),
+                         ({"pinned": 1, "not_anime": 0}, ["main/Kura Gone"]))
+        path.write_text(f"{E} main/Kura Alpha\n")
+        with patch("kura.identity.apply_pins") as apply:
+            code, out = self.cli("identity", "pins", "--library", "home", "--from", str(path))
+        self.assertEqual((code, out["error"]["code"], out["data"]), (2, "invalid_policy", {"line": 1}))
+        apply.assert_not_called()
 
     def test_invalid_budget_is_refused_before_the_state_is_opened(self):
         code, out = self.cli("identity", "sync", "--library", "home", "--max-lookups", "99999")

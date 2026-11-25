@@ -35,6 +35,9 @@ def register(sub, parser_class):
     what.add_argument("--anilist-id", type=int, help="Bind the title to this AniList ID")
     what.add_argument("--not-anime", action="store_true", help="Record that the title is not anime")
     what.add_argument("--clear", action="store_true", help="Remove the owner decision")
+    q = leaf(group, "pins")
+    q.add_argument("--from", dest="pins_file", required=True, metavar="FILE",
+                   help="Pins file: <AniList ID or not-anime><TAB><title key> per line")
     q = leaf(group, "show")
     q.add_argument("--status", choices=identity.STATUSES)
 
@@ -61,6 +64,13 @@ def dispatch(args, open_store):
     if args.command == "identity":
         if args.operation == "sync":
             return True, _sync(args, open_store)
+        if args.operation == "pins":
+            pins = idlist.parse_pins(Path(args.pins_file).absolute())   # refuse a bad file before opening state
+            store = open_store()
+            try:
+                return True, identity.apply_pins(store, args.library, pins)
+            finally:
+                store.db.close()
         store = open_store()
         try:
             if args.operation == "pin":
