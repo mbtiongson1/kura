@@ -143,31 +143,39 @@ def _headers(source) -> dict:
     return out
 
 
-def _check_public_dns() -> str:
-    """Resolve the endpoint, require public addresses only, and return the one to connect to."""
+def _check_public_dns() -> tuple[str, ...]:
+    """Resolve the endpoint, require public addresses only, and return them in resolver order."""
     addresses = socket.getaddrinfo(HOST, 443, type=socket.SOCK_STREAM)
     if not addresses or any(not ipaddress.ip_address(a[4][0]).is_global for a in addresses):
         raise KuraError("unsafe_url", "AniList DNS resolved to a non-public address")
-    return addresses[0][4][0]
+    return tuple(dict.fromkeys(a[4][0] for a in addresses))
 
 
 class _PinnedHTTPS(http.client.HTTPSConnection):
-    """HTTPS to an already validated IP, with certificate and SNI checked against the real hostname."""
+    """HTTPS to already validated IPs, with certificate and SNI checked against the real hostname."""
 
-    def __init__(self, *args, address: str, **kwargs):
+    def __init__(self, *args, addresses: tuple[str, ...], **kwargs):
         super().__init__(*args, **kwargs)
-        self._address = address
+        self._addresses = addresses
 
     def connect(self):
-        sock = socket.create_connection((self._address, self.port), self.timeout)
+        failure = None
+        for address in self._addresses:         # dual stack: fall through to the next validated address
+            try:
+                sock = socket.create_connection((address, self.port), self.timeout)
+                break
+            except OSError as e:
+                failure = e
+        else:
+            raise failure or OSError("no address")
         self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
 
 
-def _pinned_opener(address: str):
-    """Opener whose HTTPS connections go to `address`: DNS cannot change between check and use."""
+def _pinned_opener(addresses):
+    """Opener whose HTTPS connections go to the validated `addresses`: DNS cannot change between check and use."""
     class Handler(urllib.request.HTTPSHandler):
         def https_open(self, req):
-            return self.do_open(lambda host, **kw: _PinnedHTTPS(host, address=address, **kw), req)
+            return self.do_open(lambda host, **kw: _PinnedHTTPS(host, addresses=tuple(addresses), **kw), req)
     return urllib.request.build_opener(urllib.request.ProxyHandler({}), Handler(), NoRedirect())
 
 
@@ -229,13 +237,13 @@ def graphql_fetch(query: str, variables: dict, token: str | None = None,
     if token is not None and not valid_token(token):
         raise KuraError("anilist_token_invalid", "The stored token has an invalid format")
     try:
-        address = _check_public_dns()
+        addresses = _check_public_dns()
         body = json.dumps({"query": query, "variables": variables}).encode()
         headers = {"Content-Type": "application/json", "Accept": "application/json",
                    "User-Agent": "Kura/0.1 (+https://github.com/mbtiongson1/kura)"}
         if token is not None:
             headers["Authorization"] = "Bearer " + token
-        with _pinned_opener(address).open(
+        with _pinned_opener(addresses).open(
                 urllib.request.Request(ENDPOINT, data=body, method="POST", headers=headers), timeout=30) as response:
             data = response.read(limit + 1)
             received = _headers(getattr(response, "headers", None))

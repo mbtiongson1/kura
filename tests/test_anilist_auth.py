@@ -349,19 +349,33 @@ class Pinned(unittest.TestCase):
         context = unittest.mock.Mock()
         context.wrap_socket.return_value = wrapped
         with patch.object(anilist.socket, "create_connection", return_value=sock) as connect:
-            conn = anilist._PinnedHTTPS("graphql.anilist.co", address="203.0.113.7", timeout=30, context=context)
+            conn = anilist._PinnedHTTPS("graphql.anilist.co", addresses=("203.0.113.7",), timeout=30, context=context)
             conn.connect()
         connect.assert_called_once_with(("203.0.113.7", 443), 30)
         context.wrap_socket.assert_called_once_with(sock, server_hostname="graphql.anilist.co")
         self.assertIs(conn.sock, wrapped)
 
+    def test_connection_falls_through_to_the_next_validated_address(self):
+        import kura.anilist as anilist
+        sock, context = object(), unittest.mock.Mock()
+        with patch.object(anilist.socket, "create_connection", side_effect=[OSError("no route"), sock]) as connect:
+            conn = anilist._PinnedHTTPS("graphql.anilist.co", addresses=("2001:db8::1", "203.0.113.7"),
+                                        timeout=30, context=context)
+            conn.connect()
+        self.assertEqual([c.args[0] for c in connect.call_args_list],
+                         [("2001:db8::1", 443), ("203.0.113.7", 443)])
+        with patch.object(anilist.socket, "create_connection", side_effect=OSError("down")):
+            conn = anilist._PinnedHTTPS("graphql.anilist.co", addresses=("203.0.113.7",), timeout=30, context=context)
+            with self.assertRaises(OSError):
+                conn.connect()
+
     def test_fetch_uses_the_address_it_validated(self):
         import kura.anilist as anilist
-        with patch.object(anilist, "_check_public_dns", return_value="203.0.113.7"), \
+        with patch.object(anilist, "_check_public_dns", return_value=("203.0.113.7",)), \
                 patch.object(anilist, "_pinned_opener") as pinned:
             pinned.return_value.open.return_value = Transport.Response(b"{}")
             anilist.graphql_fetch("{Viewer{id}}", {}, make_token(time.time() + DAY * 90))
-        pinned.assert_called_once_with("203.0.113.7")
+        pinned.assert_called_once_with(("203.0.113.7",))
 
 
 class WhoamiLogout(Cli):
