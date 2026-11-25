@@ -345,7 +345,7 @@ def _carry(record: dict, before: dict | None) -> dict:
 
 def _same(old: dict | None, new: dict) -> bool:
     return old is not None and all(
-        old[k] == new[k] for k in ("anilist_id", "status", "source", "matched", "candidates"))
+        old[k] == new[k] for k in ("anilist_id", "status", "source", "matched", "candidates", "query"))
 
 
 class _Lookup:
@@ -382,10 +382,15 @@ class _Lookup:
 _FAILURES = ("alias_unavailable", "alias_invalid", "unsafe_url")
 
 
+def alias_queries(base: str, season: int | None) -> list[str]:
+    """What the alias pass asks for one name, in order."""
+    return [f"{base} Season {season}", base] if season is not None and season >= 2 else [base]
+
+
 def _alias(lookup, base: str, season: int | None, budget: int):
     """Alias fallback for one title: ``(record, stop, out_of_budget)``. The season variant is
     asked first; the returned page is matched here with the same rules as the offline pass."""
-    queries = [f"{base} Season {season}", base] if season is not None and season >= 2 else [base]
+    queries = alias_queries(base, season)
     rejected: set[int] = set()
     for query in queries:
         if lookup.made >= budget:
@@ -415,6 +420,32 @@ def _fresh(row: dict | None, moment: float) -> bool:
         return False
     ttl = {"unresolved": ALIAS_TTL, "ambiguous": ALIAS_TTL, "unavailable": ALIAS_FAILURE_TTL}.get(row["status"])
     return ttl is not None and 0 <= moment - row["updated_at"] < ttl
+
+
+def _plan_key(folder_last: str, alt) -> str:
+    """The ``query`` a finished negative alias answer carries: the folder name's last query, and
+    the file-name fallback's last query when there is one. It ties the memory to what was asked."""
+    return (f"{folder_last} | {alias_queries(*alt)[-1]}" if alt is not None else folder_last)[:200]
+
+
+def _memory(row: dict | None, moment: float, base: str, season: int | None, alt) -> str | None:
+    """What a recent negative alias row already settles for the current queries: ``"all"`` (ask
+    nothing), ``"folder"`` (the folder name was asked, only the file-name query remains) or None.
+    A negative answer is remembered together with the queries it was for, so a changed fallback
+    (new files) is looked up again; an unavailable or ambiguous row stays fresh by time alone."""
+    if not _fresh(row, moment):
+        return None
+    if row["status"] != "unresolved":
+        return "all"
+    folder_last, asked = alias_queries(base, season)[-1], row["query"]
+    if asked is None:
+        return "all" if alt is None else None
+    if asked == _plan_key(folder_last, alt):
+        return "all"
+    folder_done = asked == folder_last or asked.startswith(folder_last + " | ")
+    if folder_done:
+        return "all" if alt is None else "folder"
+    return None
 
 
 def check_sync_args(library, titles, max_lookups):
@@ -556,9 +587,12 @@ def sync(store, *, library: str, titles: list[str] | None = None, aliases=None,
                 if again["status"] != "unresolved":
                     found, query, alt = again, alt[0], None
         if found["status"] == "unresolved":
-            if _fresh(current, moment) and not refresh:
+            memory = None if refresh else _memory(current, moment, base, season, alt)
+            if memory == "all":
                 continue                    # asked recently and nothing new offline
-            need.append((key, base, season, alt))   # a refresh drops what it cannot reconfirm
+            need.append((key, base, season, alt, memory == "folder"))   # a refresh drops what it cannot reconfirm
+            if memory == "folder":
+                continue                    # keep the row that remembers the folder answer
         record = _carry(_record(found, "list", query), current)
         if not _same(current, record):
             offline[key] = record
@@ -569,22 +603,31 @@ def sync(store, *, library: str, titles: list[str] | None = None, aliases=None,
     if counter is not None:
         found_now, stop = {}, False
         try:
-            for key, base, season, alt in need:
+            for key, base, season, alt, folder_done in need:
                 if stop:
                     pending += 1
                     continue
                 if not normalize(base):
                     continue
-                record, stop, exhausted = _alias(counter, base, season, max_lookups)
-                if not exhausted and not stop and alt is not None and record["status"] == "unresolved":
-                    second, stop, exhausted = _alias(counter, alt[0], alt[1], max_lookups)
-                    if not exhausted:       # the file-name query settles it, or adds what it rejected
-                        record = (second if second["status"] != "unresolved" else
-                                  {**record, "candidates": sorted(set(record["candidates"]) | set(second["candidates"]))})
+                if folder_done:             # the folder name was asked in an earlier run
+                    record, exhausted = _record({"status": "unresolved", "anilist_id": None, "matched": None,
+                                                 "candidates": []}, "alias", alias_queries(base, season)[-1]), False
+                else:
+                    record, stop, exhausted = _alias(counter, base, season, max_lookups)
                 if exhausted:
                     stop = True
                     pending += 1
                     continue
+                if not stop and alt is not None and record["status"] == "unresolved":
+                    folder_record = record
+                    second, stop, exhausted = _alias(counter, alt[0], alt[1], max_lookups)
+                    if exhausted:           # keep the folder answer: the next run asks only the file-name query
+                        stop = True
+                        pending += 1
+                    else:                   # the file-name query settles it, or adds what it rejected
+                        record = second if second["status"] != "unresolved" else _record(
+                            {**folder_record, "candidates": sorted(set(folder_record["candidates"]) | set(second["candidates"]))},
+                            "alias", _plan_key(alias_queries(base, season)[-1], alt))
                 record = _carry(record, before.get(key))
                 if not _same(existing.get(key), record):
                     found_now[key] = record

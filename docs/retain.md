@@ -62,8 +62,11 @@ folders and OP/ED/PV-style files are ignored). They are used only when every vid
 yields a series name and all agree on name and season, and a season the folder marks does
 not contradict them; any disagreement keeps the folder result. The name goes through the
 same offline matching, then (after the folder name) the alias pass, which costs one more
-lookup from the budget; the `query` column records the name that matched. A title whose
-file-name lookup does not fit the budget is left for the next run.
+lookup from the budget; the `query` column records the name that matched. A negative alias
+answer is remembered together with the queries it was for (`folder query | file-name query`
+in `query`): when the budget ends between the two lookups the folder answer is kept and the
+next run asks only the file-name query, and when the files change so the file-name query is
+a different one, it is asked again without `--refresh` (the folder answer is not).
 
 Root entries that are not titles. A loose file that is not a video (poster or logo images,
 `.nfo`, dotfiles, `*.ffs_db`) and a folder that holds files but no video (a `fonts` folder)

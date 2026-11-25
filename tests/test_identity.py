@@ -510,9 +510,71 @@ class FileNames(Tree):
         resolver = Resolver({})
         out = self.sync(aliases=resolver, max_lookups=1, titles=["main/Misc Folder"])
         self.assertEqual((resolver.queries, out["pending"]), (["Misc Folder"], 1))
-        self.assertEqual(self.row("Misc Folder")["source"], "list")      # no alias answer recorded: retried next run
+        row = self.row("Misc Folder")           # the folder answer is kept, so the next run asks only the rest
+        self.assertEqual((row["status"], row["source"], row["query"]), ("unresolved", "alias", "Misc Folder"))
         out = self.sync(aliases=resolver, max_lookups=5, titles=["main/Misc Folder"])
-        self.assertEqual((resolver.queries, out["pending"]), (["Misc Folder", "Misc Folder", "Show Six"], 0))
+        self.assertEqual((resolver.queries, out["pending"]), (["Misc Folder", "Show Six"], 0))
+        self.assertEqual(self.row("Misc Folder")["query"], "Misc Folder | Show Six")
+        out = self.sync(aliases=resolver, max_lookups=5, titles=["main/Misc Folder"])
+        self.assertEqual((resolver.queries, out["lookups"]["made"]), (["Misc Folder", "Show Six"], 0))   # settled
+
+    def test_a_budget_of_one_still_makes_progress(self):
+        resolver = Resolver({"Dungeon Meshi": (999000010, ["Dungeon Meshi"]), "Show Six": (999000011, ["Show Six"])})
+        self.store.db.execute("DELETE FROM anilist_list_entries")
+        self.store.db.commit()
+        keys = ["main/Dragon Meshi", "main/Misc Folder"]
+        out = self.sync(aliases=resolver, max_lookups=1, titles=keys)
+        self.assertEqual((resolver.queries, out["pending"]), (["Dragon Meshi"], 2))
+        out = self.sync(aliases=resolver, max_lookups=1, titles=keys)
+        self.assertEqual((resolver.queries, out["pending"]), (["Dragon Meshi", "Dungeon Meshi"], 1))
+        self.assertEqual(self.row("Dragon Meshi")["anilist_id"], 999000010)
+        out = self.sync(aliases=resolver, max_lookups=1, titles=keys)
+        self.assertEqual((resolver.queries[2:], out["pending"]), (["Misc Folder"], 1))
+        out = self.sync(aliases=resolver, max_lookups=1, titles=keys)
+        self.assertEqual((resolver.queries[3:], out["pending"]), (["Show Six"], 0))
+        self.assertEqual(self.row("Misc Folder")["anilist_id"], 999000011)
+
+    def test_an_old_negative_row_for_the_folder_name_goes_straight_to_the_file_name_query(self):
+        resolver = Resolver({"Dungeon Meshi": (999000010, ["Dungeon Meshi"])})
+        self.store.db.execute("DELETE FROM anilist_list_entries")
+        self.store.db.execute("INSERT INTO title_identities(library, title, status, source, query, candidates, updated_at)"
+                              " VALUES ('home', 'main/Dragon Meshi', 'unresolved', 'alias', 'Dragon Meshi', '[]', ?)",
+                              (__import__("time").time(),))
+        self.store.db.commit()
+        self.sync(aliases=resolver, titles=["main/Dragon Meshi"])
+        self.assertEqual(resolver.queries, ["Dungeon Meshi"])
+
+    def test_offline_keeps_the_remembered_folder_answer(self):
+        resolver = Resolver({})
+        self.sync(aliases=resolver, max_lookups=1, titles=["main/Misc Folder"])
+        self.sync(aliases=None, titles=["main/Misc Folder"])
+        self.assertEqual((self.row("Misc Folder")["source"], self.row("Misc Folder")["query"]), ("alias", "Misc Folder"))
+
+    def test_a_negative_answer_is_tied_to_the_queries_it_was_for(self):
+        resolver = Resolver({})
+        self.store.db.execute("DELETE FROM anilist_list_entries")
+        self.store.db.commit()
+        self.sync(aliases=resolver, titles=["main/Misc Folder"])
+        self.assertEqual(resolver.queries, ["Misc Folder", "Show Six"])
+        self.assertEqual(self.row("Misc Folder")["query"], "Misc Folder | Show Six")
+        self.sync(aliases=resolver, titles=["main/Misc Folder"])
+        self.assertEqual(len(resolver.queries), 2)                      # same files: still remembered
+        # the files change, so the fallback is a different name: it is asked without --refresh
+        for f in (self.lab.lib / "Misc Folder").iterdir():
+            f.unlink()
+        for n in (1, 2):
+            (self.lab.lib / "Misc Folder" / f"[ASW] Show Eight - {n:02d} [1080p].mkv").write_bytes(b"x" * 100)
+        self.lab.build()
+        self.sync(aliases=resolver, titles=["main/Misc Folder"])
+        self.assertEqual(resolver.queries[2:], ["Show Eight"])           # the folder answer is not asked again
+        self.assertEqual(self.row("Misc Folder")["query"], "Misc Folder | Show Eight")
+        # and when the files stop giving a name, the remembered folder answer still holds
+        for f in (self.lab.lib / "Misc Folder").iterdir():
+            f.unlink()
+        (self.lab.lib / "Misc Folder" / "notes.mkv").write_bytes(b"x" * 100)
+        self.lab.build()
+        self.sync(aliases=resolver, titles=["main/Misc Folder"])
+        self.assertEqual(len(resolver.queries), 3)
 
     def test_conflicting_or_mixed_season_markers_prevent_the_fallback(self):
         two, three = "[G] Show [Season 2] - 01.mkv", "[G] Show [Season 3] - 02.mkv"
