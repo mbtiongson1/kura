@@ -21,6 +21,8 @@ re-downloadable torrent backs them (the owner always performs the purge):
   `kura torrent inspect|verify`, `kura manifest build|show`, per-title status
   (`reacquirable`, `partial`, `unverified`, `unmatched`, `protected`, `blocked`, `stale`),
   evidence-based verification caching and rate-limit-aware AniList identity.
+- Landed: `kura manifest resolve` fetches candidate descriptors for unmatched titles; the
+  normal build then verifies them.
 - Next: quarantine plan (same-volume rename proposals, tree hashes, undo list, purge only
   after a waiting period and a fresh swarm check), swarm health scraping, and an explicit
   owner approval for files no torrent lists.

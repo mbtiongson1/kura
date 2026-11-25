@@ -42,6 +42,10 @@ def fetch(url: str, limit: int, descriptor: bool = False) -> bytes:
         if len(data) > limit:
             raise KuraError("metadata_limit", "Provider response exceeds metadata limit")
         return data
+    except urllib.error.HTTPError as e:
+        # The status lets a caller back off on 429/5xx; it changes nothing else.
+        raise KuraError("provider_unavailable", "Nyaa request failed; retry later",
+                        status=e.code) from e
     except (OSError, urllib.error.URLError) as e:
         raise KuraError("provider_unavailable", "Nyaa request failed; retry later") from e
 

@@ -3,14 +3,14 @@
 Three commands are *stateless*: ``library inventory``, ``torrent inspect`` and
 ``torrent verify`` never open the state database, never touch HOME and write nothing, so
 they run in a container with a read-only root filesystem and a read-only library mount.
-Only the ``manifest`` commands (``build``, ``show``, ``plan``, ``swarm``) open Kura's private state, lazily, after
+Only the ``manifest`` commands (``build``, ``show``, ``plan``, ``swarm``, ``resolve``) open Kura's private state, lazily, after
 their arguments validated. Every command returns data for the v1 envelope that
 ``cli.main`` prints; this module never prints.
 """
 import os
 from pathlib import Path
 
-from . import manifest, quarantine, scrape
+from . import manifest, quarantine, resolve, scrape
 from .anilist import AniList
 from .inventory import scan
 from .models import KuraError
@@ -79,6 +79,21 @@ def register(sub, parser_class):
                    help="Only scrape this title key (repeatable); default every reacquirable title")
     q.add_argument("--max-requests", type=int, default=scrape.MAX_REQUESTS,
                    help="Upper bound on tracker requests in this run")
+    q = leaf(manifest_, "resolve")
+    q.add_argument("--library", required=True)
+    q.add_argument("--torrents-out", required=True,
+                   help="Existing Kura-owned directory that receives candidate .torrent descriptors")
+    q.add_argument("--title", action="append", metavar="KEY",
+                   help="Only resolve this title key (repeatable); default every unmatched title")
+    q.add_argument("--max-titles", type=int, help="Upper bound on titles searched in this run")
+    q.add_argument("--max-candidates", type=int, default=3,
+                   help="Descriptors fetched per title (1..%d)" % resolve.MAX_CANDIDATES)
+    q.add_argument("--budget-minutes", type=float, default=resolve.BUDGET_SECONDS / 60,
+                   help="Total time budget; unfinished titles are retried by the next run")
+    q.add_argument("--refresh", action="store_true",
+                   help="Search again even for titles attempted within the last 7 days")
+    q.add_argument("--no-anilist", action="store_true",
+                   help="Skip AniList title lookups (on by default, rate-limited and cached)")
 
 
 def _abs(value: str) -> Path:
@@ -177,6 +192,22 @@ def _swarm(args, open_store) -> dict:
         store.db.close()
 
 
+def _resolve(args, open_store) -> dict:
+    """Search Nyaa for candidate descriptors of unmatched titles. Needs network; writes only
+    inside --torrents-out (plus the AniList alias cache); never touches the library."""
+    budget = args.budget_minutes * 60
+    resolve.check_args(args.library, args.title, args.max_titles, args.max_candidates, budget)
+    aliases = None if args.no_anilist else AniList()
+    store = open_store()
+    try:
+        return resolve.resolve(store, library=args.library, torrents_out=_abs(args.torrents_out),
+                               titles=args.title, max_titles=args.max_titles,
+                               max_candidates=args.max_candidates, refresh=args.refresh,
+                               aliases=aliases, budget_seconds=budget)
+    finally:
+        store.db.close()
+
+
 def _manifest(args, open_store) -> dict:
     if args.operation == "show":
         store = open_store()
@@ -188,6 +219,8 @@ def _manifest(args, open_store) -> dict:
         return _plan(args, open_store)
     if args.operation == "swarm":
         return _swarm(args, open_store)
+    if args.operation == "resolve":
+        return _resolve(args, open_store)
     roots = _roots(args.root)
     policy = load_policy(_abs(args.tracker_denylist), _abs(args.protected))
     budget = _budget(args.max_read_gib)
