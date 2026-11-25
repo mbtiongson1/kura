@@ -41,6 +41,13 @@ like a password.
 
    On a machine without a terminal the user can reach (a server or container), they run the
    same command in an SSH session or `docker exec -it` shell there.
+
+   If the prompt seems stuck after Enter (Kura before the fix for long tokens, on macOS whose
+   terminal caps one typed line at 1024 bytes), the user presses Ctrl-C, copies the token again
+   and runs `pbpaste | kura anilist login --token-stdin` (macOS; on Linux with a clipboard tool,
+   `xclip -o -selection clipboard |` or `wl-paste |` in place of `pbpaste |`), then clears the
+   clipboard (`pbcopy < /dev/null` on macOS). The token goes from the clipboard straight into
+   Kura: not on screen, not in shell history, not through the agent.
 5. **Verify.** Run `kura anilist whoami --check` and report the account name and
    `expires_at`. If it shows `anilist_token_expires_soon`, remind them to repeat this skill
    before then.

@@ -436,6 +436,72 @@ class WhoamiLogout(Cli):
         self.assertTrue(self.home.exists())
 
 
+@unittest.skipUnless(hasattr(os, "openpty") and os.name == "posix", "needs a pseudo-terminal")
+class HiddenTerminalRead(unittest.TestCase):
+    """The hidden prompt reads a real terminal in non-canonical mode: no 1024-byte line cap."""
+
+    def setUp(self):
+        import termios
+        self.termios = termios
+        self.master, self.slave = os.openpty()
+        self.addCleanup(os.close, self.master)
+        self.addCleanup(os.close, self.slave)
+        self.before = termios.tcgetattr(self.slave)
+
+    def read(self, typed: bytes) -> str:
+        """Paste `typed` once the prompt is up (as a person would), then read it back."""
+        import threading
+        from kura import cli_anilist
+
+        def paste():
+            while self.termios.tcgetattr(self.slave)[3] & self.termios.ICANON:   # wait for raw mode
+                time.sleep(0.01)
+            os.write(self.master, typed)
+        writer = threading.Thread(target=paste, daemon=True)
+        writer.start()
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                return cli_anilist._read_tty_line(self.slave, "prompt: ")
+            finally:
+                writer.join(5)
+                self.assertEqual(self.termios.tcgetattr(self.slave), self.before)   # always restored
+
+    def test_a_token_longer_than_the_canonical_line_limit_is_read_whole(self):
+        token = make_token(time.time() + 100 * DAY)
+        while len(token) < 1500:
+            token += "A" * 100
+        self.assertEqual(self.read(token.encode() + b"\r"), token)
+        self.assertEqual(anilist_auth.clean_token(token), token)
+
+    def test_nothing_is_echoed(self):
+        self.read(b"secret-value\n")
+        os.write(self.slave, b"x")              # something to read so the check cannot block
+        self.assertEqual(os.read(self.master, 100), b"x")
+
+    def test_line_editing_keys(self):
+        self.assertEqual(self.read(b"abX\x7fc\n"), "abc")
+        self.assertEqual(self.read(b"junk\x15good\n"), "good")
+        self.assertEqual(self.read(b"tok\x04"), "tok")
+
+    def test_control_v_is_kept_as_data(self):
+        self.assertEqual(self.read(b"a\x16b\n"), "a\x16b")    # clean_token later refuses it
+
+    def test_a_terminal_error_is_a_clear_refusal(self):
+        from kura import cli_anilist
+        r, w = os.pipe()
+        self.addCleanup(os.close, r)
+        self.addCleanup(os.close, w)
+        with self.assertRaises(KuraError) as caught:
+            cli_anilist._read_tty_line(r, "prompt: ")
+        self.assertEqual(caught.exception.code, "anilist_login_needs_tty")
+
+    def test_empty_and_oversized_input_refuse(self):
+        for typed in (b"\x04", b"x" * (anilist_auth.TOKEN_MAX_BYTES + 1)):
+            with self.subTest(n=len(typed)), self.assertRaises(KuraError) as caught:
+                self.read(typed)
+            self.assertEqual(caught.exception.code, "anilist_token_invalid")
+
+
 class EndToEnd(Cli):
     def test_list_media_and_limits_through_the_cli_never_leak_the_token(self):
         token, _ = self.login()
