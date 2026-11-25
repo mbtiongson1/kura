@@ -44,9 +44,17 @@ Candidate choice
     policy (optional), a protected infohash is never requested and a protected descriptor
     (denylisted tracker or source) is discarded.
 
-Politeness: one request per ``interval`` seconds (default 2) counted from the end of the
-previous one, exponential backoff on HTTP 429/5xx and network errors, a total time budget,
-and a stop after repeated failures. Output never contains announce URLs or credentials.
+Politeness: one request per ``interval`` seconds (default and minimum 5, the provider's
+crawl delay) counted from the end of the previous one and shared with every other Kura
+process through the state database, exponential backoff on HTTP 429/5xx and network errors
+(a backoff also pauses the other processes), a total time budget, and a stop after repeated
+failures. Descriptor downloads are paced the same way. Output never contains announce URLs
+or credentials.
+
+Known descriptors: before a descriptor is downloaded, the state database is asked whether
+that infohash is already known. A public, unprotected torrent whose info dictionary is kept
+is rebuilt locally (outcome ``rebuilt``, no request); a protected or private one is never
+requested and never written (``known_protected``). ``requests.saved_known`` counts both.
 
 Resume: a title attempted within 7 days is skipped unless ``refresh``. Attempts that
 failed for network reasons, or were cut short by the budget, are not recorded and are
@@ -72,11 +80,14 @@ from .manifest import show
 from .manifest_store import ManifestRepo
 from .models import KuraError
 from .protect import _public_tracker, classify, path_protected
+from .ratelimit import SharedLimiter
 from .releases import normalize
 from .torrent import encode
 from .torrentmeta import parse, release_group
 
-INTERVAL = 2.0                  # seconds between two Nyaa requests
+INTERVAL = 5.0                  # seconds between two Nyaa requests
+MIN_INTERVAL = 5.0              # the provider's crawl delay: never go below it
+SERVICE = "nyaa"                # shared rate-limit row
 TOLERANCE = 0.02                # total size window, relative
 MAX_TERMS = 4                   # queries per title
 MAX_ALIASES = 2                 # AniList titles added per title
@@ -339,14 +350,19 @@ class BudgetExhausted(KuraError):
 
 
 class Pacer:
-    """Every provider request goes through here: spacing, backoff, budget, circuit breaker."""
+    """Every provider request goes through here: spacing, backoff, budget, circuit breaker.
+
+    With a ``limiter`` (a :class:`SharedLimiter`) the spacing between request starts is shared
+    with every other process; without one it is local to this pacer.
+    """
 
     def __init__(self, fetcher, *, interval=INTERVAL, budget=BUDGET_SECONDS, max_retries=MAX_RETRIES,
                  backoff_base=BACKOFF_BASE, backoff_cap=BACKOFF_CAP, sleep=time.sleep,
-                 clock=time.monotonic):
+                 clock=time.monotonic, limiter=None, wall=time.time):
         self.fetcher, self.interval, self.budget = fetcher, interval, budget
         self.max_retries, self.backoff_base, self.backoff_cap = max_retries, backoff_base, backoff_cap
         self.sleep, self.clock = sleep, clock
+        self.limiter, self.wall = limiter, wall
         self.started = clock()
         self.next_ok = self.started       # the first request needs no wait
         self.requests = self.retries = self.failures = 0   # failures = exhausted, in a row
@@ -364,6 +380,23 @@ class Pacer:
             raise BudgetExhausted()
         if wait:
             self.sleep(wait)
+        if self.limiter is not None:
+            try:
+                self.limiter.acquire(max(self.budget - self.elapsed(), 0.0))
+            except KuraError as e:
+                if e.code == "rate_limited":
+                    raise BudgetExhausted() from e
+                raise
+            if self.expired():
+                raise BudgetExhausted()
+
+    def _settle(self, backoff: float = 0.0):
+        """A request ended: free the shared slot and, after a transient failure, pause everyone."""
+        if self.limiter is None:
+            return
+        if backoff:
+            self.limiter.penalize(self.wall() + backoff)
+        self.limiter.done()
 
     def get(self, url: str, limit: int, descriptor: bool = False) -> bytes:
         attempt = 0
@@ -375,9 +408,11 @@ class Pacer:
             except KuraError as e:
                 self.next_ok = self.clock() + self.interval
                 if not transient(e):
+                    self._settle()
                     raise
-                self.next_ok = max(self.next_ok, self.clock() + min(
-                    self.backoff_base * 2 ** attempt, self.backoff_cap))
+                backoff = min(self.backoff_base * 2 ** attempt, self.backoff_cap)
+                self.next_ok = max(self.next_ok, self.clock() + backoff)
+                self._settle(backoff)
                 if attempt >= self.max_retries:
                     self.failures += 1
                     raise
@@ -385,6 +420,7 @@ class Pacer:
                 self.retries += 1
                 continue
             self.next_ok = self.clock() + self.interval
+            self._settle()
             self.failures = 0
             return data
 
@@ -544,10 +580,12 @@ def check_args(library, titles, max_titles, max_candidates, budget_seconds, inte
         raise _bad("max_titles must be a whole number from 1 to %d" % MAX_TITLE_KEYS)
     if type(max_candidates) is not int or not 1 <= max_candidates <= MAX_CANDIDATES:
         raise _bad("max_candidates must be a whole number from 1 to %d" % MAX_CANDIDATES)
-    for name, value, high in (("budget_seconds", budget_seconds, 24 * 3600), ("interval", interval, 3600)):
+    for name, value, low, high in (("budget_seconds", budget_seconds, 0, 24 * 3600),
+                                   ("interval", interval, MIN_INTERVAL, 3600)):
         if (isinstance(value, bool) or not isinstance(value, (int, float)) or value != value
-                or not 0 < value <= high):
-            raise _bad(f"{name} must be a positive number of at most {high}")
+                or value <= 0 or value < low or value > high):
+            raise _bad(f"{name} must be a number from {low:g} to {high}" if low
+                       else f"{name} must be a positive number of at most {high}")
 
 
 def policy_protects(policy, key: str, files: list[dict]) -> bool:
@@ -629,6 +667,38 @@ def _accept(data: bytes, candidate: Candidate, policy=None):
     return meta, cleaned, None
 
 
+def rebuild_known(repo: ManifestRepo, c: Candidate, policy=None):
+    """Descriptor rebuilt from the state database, without any request.
+
+    Returns ``(state, cleaned bytes or None, meta or None)``. `state` is ``unknown`` (no usable
+    row: fetch as before), ``protected`` (the row is protected or private: never fetch, never
+    write) or ``rebuilt``. The rebuilt bytes go through the same checks as a download.
+    """
+    try:
+        row = repo.torrent(c.infohash)
+    except Exception:
+        return "unknown", None, None
+    if row is None:
+        return "unknown", None, None
+    protection = row["protection"]
+    if row["private"] or not isinstance(protection, dict) or protection.get("protected") is not False:
+        return "protected", None, None
+    if not row["info"]:
+        return "unknown", None, None            # kept without its info dictionary (huge): fetch it
+    urls = []
+    for key, value in urllib.parse.parse_qsl(urllib.parse.urlsplit(row["magnet"] or "").query):
+        if key == "tr" and _public_tracker(value) and value not in urls:
+            urls.append(value)
+    head = b""
+    if urls:
+        head = (b"8:announce" + encode(urls[0].encode()) +
+                b"13:announce-list" + encode([[u.encode()] for u in urls]))
+    meta, cleaned, reason = _accept(b"d" + head + b"4:info" + row["info"] + b"e", c, policy)
+    if meta is None:
+        return ("protected" if reason in ("private", "protected") else "unknown"), None, None
+    return "rebuilt", cleaned, meta
+
+
 def _search(pacer: Pacer, terms: Terms, local_bytes: int, groups, entry: str, tolerance: float,
             wanted: int):
     """Query terms in order until `wanted` candidates fit.
@@ -645,7 +715,7 @@ def _search(pacer: Pacer, terms: Terms, local_bytes: int, groups, entry: str, to
         except BudgetExhausted:
             raise
         except KuraError as e:
-            if e.code == "provider_unavailable" and pacer.tripped:
+            if e.code == "limiter_unavailable" or (e.code == "provider_unavailable" and pacer.tripped):
                 raise
             flaky += transient(e)
             continue
@@ -659,7 +729,7 @@ def _search(pacer: Pacer, terms: Terms, local_bytes: int, groups, entry: str, to
     return ranked, len(seen), searched, flaky
 
 
-def _process(key, row, files, *, pacer, out, core, max_candidates, tolerance, policy=None):
+def _process(key, row, files, *, pacer, out, core, max_candidates, tolerance, policy=None, repo=None):
     """One title. Returns ``(result, record)``; `record` False means retry on the next run."""
     entry = key.split("/", 1)[1] if "/" in key else key
     names = _file_names(files)
@@ -697,11 +767,29 @@ def _process(key, row, files, *, pacer, out, core, max_candidates, tolerance, po
             kept.append(c.infohash)
             result["candidates"].append(_describe(item, c, "present"))
             continue
+        known, cleaned, meta = rebuild_known(repo, c, policy) if repo is not None else ("unknown", None, None)
+        if known == "protected":
+            result["candidates"].append(_describe(item, c, "known_protected"))
+            continue
+        if known == "rebuilt":
+            try:
+                state = out.write_descriptor(c.infohash, cleaned)
+            except (OSError, KuraError) as e:
+                code = e.code if isinstance(e, KuraError) else "io_error"
+                incomplete = True
+                result["candidates"].append(_describe(item, c, "write_failed:" + code))
+                continue
+            kept.append(c.infohash)
+            result["candidates"].append(_describe(item, c, "present" if state == "present" else "rebuilt",
+                                                  meta, row["file_count"]))
+            continue
         try:
             data = pacer.get(c.url, DESCRIPTOR_LIMIT, True)
         except BudgetExhausted:
             raise
         except KuraError as e:
+            if e.code == "limiter_unavailable":
+                raise
             incomplete = incomplete or transient(e)
             result["candidates"].append(_describe(item, c, "fetch_failed:" + e.code))
             if pacer.tripped:
@@ -735,8 +823,9 @@ def resolve(store, *, library: str, torrents_out, max_titles: int | None = None,
     """Search for and fetch candidate descriptors for ``unmatched`` titles. See module docstring."""
     check_args(library, titles, max_titles, max_candidates, budget_seconds, interval)
     check_out_dir(torrents_out, library_roots)
+    limiter = SharedLimiter(store.root, SERVICE, interval=float(interval), wall=wall, sleep=sleep)
     pacer = Pacer(fetcher or provider.fetch, interval=interval, budget=float(budget_seconds),
-                  sleep=sleep, clock=clock)
+                  sleep=sleep, clock=clock, limiter=limiter, wall=wall)
     with OutDir(torrents_out) as out:
         ledger = out.load_ledger()
         mine = ledger.setdefault(library, {})
@@ -789,7 +878,7 @@ def resolve(store, *, library: str, torrents_out, max_titles: int | None = None,
             try:
                 result, record = _process(key, row, files, pacer=pacer, out=out, core=core,
                                           max_candidates=max_candidates, tolerance=tolerance,
-                                          policy=policy)
+                                          policy=policy, repo=ManifestRepo(store.db))
             except BudgetExhausted:
                 budget_hit = True
                 break
@@ -806,15 +895,18 @@ def resolve(store, *, library: str, torrents_out, max_titles: int | None = None,
             if pacer.tripped:
                 aborted = "provider_unavailable"
                 break
-        written = sum(c["outcome"] == "written" for r in results for c in r["candidates"])
+        outcome_of = [c["outcome"] for r in results for c in r["candidates"]]
+        written = sum(o in ("written", "rebuilt") for o in outcome_of)
+        saved_known = sum(o in ("rebuilt", "known_protected") for o in outcome_of)
         return {
             "library": library, "processed": len(results), "pending": len(work) - len(results),
             "outcomes": dict(sorted(outcomes.items())), "descriptors_written": written,
-            "descriptors_present": sum(c["outcome"] == "present" for r in results for c in r["candidates"]),
+            "descriptors_present": sum(o == "present" for o in outcome_of),
             "skipped": skipped, "budget_exhausted": budget_hit, "interrupted": interrupted,
             "aborted": aborted,
             "requests": {"made": pacer.requests, "retries": pacer.retries,
-                         "elapsed_seconds": round(pacer.elapsed(), 1), "interval_seconds": interval},
+                         "elapsed_seconds": round(pacer.elapsed(), 1), "interval_seconds": interval,
+                         "saved_known": saved_known},
             "titles": results[:MAX_LISTED], "titles_truncated": max(len(results) - MAX_LISTED, 0),
             "notes": notes[:MAX_LISTED],
             "next": "run: kura manifest build (offline) to match and piece-verify the candidates"}

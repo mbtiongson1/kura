@@ -10,7 +10,10 @@ from unittest.mock import patch
 import torrentgen
 from kura import manifest, provider, resolve
 from kura.anilist import Identity
+from kura.manifest_store import ManifestRepo
 from kura.models import KuraError
+from kura.ratelimit import SharedLimiter
+from kura.torrentmeta import parse
 from test_cli_handover import run
 from test_manifest import GOOD, Lab, snapshot
 
@@ -226,7 +229,7 @@ class Pacing(unittest.TestCase):
         times = [t for t, *_ in nyaa.calls]
         self.assertEqual(times[0], 1000.0)
         for earlier, later in zip(times, times[1:]):
-            self.assertGreaterEqual(later - earlier, 2.0 + 0.5)       # 0.5 s request + 2 s interval
+            self.assertGreaterEqual(later - earlier, 5.0 + 0.5)       # 0.5 s request + 5 s interval
         self.assertEqual(pacer.requests, 4)
 
     def test_backoff_on_429_and_5xx_then_success(self):
@@ -269,9 +272,9 @@ class Pacing(unittest.TestCase):
 
     def test_budget_stops_before_a_request_that_would_overrun(self):
         nyaa = FakeNyaa(self.clock)
-        pacer = self.pacer(nyaa, budget=5.0)
-        pacer.get("u", 10)                      # t=1000, ends 1000.5, next at 1002.5
-        pacer.get("u", 10)                      # t=1002.5 -> 1003.0, next at 1005.0 (= budget edge)
+        pacer = self.pacer(nyaa, budget=10.0)
+        pacer.get("u", 10)                      # t=1000, ends 1000.5, next at 1005.5
+        pacer.get("u", 10)                      # t=1005.5 -> 1006.0, next at 1011.0 (past the budget)
         with self.assertRaises(resolve.BudgetExhausted):
             pacer.get("u", 10)
         self.assertEqual(len(nyaa.calls), 2)
@@ -298,10 +301,146 @@ class Fixture:
     def resolve(self, **kw):
         kw.setdefault("budget_seconds", 3600.0)
         return resolve.resolve(self.lab.store, library="home", torrents_out=self.out, fetcher=self.nyaa,
-                               sleep=self.clock.sleep, clock=self.clock, wall=lambda: self.wall[0], **kw)
+                               sleep=self.clock.sleep, clock=self.clock, wall=self.now, **kw)
+
+    def now(self):
+        return self.wall[0] + (self.clock.now - 1000.0)      # wall time moves with the fake clock
 
     def names(self):
         return sorted(p.name for p in self.out.iterdir())
+
+
+class SharedPacing(Fixture, unittest.TestCase):
+    def test_default_and_floor_interval(self):
+        self.assertEqual((resolve.INTERVAL, resolve.MIN_INTERVAL), (5.0, 5.0))
+        self.assertEqual(resolve.Pacer(self.nyaa).interval, 5.0)
+        for value in (4.99, 2, 0, -1, float("nan"), True):
+            with self.subTest(interval=value), self.assertRaises(KuraError) as caught:
+                self.resolve(interval=value)
+            self.assertEqual(caught.exception.code, "invalid_arguments")
+        self.assertEqual(self.nyaa.calls, [])
+        self.assertEqual(self.resolve()["requests"]["interval_seconds"], 5.0)
+        resolve.check_args("home", None, None, 3, 60, 5)             # exactly the floor is fine
+
+    def test_two_sequential_runs_share_the_next_slot(self):
+        self.resolve()
+        self.resolve(refresh=True)                    # a new process: its local pacer starts fresh
+        first, second = (t for t, *_ in self.nyaa.calls)
+        self.assertGreaterEqual(second - first, 5.0 + 0.5)       # 0.5 s request + the shared 5 s interval
+        state = SharedLimiter(self.lab.store.root, resolve.SERVICE, interval=5.0, wall=self.now).state()
+        self.assertEqual(state["service"], "nyaa")
+        self.assertGreater(state["next_ok_in_s"], 4.0)
+
+    def test_descriptor_downloads_are_paced_like_searches(self):
+        self.feed_for(item(FOLDER, 11, self.right.infohash))
+        self.nyaa.descriptors = {"11": self.right.data}
+        self.resolve()
+        (search, *_), (fetch, *_) = self.nyaa.calls
+        self.assertEqual(len(self.nyaa.calls), 2)
+        self.assertGreaterEqual(fetch - search, 5.0 + 0.5)
+
+    def test_backoff_pauses_every_process(self):
+        self.nyaa.errors = [http_error(429)]
+        limiter = SharedLimiter(self.lab.store.root, "nyaa", interval=5.0, wall=self.now, sleep=self.clock.sleep)
+        pacer = resolve.Pacer(self.nyaa, sleep=self.clock.sleep, clock=self.clock, max_retries=0,
+                              limiter=limiter, wall=self.now)
+        with self.assertRaises(KuraError):
+            pacer.get("u", 10)
+        other = SharedLimiter(self.lab.store.root, "nyaa", interval=5.0, wall=self.now, sleep=self.clock.sleep)
+        self.assertGreater(other.state()["penalty_in_s"], 2.0)          # backoff_base 4 s from the failure
+        before = self.clock.now
+        other.acquire(60)
+        self.assertGreaterEqual(self.clock.now - before, 2.0)
+
+    def test_a_blocked_shared_window_is_a_spent_budget(self):
+        limiter = SharedLimiter(self.lab.store.root, "nyaa", interval=5.0, wall=self.now, sleep=self.clock.sleep)
+        limiter.penalize(self.now() + 600)
+        pacer = resolve.Pacer(self.nyaa, sleep=self.clock.sleep, clock=self.clock, budget=30.0,
+                              limiter=limiter, wall=self.now)
+        with self.assertRaises(resolve.BudgetExhausted):
+            pacer.get("u", 10)
+        self.assertEqual(self.nyaa.calls, [])
+
+    def test_unavailable_shared_state_fails_the_run_instead_of_going_unpaced(self):
+        error = KuraError("limiter_unavailable", "Shared rate-limit state is unavailable")
+        with patch.object(SharedLimiter, "acquire", side_effect=error), self.assertRaises(KuraError) as caught:
+            self.resolve()
+        self.assertEqual(caught.exception.code, "limiter_unavailable")
+        self.assertEqual(self.nyaa.calls, [])
+
+
+class KnownDescriptors(Fixture, unittest.TestCase):
+    """An infohash already in the state database is never downloaded again."""
+
+    def seed(self, name, *, private=False, announce="http://tracker.example/announce", payload="k"):
+        known = torrentgen.build(name, [("movie.mkv", P(payload, 50000))],     # no file of the library matches it
+                                 private=private, announce=announce)
+        (self.lab.torrents / f"{name}.torrent").write_bytes(known.data)
+        self.lab.build()
+        return known
+
+    def test_public_known_torrent_is_rebuilt_without_a_request(self):
+        known = self.seed("Kura Known Release")
+        self.feed_for(item(FOLDER, 31, known.infohash))
+        result = self.resolve()
+        self.assertEqual(self.nyaa.fetched, [])
+        self.assertEqual(len(self.nyaa.calls), 1)                       # the search only
+        candidate = result["titles"][0]["candidates"][0]
+        self.assertEqual((candidate["outcome"], result["outcomes"]), ("rebuilt", {"written": 1}))
+        self.assertEqual((result["descriptors_written"], result["requests"]["saved_known"]), (1, 1))
+        data = (self.out / (known.infohash + ".torrent")).read_bytes()
+        meta = parse(data)
+        self.assertEqual((meta.infohash, set(meta.announce_urls)), (known.infohash, {"http://tracker.example/announce"}))
+        self.assertTrue(meta.announce_valid and not meta.private)
+        again = self.resolve(refresh=True)                              # now it is simply on disk
+        self.assertEqual((again["titles"][0]["candidates"][0]["outcome"], again["requests"]["saved_known"]),
+                         ("present", 0))
+        self.assertEqual(self.nyaa.fetched, [])
+
+    def test_known_private_or_protected_torrents_are_never_fetched_or_written(self):
+        private = self.seed("Kura Known Private", private=True, payload="p")
+        blocked = self.seed("Kura Known Blocked", announce="http://blocked.example/announce", payload="b")
+        self.feed_for(item(FOLDER, 41, private.infohash), item(FOLDER, 42, blocked.infohash))
+        result = self.resolve()
+        self.assertEqual(self.nyaa.fetched, [])
+        self.assertEqual(sorted(c["outcome"] for c in result["titles"][0]["candidates"]),
+                         ["known_protected", "known_protected"])
+        self.assertEqual(result["requests"]["saved_known"], 2)
+        self.assertEqual((result["descriptors_written"], result["outcomes"]), (0, {"discarded": 1}))
+        self.assertEqual(self.names(), [".kura-resolve.json", ".kura-resolve.lock"])
+        text = json.dumps(result)
+        for secret in ("tracker.example", "blocked.example", "http://"):
+            self.assertNotIn(secret, text)
+
+    def test_known_row_without_info_is_fetched_as_before(self):
+        known = self.seed("Kura Known Huge")
+        self.lab.store.db.execute("UPDATE manifest_torrents SET info=NULL WHERE infohash=?", (known.infohash,))
+        self.lab.store.db.commit()
+        self.assertIsNone(ManifestRepo(self.lab.store.db).torrent(known.infohash)["info"])
+        self.feed_for(item(FOLDER, 31, known.infohash))
+        self.nyaa.descriptors = {"31": known.data}
+        result = self.resolve()
+        self.assertEqual(len(self.nyaa.fetched), 1)
+        self.assertEqual((result["titles"][0]["candidates"][0]["outcome"], result["requests"]["saved_known"]),
+                         ("written", 0))
+
+    def test_a_damaged_known_row_falls_back_to_the_download(self):
+        known = self.seed("Kura Known Damaged")
+        self.lab.store.db.execute("UPDATE manifest_torrents SET info=? WHERE infohash=?",
+                                  (b"d4:name1:xe", known.infohash))
+        self.lab.store.db.commit()
+        self.feed_for(item(FOLDER, 31, known.infohash))
+        self.nyaa.descriptors = {"31": known.data}
+        result = self.resolve()
+        self.assertEqual(len(self.nyaa.fetched), 1)
+        self.assertEqual(result["titles"][0]["candidates"][0]["outcome"], "written")
+        self.assertEqual(parse((self.out / (known.infohash + ".torrent")).read_bytes()).infohash, known.infohash)
+
+    def test_unknown_infohash_is_fetched_as_before(self):
+        self.feed_for(item(FOLDER, 11, self.right.infohash))
+        self.nyaa.descriptors = {"11": self.right.data}
+        result = self.resolve()
+        self.assertEqual((len(self.nyaa.fetched), result["requests"]["saved_known"]), (1, 0))
 
 
 class EndToEnd(Fixture, unittest.TestCase):
