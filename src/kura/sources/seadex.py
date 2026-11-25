@@ -43,6 +43,7 @@ MAX_REQUESTS_CAP = 500
 PER_PAGE = 500
 MAX_PAGES = 100                  # per collection
 FILES_BATCH = 40
+OVERLAP = 300                    # seconds: a cursor never passes (run start - OVERLAP)
 FULL_EVERY = 7 * 86400           # seconds; also the staleness threshold
 WAIT_BUDGET = 120.0              # longest single wait for the shared limiter
 SOURCE = "seadex"
@@ -481,9 +482,19 @@ def _insert_torrent(db, t, now, carried):
                 t["is_best"], t["dual_audio"], json.dumps(t["tags"]), *keep, t["updated"], now))
 
 
-def _newest(rows, previous):
+def watermark(now: float) -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(now - OVERLAP)) + ".000000000Z"
+
+
+def _newest(rows, previous, now):
+    """Newest `updated` seen, held back to the run's start minus an overlap.
+
+    Pages are read by id while records change, and an untrusted record may claim any date;
+    the hold-back means a record that changed mid-run, or one dated in the future, can
+    never push the cursor past what the next incremental run will still re-read."""
     stamps = [canonical_stamp(r["updated"]) for r in rows.values()]
-    return max(stamps + ([canonical_stamp(previous)] if previous else []), default=None)
+    newest = max(stamps + ([canonical_stamp(previous)] if previous else []), default=None)
+    return min(newest, watermark(now)) if newest else None
 
 
 def _count(db, sql):
@@ -503,8 +514,8 @@ def _listing(store, client, full: bool, now: float, skipped) -> dict:
     torrents = client.pages("torrents", TORRENT_FIELDS, parse_torrent, skipped,
                             filter_updated(since["torrents"]) if since else None)
     # A full pull derives the cursor from what it just read, never from the old one.
-    new_cursor = {"entries": _newest(entries, None if full else cursor.get("entries")),
-                  "torrents": _newest(torrents, None if full else cursor.get("torrents"))}
+    new_cursor = {"entries": _newest(entries, None if full else cursor.get("entries"), now),
+                  "torrents": _newest(torrents, None if full else cursor.get("torrents"), now)}
     if None in new_cursor.values():
         new_cursor = {}         # nothing seen yet: stay without a cursor, so the next run is full
 
@@ -605,6 +616,8 @@ def sync(store, *, full=False, files_library=None, max_requests=MAX_REQUESTS, li
         if e.code == "sync_conflict":
             raise
         def failed(db):
+            if _state_now(db) != (state["cursor"], state["last_ok"]):
+                return              # another run finished meanwhile; its result stands
             _save_state(db, now, status="failed", detail=json.dumps({"error": e.code}))
         try:
             _write(store, failed)

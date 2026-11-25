@@ -7,6 +7,7 @@ from pathlib import Path
 import socket
 import sqlite3
 import tempfile
+import time
 import unittest
 from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlsplit
@@ -129,10 +130,10 @@ class Sync(Case):
         mixed = ["2025-01-01 12:00:00Z", "2025-01-01 12:00:00.123Z", "2025-01-01 12:00:00.1234Z",
                  "2025-01-01 12:00:00.5Z", "2025-01-01 12:00:00.12345678901Z"]
         rows = {str(i): {"updated": u} for i, u in enumerate(mixed)}
-        self.assertEqual(seadex._newest(rows, None), "2025-01-01 12:00:00.500000000Z")
+        self.assertEqual(seadex._newest(rows, None, 2e9), "2025-01-01 12:00:00.500000000Z")
         del rows["3"]
-        self.assertEqual(seadex._newest(rows, None), "2025-01-01 12:00:00.123456789Z")
-        self.assertEqual(seadex._newest(rows, "2025-01-01 12:00:01Z"), "2025-01-01 12:00:01.000000000Z")
+        self.assertEqual(seadex._newest(rows, None, 2e9), "2025-01-01 12:00:00.123456789Z")
+        self.assertEqual(seadex._newest(rows, "2025-01-01 12:00:01Z", 2e9), "2025-01-01 12:00:01.000000000Z")
         self.assertEqual(seadex.filter_updated("2025-01-01 12:00:00Z"), 'updated>="2025-01-01 12:00:00.000000000Z"')
 
     def test_malformed_items_are_skipped_and_counted(self):
@@ -225,6 +226,27 @@ class Sync(Case):
         self.assertEqual(caught.exception.code, "sync_conflict")
         self.assertEqual(self.rows("SELECT COUNT(*) FROM seadex_entries"), [(0,)])
         self.assertEqual(self.state()[0], "ok")     # the other run's result stays
+
+    def test_cursor_is_held_back_from_the_future_and_from_the_run_start(self):
+        mark = seadex.watermark(self.clock())
+        self.assertEqual(mark, time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(self.clock() - 300)) + ".000000000Z")
+        self.fake.entries[rid(2)]["updated"] = "2099-01-01 00:00:00.000Z"
+        self.fake.torrents[rid(12)]["updated"] = time.strftime("%Y-%m-%d %H:%M:%S.000Z", time.gmtime(self.clock()))
+        self.sync()
+        self.assertEqual(json.loads(self.state()[3]), {"entries": mark, "torrents": mark})
+
+    def test_failure_does_not_overwrite_a_run_that_finished_meanwhile(self):
+        def transport(url):
+            if "/torrents/" in url:
+                other = sqlite3.connect(self.store.root / "state.sqlite3")
+                other.execute("INSERT INTO sync_state(source, last_ok, status) VALUES ('seadex', 5.0, 'ok')")
+                other.commit()
+                other.close()
+                raise KuraError("seadex_unavailable", "down")
+            return self.fake.transport(url)
+        with self.assertRaises(KuraError):
+            self.sync(transport=transport)
+        self.assertEqual(self.state()[0], "ok")
 
     def test_run_byte_budget(self):
         body = json.dumps({"items": [], "totalPages": 3}).encode()

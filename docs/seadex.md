@@ -60,7 +60,8 @@ a NULL infohash and no `nyaa_id`: Kura treats "SeaDex lists it only on a private
 * No redirects, no proxy inheritance, DNS must resolve to public addresses, responses are
   capped at 8 MiB each (64 MiB per run) and at most 100 pages of 500 per collection; every page
   is parsed and dropped before the next is read. Cursors are stored with a fixed nine-digit
-  fraction so their string order is time order.
+  fraction so their string order is time order, and never pass the run's start minus 5 minutes
+  (records changing mid-run, or claiming a future date, cannot hide later updates).
 * Every request goes through the shared `seadex` limiter (1 request per second across all
   Kura processes). HTTP 429 records a penalty honouring `Retry-After`. User agent carries the
   repository URL. No credentials are sent.
