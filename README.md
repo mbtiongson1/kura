@@ -201,8 +201,9 @@ show`, `plan`, `swarm` and `resolve`, `probe library`, `audit`, `identity sync`/
 again (the label comes back) makes it present. `build` reports it under `absent`:
 `{"marked", "complete", "reason"}`.
 
-Fail closed: a build that was cut short (`--max-read-gib` spent, interrupted, or any root with
-no titles, such as an unmounted share) marks nothing, and so does a failed build. To rebuild
+Fail closed: a build that was interrupted, or that has any root with no titles (such as an
+unmounted share), marks nothing, and so does a failed build. A spent `--max-read-gib` budget does
+not block the mark: verification rotates across runs, and the inventory is complete either way. To rebuild
 only some roots on purpose, pass `--keep-other-roots`. A title that vanishes from a root that
 *was* scanned keeps its older behaviour: it stays visible as `stale` (and a plan refuses it).
 
