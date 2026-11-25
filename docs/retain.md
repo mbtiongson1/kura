@@ -37,8 +37,11 @@ Titles are matched in two passes, cheapest first.
    recorded. Every resolved row also records the weaker candidates it passed over, even
    behind an exact match (an unmarked folder may hold several seasons); `identity pin`
    settles such a title.
-2. Alias fallback over the network, through the shared AniList rate limiter and the
-   existing alias cache, at most `--max-lookups` actual requests per run. Titles left
+2. Alias fallback over the network, through the shared AniList rate limiter, at most
+   `--max-lookups` lookups per run. The returned page of entries is matched with the same
+   rules as the offline pass (season rule, weaker candidates recorded), not just the
+   resolver's best pick. A recent negative answer (7 days; 10 minutes for an outage) is not
+   asked again unless `--refresh`. Titles left
    over are reported as `pending` and picked up by the next run. A rate-limit or network
    failure stops the run's lookups.
    `--offline` skips this pass.
@@ -48,8 +51,8 @@ carries that season (`Season N`, `Nth Season`, `SN`, or a trailing `N`); the sea
 is never accepted for it. A folder marked season 1 never binds to an entry titled for a
 later season (an explicit marker, or a trailing number 2 to 99 that the folder name does not
 share). A folder spanning several seasons (`S01-S03`) or season 0 is `ambiguous`.
-For the alias pass the season variant (`<title> Season N`) is asked first, and an answer
-that fails the season check is `unresolved` with the rejected ID kept as a candidate.
+For the alias pass the season variant (`<title> Season N`) is asked first; a page whose
+entries all fail the season check is `unresolved`, with the rejected IDs kept as candidates.
 
 Statuses: `resolved` (source `list` or `alias`), `pinned` and `not_anime` (owner),
 `ambiguous`, `unresolved`, `unavailable`. Unchanged resolved rows are kept, not looked up again, unless `--refresh`, which revalidates
@@ -91,7 +94,9 @@ proposed.
 
 Matching can only weigh the titles Kura knows: the synced list, and whatever AniList
 returns for an alias lookup. A retained series that is on neither can lose a folder to a
-similarly named entry that is. Two guards help: every resolved row records the weaker
+similarly named entry that is. Identities follow the folder name, as pins do: if a different
+title is later placed under the same name, run `identity sync --refresh` (or `identity pin`).
+Two guards help: every resolved row records the weaker
 candidates it passed over (`retain_possible`), and `retain check` lists the retain IDs no
 folder is bound to (`unmatched_ids`). Review that list before approving a plan, and
 `identity pin` any folder the matcher got wrong.

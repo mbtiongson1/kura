@@ -9,8 +9,7 @@ from unittest.mock import patch
 
 import kura.cli as cli
 from kura import identity
-from kura.anilist import Identity, choose
-from kura.core import Core
+from kura.anilist import AniList, choose
 from kura.idlist import parse
 from kura.models import KuraError
 from test_manifest import GOOD, Lab
@@ -30,23 +29,26 @@ def seed(db, entries, *, user=1, viewer=True):
     db.commit()
 
 
-class Resolver:
-    """Stands in for AniList: ``answers`` maps a query to ``(anilist_id, titles)``, ``"ambiguous"`` or ``"down"``."""
+def Resolver(answers):
+    """A real ``AniList`` over a fake transport. ``answers`` maps a search query to ``(id, titles)``,
+    a list of those, ``"ambiguous"`` (two entries with the same title) or ``"down"``; other queries
+    return an empty page. ``.queries`` records every request, ``.answers`` can be changed."""
+    queries = []
 
-    def __init__(self, answers):
-        self.answers, self.queries = answers, []
-
-    def resolve(self, title):
-        self.queries.append(title)
-        answer = self.answers.get(title)
+    def transport(query):
+        queries.append(query)
+        answer = resolver.answers.get(query, [])
         if answer == "down":
-            raise KuraError("alias_unavailable", "AniList rate limit reached; retry later")
+            raise KuraError("alias_unavailable", "AniList request failed; retry later")
         if answer == "ambiguous":
-            return None, "ambiguous"
-        if answer is None:
-            return None, "unresolved"
-        anilist_id, titles = answer
-        return Identity(anilist_id, tuple(titles), titles[0]), "resolved"
+            answer = [(A, [query]), (B, [query])]
+        elif isinstance(answer, tuple):
+            answer = [answer]
+        media = [{"id": i, "title": {"romaji": titles[0]}, "synonyms": titles[1:]} for i, titles in answer]
+        return json.dumps({"data": {"Page": {"media": media}}}).encode(), {}
+    resolver = AniList(transport=transport, sleep=lambda seconds: None)
+    resolver.answers, resolver.queries = answers, queries
+    return resolver
 
 
 class Base(unittest.TestCase):
@@ -210,6 +212,39 @@ class AliasFallback(Base):
         self.assertEqual(self.row("Kura Delta")["status"], "unresolved")
         self.assertEqual(self.row("Kura Alpha")["source"], "alias")
 
+    def test_the_whole_page_is_kept_so_weaker_candidates_survive(self):
+        page = [(A, ["Kura Alpha"]), (B, ["Kura Alpha Season 2"]), (C, ["Unrelated"])]
+        self.sync(aliases=Resolver({"Kura Alpha": page}), titles=["main/Kura Alpha"])
+        row = self.row("Kura Alpha")
+        self.assertEqual((row["anilist_id"], row["candidates"], row["source"]), (A, [B], "alias"))
+
+    def test_a_tie_inside_the_page_is_ambiguous_with_candidates(self):
+        self.sync(aliases=Resolver({"Kura Alpha": "ambiguous"}), titles=["main/Kura Alpha"])
+        row = self.row("Kura Alpha")
+        self.assertEqual((row["status"], row["candidates"]), ("ambiguous", [A, B]))
+
+    def test_the_season_rule_applies_to_every_entry_on_the_page(self):
+        page = [(A, ["Kura Gamma"]), (C, ["Kura Gamma Season 2"])]
+        self.sync(aliases=Resolver({"Kura Gamma Season 2": page}), titles=["main/Kura Gamma S02"])
+        self.assertEqual(self.row("Kura Gamma S02")["anilist_id"], C)
+
+    def test_recent_negative_answers_are_not_asked_again_until_they_expire(self):
+        resolver = Resolver({})
+        t = 1_000_000.0
+        self.sync(aliases=resolver, titles=["main/Kura Delta"], now=lambda: t)
+        self.sync(aliases=resolver, titles=["main/Kura Delta"], now=lambda: t + 3600)
+        self.assertEqual(resolver.queries, ["Kura Delta"])
+        self.sync(aliases=resolver, titles=["main/Kura Delta"], now=lambda: t + 3600, refresh=True)
+        self.assertEqual(resolver.queries, ["Kura Delta"] * 2)
+        self.sync(aliases=resolver, titles=["main/Kura Delta"], now=lambda: t + 8 * 86400)
+        self.assertEqual(resolver.queries, ["Kura Delta"] * 3)
+        down = Resolver({"Kura Delta": "down"})
+        self.sync(aliases=down, titles=["main/Kura Delta"], now=lambda: t + 20 * 86400, refresh=True)
+        self.sync(aliases=down, titles=["main/Kura Delta"], now=lambda: t + 20 * 86400 + 60)
+        self.assertEqual(len(down.queries), 1)                       # an outage is retried after ten minutes
+        self.sync(aliases=down, titles=["main/Kura Delta"], now=lambda: t + 20 * 86400 + 700)
+        self.assertEqual(len(down.queries), 2)
+
     def test_zero_budget_makes_no_request(self):
         resolver = Resolver({})
         out = self.sync(aliases=resolver, max_lookups=0)
@@ -239,15 +274,13 @@ class AliasFallback(Base):
 
     def test_a_refresh_that_cannot_reconfirm_replaces_the_row(self):
         self.sync(aliases=Resolver({"Kura Alpha": (A, ["Kura Alpha"])}), titles=["main/Kura Alpha"])
-        with patch.object(Core, "alias_status", return_value={"status": "unavailable", "titles": [], "identity": None}):
-            out = self.sync(aliases=Resolver({}), titles=["main/Kura Alpha"], refresh=True)
+        out = self.sync(aliases=Resolver({"Kura Alpha": "down"}), titles=["main/Kura Alpha"], refresh=True)
         self.assertEqual((self.row("Kura Alpha")["status"], self.row("Kura Alpha")["anilist_id"]), ("unavailable", None))
         self.assertEqual(out["unavailable"], 1)
 
     def test_an_unconfirmed_resolved_row_is_kept_without_refresh(self):
         self.sync(aliases=Resolver({"Kura Alpha": (A, ["Kura Alpha"])}), titles=["main/Kura Alpha"])
-        with patch.object(Core, "alias_status", return_value={"status": "unavailable", "titles": [], "identity": None}):
-            self.sync(aliases=Resolver({}), titles=["main/Kura Alpha"])
+        self.sync(aliases=Resolver({"Kura Alpha": "down"}), titles=["main/Kura Alpha"])
         self.assertEqual(self.row("Kura Alpha")["anilist_id"], A)
 
     def test_refresh_without_budget_or_network_leaves_nothing_stale(self):

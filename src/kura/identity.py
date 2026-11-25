@@ -7,8 +7,10 @@ the outcome in ``title_identities``. Two passes, cheapest first:
      with ``anilist_list_entries``): the folder name reduced by ``resolve.derive_terms`` must
      equal a title or be a whole-word subset of one (``anilist.choose`` semantics, ties are
      ``ambiguous`` with the tied IDs recorded);
-  2. alias fallback (network, shared rate limiter, bounded by ``max_lookups``) through the
-     same cached ``Core.alias_status`` the rest of Kura uses.
+  2. alias fallback (network, through the AniList resolver's shared rate limiter, bounded by
+     ``max_lookups``): the returned page of entries is matched with the same rules, so weaker
+     candidates are kept too. The alias cache is not used here because it stores only one
+     pick; a recent negative alias answer is remembered in the row instead.
 
 Season rule: a folder with a season marker 2 or higher is accepted only by an entry whose
 matched title carries that season ("Season N", "Nth Season", "SN" or a trailing "N"); a
@@ -28,8 +30,8 @@ import json
 import re
 import time
 
-from .anilist import clean
-from .core import Core
+from .anilist import clean, parse_response
+from .core import ALIAS_FAILURE_TTL, ALIAS_TTL
 from .manifest_store import ManifestRepo
 from .models import KuraError
 from .releases import normalize
@@ -228,49 +230,73 @@ def _same(old: dict | None, new: dict) -> bool:
         old[k] == new[k] for k in ("anilist_id", "status", "source", "matched", "candidates"))
 
 
-class _Counting:
-    """Counts the network lookups an AniList resolver actually makes (cache hits are free)."""
+class _Lookup:
+    """Network lookups through an AniList resolver that keep the whole result page.
 
-    def __init__(self, inner):
-        self.inner, self.made = inner, 0
+    ``AniList.resolve`` reduces a response to one best identity; matching here needs every
+    returned entry (to apply the season rule and to record the weaker candidates), so the
+    resolver's transport is tapped to keep the parsed page. The resolver's own pick is ignored
+    and its pacing, limiter and error handling are used unchanged. ``made`` counts lookups.
+    """
 
-    def resolve(self, title):
+    def __init__(self, resolver):
+        self.resolver, self.made, self.rows = resolver, 0, None
+        transport = resolver.transport
+
+        def tap(title):
+            data, headers = transport(title)
+            try:
+                self.rows = parse_response(data)
+            except KuraError:
+                self.rows = None        # resolve() raises the same error right after
+            return data, headers
+        resolver.transport = tap
+
+    def page(self, query: str) -> list[dict]:
         self.made += 1
-        return self.inner.resolve(title)
+        self.rows = None
+        self.resolver.resolve(query)
+        if self.rows is None:
+            raise KuraError("alias_invalid", "AniList returned no usable page")
+        return self.rows
 
 
-def _alias(core, counter, base: str, season: int | None, refresh: bool, budget: int):
-    """Alias fallback for one title: ``(record|None, stop, out_of_budget)``. The season variant
-    is asked first; a result that does not carry the folder's season is never accepted."""
+_FAILURES = ("alias_unavailable", "alias_invalid", "unsafe_url")
+
+
+def _alias(lookup, base: str, season: int | None, budget: int):
+    """Alias fallback for one title: ``(record, stop, out_of_budget)``. The season variant is
+    asked first; the returned page is matched here with the same rules as the offline pass."""
     queries = [f"{base} Season {season}", base] if season is not None and season >= 2 else [base]
-    rejected = None
+    rejected: set[int] = set()
     for query in queries:
-        if counter.made >= budget:
+        if lookup.made >= budget:
             return None, False, True
         try:
-            result = core.alias_status(query, refresh=refresh)
+            rows = lookup.page(query)
         except KuraError as e:
-            if e.code != "invalid_query":
+            if e.code == "invalid_query":
+                return _record({"status": "unresolved", "anilist_id": None, "matched": None,
+                                "candidates": []}, "alias", None), False, False
+            if e.code not in _FAILURES:
                 raise
-            return _record({"status": "unresolved", "anilist_id": None, "matched": None,
-                            "candidates": []}, "alias", None), False, False
-        status = result["status"]
-        if status == "unavailable":
             return _record({"status": "unavailable", "anilist_id": None, "matched": None,
                             "candidates": []}, "alias", query), True, False
-        if status == "ambiguous":
-            return _record({"status": "ambiguous", "anilist_id": None, "matched": None,
-                            "candidates": []}, "alias", query), False, False
-        identity = result.get("identity") if status == "resolved" else None
-        if identity:
-            if _title_ok(identity["matched"], season, base):
-                return _record({"status": "resolved", "anilist_id": identity["anilist_id"],
-                                "matched": clean(identity["matched"]), "candidates": []},
-                               "alias", query), False, False
-            rejected = rejected or (identity["anilist_id"], query)
-    found = {"status": "unresolved", "anilist_id": None, "matched": None,
-             "candidates": [rejected[0]] if rejected else []}
+        found = match(rows, base, season)
+        if found["status"] != "unresolved":
+            return _record(found, "alias", query), False, False
+        loose = match(rows, base, None)         # entries only the season rule turned away
+        rejected.update(loose["candidates"] + ([loose["anilist_id"]] if loose["anilist_id"] else []))
+    found = {"status": "unresolved", "anilist_id": None, "matched": None, "candidates": sorted(rejected)}
     return _record(found, "alias", queries[-1]), False, False
+
+
+def _fresh(row: dict | None, moment: float) -> bool:
+    """A recent negative alias answer is not asked again before its old cache time would run out."""
+    if row is None or row["source"] != "alias":
+        return False
+    ttl = {"unresolved": ALIAS_TTL, "ambiguous": ALIAS_TTL, "unavailable": ALIAS_FAILURE_TTL}.get(row["status"])
+    return ttl is not None and 0 <= moment - row["updated_at"] < ttl
 
 
 def check_sync_args(library, titles, max_lookups):
@@ -311,6 +337,7 @@ def sync(store, *, library: str, titles: list[str] | None = None, aliases=None,
     missing = sorted(set(wanted) - set(manifest))
     if missing:
         raise KuraError("not_found", "Title not in the manifest", titles=missing[:20])
+    moment = now()
     existing = load(store.db, library)
     snapshot = list_snapshot(store.db)
     offline, need = {}, []
@@ -325,17 +352,17 @@ def sync(store, *, library: str, titles: list[str] | None = None, aliases=None,
         if found["status"] == "unresolved":
             if known and not refresh:
                 continue                    # keep the earlier identity; no new lookup
+            if _fresh(current, moment) and not refresh:
+                continue                    # asked recently and nothing new offline
             need.append((key, base, season))    # a refresh drops what it cannot reconfirm
         record = _record(found, "list", base)
         if not _same(current, record):
             offline[key] = record
-    moment = now()
     _store(store.db, library, offline, moment)
     existing.update(offline)
-    counter = _Counting(aliases) if aliases is not None else None
+    counter = _Lookup(aliases) if aliases is not None else None
     pending = 0
     if counter is not None:
-        core = Core(store, None, counter)
         found_now, stop = {}, False
         try:
             for key, base, season in need:
@@ -344,7 +371,7 @@ def sync(store, *, library: str, titles: list[str] | None = None, aliases=None,
                     continue
                 if not normalize(base):
                     continue
-                record, stop, exhausted = _alias(core, counter, base, season, refresh, max_lookups)
+                record, stop, exhausted = _alias(counter, base, season, max_lookups)
                 if exhausted:
                     stop = True
                     pending += 1
