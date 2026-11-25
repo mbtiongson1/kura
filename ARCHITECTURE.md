@@ -23,20 +23,24 @@ Python is an MVP decision for portability, not a requirement for future clients.
   candidate spellings. It is discovery-only: it widens which titles Nyaa is queried for,
   never preferences, release choice or approval. Matching is exact or whole-word subset;
   equal-best candidates are refused. Results are cached with a TTL in local state.
-- **AniList OAuth adapter** (approved 2026-11-25; read-only; `anilist_auth.py`, `anilist_list.py`,
-  `cli_anilist.py`): the user authorizes through AniList's PIN page and gives Kura the access
+- **AniList OAuth adapter** (approved 2026-11-25; reads, plus one owner-invoked write since #45;
+  `anilist_auth.py`, `anilist_list.py`, `anilist_update.py`, `cli_anilist.py`): the user authorizes through AniList's PIN page and gives Kura the access
   token on a hidden prompt or stdin (`kura anilist login --token-stdin`); there is no token
   argument, option or environment variable. The token lives only in `anilist-auth.json` in the
   private state directory (dir 0700, file 0600, written atomically, symlinks refused, loose
   modes refused on use) and is sent only as `Authorization: Bearer` to the pinned
   `graphql.anilist.co` endpoint (same transport as above: no redirects, no proxy, public DNS),
-  and only on the one request that needs it (the user's own list). It never appears in output,
+  and only on the requests that need it (the user's own list, and an update's read and save). It never appears in output,
   errors, logs or the database; commands show a short sha256 fingerprint. Tokens last about a
   year with no refresh: expiry is read from the JWT `exp` claim (else issue date plus 365
   days), warned about 30 days ahead and refused after. The adapter reads lists, favourites and
   media metadata into private state; each user's snapshot is replaced in one transaction after
   every chunk arrived and a failure keeps the previous one. Every request shares the
-  cross-process AniList rate budget. There are no writes to AniList and no outbox yet.
+  cross-process AniList rate budget. The one write is `kura anilist update` (issue #45): a user
+  command that changes one entry of the token owner's list (progress, status, score) after an
+  authenticated read, resolving titles without guessing, never lowering progress unless asked,
+  sending only the changed fields and writing the saved entry back into the snapshot. There is no
+  automatic write and no outbox yet.
 - **Library handover** (read-only): `inventory`/`rofs` read a library as metadata only,
   `torrentmeta`/`protect` parse descriptors and classify protection, `match` links torrents
   to titles (by name, else by file name and size; piece verification is the proof), `pieceverify` hashes local files against the piece list, and `manifest`
@@ -67,8 +71,9 @@ parse/filter/rank -> fail closed on missing identity, batches, wrong episode/sea
 or ambiguity -> bounded torrent metadata inspection -> dry-run proposal -> explicit
 approval -> disk/path checks + idempotency reservation -> foreground aria2 ->
 verify exit, exact files, sizes and piece hashes -> durable truthful receipt.
-No seasonal automation, daemon or autonomous cleanup. AniList access is read-only: public
-alias lookup, plus the approved OAuth list reader above; nothing is ever written to AniList.
+No seasonal automation, daemon or autonomous cleanup. AniList access is public
+alias lookup, the approved OAuth list reader above, and the user-invoked `anilist update`;
+nothing writes to AniList on its own.
 RSS hints never replace authoritative descriptor lengths/hashes.
 Interrupted jobs retain partial files; retries require explicit authorization.
 
@@ -114,8 +119,8 @@ Compare local-only and hybrid deployments with actual infrastructure before enab
   webhooks need verification. Prefer existing streaming over redundant copies.
 - **Tailscale**: private connectivity and device identity, not a substitute for application
   authorization. No public management plane.
-- **AniList**: read-only OAuth adapter implemented (see Identity adapters); confirmed identity
-  and a rate-limited reconciliation/outbox remain future, separately approved work. Playback evidence is distinct from inferred watched progress.
+- **AniList**: OAuth adapter implemented (see Identity adapters), with a user-invoked single-entry
+  update; confirmed identity, automatic scrobbling and a rate-limited reconciliation/outbox remain future, separately approved work. Playback evidence is distinct from inferred watched progress.
 - **Players/other observations**: normalized durable watch events with source/confidence,
   deduplication, manual correction and season-aware identity resolution.
 

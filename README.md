@@ -306,6 +306,14 @@ database is not downloaded again: a public torrent whose info dictionary is kept
 name equals the folder name, so a candidate saved under another name is verified only after
 the folder is named like it.
 
+## AniList: your list, and updating it
+`kura anilist login` stores an AniList token for this install (see [docs/anilist.md](docs/anilist.md));
+an agent can walk you through it with the [`login-anilist` skill](skills/login-anilist/SKILL.md),
+exposed to agents at `.claude/skills` and `.agents/skills`. `kura anilist list` syncs your list,
+and `kura anilist update --title "Some Show" --progress 8 [--dry-run]` marks episode 8 watched:
+it resolves the title without guessing, never lowers progress unless asked, and is the only
+command that writes to AniList.
+
 ## Library quality (offline report)
 `kura audit --library NAME [--retain FILE] [--policy-overrides FILE] [--user NAME] [--title KEY]...
 [--flag CODE]... [--limit 200] [--no-store]` joins the manifest inventory, title identities
