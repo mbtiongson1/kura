@@ -217,7 +217,7 @@ class Refusals(Base):
         manifest.build(self.lab.store, policy=self.lab.policy(), **kw)
         self.assertEqual(len(self.plan()["moves"]), 2)
         self.lab.deny.write_text("# hosts\nblocked.example\nnewly-listed.example\n")
-        self.lab.build()                                  # only root "main" is rebuilt
+        self.lab.build(mark_absent=False)                 # only root "main" is rebuilt
         doc = self.plan()
         self.assertEqual([m["from"] for m in doc["moves"]], ["Kura New Policy"])
         # The manifest already demands re-classification under the new policy ...

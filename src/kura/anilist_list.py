@@ -12,6 +12,7 @@ import sqlite3
 
 from . import anilist_auth
 from .anilist import GQL_LIMIT, clean
+from .manifest_store import PRESENT_IDENTITY_SQL
 from .models import KuraError
 
 CHUNK_SIZE = 500
@@ -434,7 +435,7 @@ def media_ids(db, ids, library, missing) -> list[int]:
     if library is not None:
         found = [r[0] for r in db.execute(
             "SELECT DISTINCT anilist_id FROM title_identities WHERE library=? AND anilist_id IS NOT NULL "
-            "ORDER BY anilist_id", (library,))]
+            "AND " + PRESENT_IDENTITY_SQL + " ORDER BY anilist_id", (library, library, library))]
     else:
         found = sorted(set(ids))
     if len(found) > MAX_IDS:

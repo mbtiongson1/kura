@@ -469,7 +469,9 @@ def show(store, library: str, status: str | None = None) -> dict:
     for key in keys:
         if key in rows:
             counts[rows[key]["status"]] += 1
-    listed = [{"title": k, **v} for k, v in sorted(rows.items()) if status is None or v["status"] == status]
+    present = set(keys)         # identities of absent or pruned titles stay out of sight
+    listed = [{"title": k, **v} for k, v in sorted(rows.items())
+              if k in present and (status is None or v["status"] == status)]
     out = {"library": library, "counts": {k: v for k, v in counts.items() if v},
            "unrecorded": sum(1 for k in keys if k not in rows), "titles": listed[:MAX_LISTED]}
     if len(listed) > MAX_LISTED:

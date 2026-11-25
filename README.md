@@ -132,12 +132,13 @@ kura torrent verify release.torrent --root /path/to/library [--base subdir] [--m
 kura manifest build --library home --root media=/path/to/library --torrents /path/to/torrents \
   [--torrents /path/to/more/torrents ...] --tracker-denylist deny.txt --protected protected.txt [--max-read-gib 200] [--reverify] [--no-anilist]
 kura manifest show --library home [--status reacquirable] [--title media/Some\ Title]
+kura manifest prune --library home [--older-than-days N] [--dry-run | --yes]
 ```
 
 `library inventory`, `torrent inspect` and `torrent verify` are **stateless**: they never
 open the state database or touch `HOME`, so they run in a throwaway container with a
 read-only root filesystem and a read-only library mount (inventory and verify need no
-network). Only `manifest build` and `manifest show` use the private state database.
+network). Only the `manifest` commands use the private state database.
 
 `manifest build` scans every `--root` (metadata only) and the `.torrent` files directly
 inside every `--torrents` directory (the flag repeats, for example a directory of kept
@@ -186,6 +187,32 @@ infohashes or `path:relative/prefix`. Descriptors that cannot be parsed are repo
 now ambiguous) stops counting toward coverage but keeps protecting; a torrent whose
 protection was classified under a different policy than the title's last assessment is
 `unverified` until the next build reprocesses it (descriptors are reclassified first thing in every build, even one that is later interrupted).
+
+#### Absent titles and `manifest prune`
+
+Root labels are part of every title key, so changing the labels you pass to `manifest build`
+(per-disk labels replaced by share-level labels, say) used to leave the old rows behind as
+phantom titles: they inflated the counts, failed `probe library` as `no_root`, were flagged by
+`audit`, and could still look reacquirable. Now a **complete** `manifest build` marks every
+title under a root label it was *not* given as **absent** (state schema 4, table
+`library_absent`; existing titles migrate as present). An absent title is invisible to `manifest
+show`, `plan`, `swarm` and `resolve`, `probe library`, `audit`, `identity sync`/`show` and
+`retain check`, so it can never be proposed. The mark is reversible: a build that sees the title
+again (the label comes back) makes it present. `build` reports it under `absent`:
+`{"marked", "complete", "reason"}`.
+
+Fail closed: a build that was cut short (`--max-read-gib` spent, interrupted, or any root with
+no titles, such as an unmounted share) marks nothing, and so does a failed build. To rebuild
+only some roots on purpose, pass `--keep-other-roots`. A title that vanishes from a root that
+*was* scanned keeps its older behaviour: it stays visible as `stale` (and a plan refuses it).
+
+`kura manifest prune --library home` deletes rows from Kura's own state: absent titles and, with
+`--older-than-days`, titles that vanished from a scanned root, with their file, link, verification, probe-result and identity
+rows (torrent rows are shared and stay; a title linked to a protected or private torrent is kept and
+counted (and sampled) as `kept_protected`, and stays until that torrent is unprotected or unlinked, because its links are the evidence that protects that torrent elsewhere). It never touches media or `.torrent` files. Without
+`--yes` it only prints the counts (`--dry-run` is the default; the two flags are mutually
+exclusive). Identities of pruned titles are deleted too, except owner pins (`identity pin`), which stay unless the prune empties the library. `--older-than-days N` keeps titles absent (or last seen) for less than N days; vanished titles are only
+deleted when it is given (a root that was down for one build must not cost their history).
 
 ### Quarantine plan (a proposal only)
 ```sh
@@ -295,9 +322,9 @@ untouched-stream rule for web rips and the Unraid runner contract.
 Default state: `~/.local/share/kura/state.sqlite3` (preferences, receipts, audit events
 and validated sanitized descriptors for explicit offline resume). This is private data,
 not an export to Git or a public torrent archive.
-The state database is schema version 2 (library manifest tables). Kura migrates an existing
-version 1 database on first open; older Kura builds refuse a version 2 database, so keep one
-build per state directory after upgrading.
+The state database is schema version 4 (library manifest tables, the library-quality
+tables, absent-title marks). Kura migrates an existing older database on first open; older Kura
+builds refuse a newer database, so keep one build per state directory after upgrading.
 Default payloads: `~/.local/share/kura/downloads/<infohash>/<validated-name>`.
 No legacy settings, credentials, torrents or media are imported automatically.
 Destination capabilities are `private[/subfolder]` and `shared[/subfolder]` only, not

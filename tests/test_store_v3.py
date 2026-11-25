@@ -45,13 +45,13 @@ class Case(unittest.TestCase):
 
 class SchemaV3(Case):
     def test_target_version(self):
-        self.assertEqual(SCHEMA_VERSION, 3)
-        self.assertEqual(sorted(MIGRATIONS), [2, 3])
+        self.assertEqual(SCHEMA_VERSION, 4)
+        self.assertEqual(sorted(MIGRATIONS), [2, 3, 4])
 
     def test_fresh_database_is_v3(self):
         store = Store(self.root)
         store.db.close()
-        self.assertEqual(version(self.db_path), 3)
+        self.assertEqual(version(self.db_path), SCHEMA_VERSION)
         self.assertTrue((V3_TABLES | NEW_TABLES) <= tables(self.db_path))
 
     def test_v2_database_migrates_intact(self):
@@ -59,7 +59,7 @@ class SchemaV3(Case):
         self.assertFalse(V3_TABLES & tables(self.db_path))
         store = Store(self.root)
         try:
-            self.assertEqual(version(self.db_path), 3)
+            self.assertEqual(version(self.db_path), SCHEMA_VERSION)
             self.assertTrue(V3_TABLES <= tables(self.db_path))
             self.assertEqual(store.prefs().min_seeders, 7)
             self.assertEqual(store.db.execute("SELECT library, rel_path, file_count FROM library_titles").fetchall(),
@@ -113,7 +113,7 @@ class SchemaV3(Case):
         self.assertNotIn("half_done", tables(self.db_path))
         self.assertFalse(V3_TABLES & tables(self.db_path))
         Store(self.root).db.close()
-        self.assertEqual(version(self.db_path), 3)
+        self.assertEqual(version(self.db_path), SCHEMA_VERSION)
 
     def test_two_stores_open_at_once(self):
         for scenario in ("fresh", "v2"):
@@ -137,7 +137,7 @@ class SchemaV3(Case):
                     t.start()
                 for t in threads:
                     t.join()
-                self.assertEqual((errors, results), ([], [3] * 4))
+                self.assertEqual((errors, results), ([], [SCHEMA_VERSION] * 4))
 
     def test_table_constraints_hold(self):
         store = Store(self.root)

@@ -19,8 +19,17 @@ Storage conventions
     null) and ``assessment`` (policy hash and completeness, whether a ``path:`` entry of
     the protected list covers the title, and the scan time). ``show`` needs no policy
     files because the build recorded what it needs.
-  * A title that disappears from a root is kept, marked ``absent_from_scan`` and shown as
-    ``stale``. Verification history is append-only; the newest row per link counts.
+  * A title that disappears from a root that was scanned is kept, marked
+    ``absent_from_scan`` and shown as ``stale``. Verification history is append-only; the
+    newest row per link counts.
+  * A title under a root label that a *complete* build was not given (labels get retired:
+    per-disk labels replaced by share labels) is marked absent in ``library_absent``. An
+    absent title is invisible to every command (``show``, ``plan``, probe, audit,
+    identity, retain, swarm, resolve) and can never reach a plan. The mark is reversible: a
+    build that sees the title again clears it. ``prune`` deletes absent and vanished rows
+    from Kura's state (never media). A build that was cut short (read budget spent,
+    interrupted, an empty root) marks nothing, and ``--keep-other-roots`` (``mark_absent=False``)
+    marks nothing for a deliberate partial rebuild of some roots.
 
 Title status (first rule that applies wins)
   stale          absent from the latest scan, or the evidence behind a verification
@@ -44,6 +53,7 @@ next build reprocesses it.
 Reasons are short fixed tokens. ``uncovered_files`` means the title has files that no
 matched torrent lists (extra files); such a title is never reacquirable.
 """
+import contextlib
 import os
 from pathlib import Path
 import re
@@ -384,7 +394,8 @@ def _torrent_dirs(torrents_dir) -> list[Path]:
 
 def build(store, *, roots: dict[str, Path], library: str, torrents_dir,
           policy: ProtectionPolicy, max_read_bytes: int | None = None, reverify: bool = False,
-          aliases=None, should_stop: Callable[[], bool] = lambda: False) -> dict:
+          aliases=None, should_stop: Callable[[], bool] = lambda: False,
+          mark_absent: bool = True) -> dict:
     """Scan, match, verify and record. See the module docstring for what is stored.
 
     Holds the store's mutation lock throughout. Each torrent is committed on its own (its
@@ -395,7 +406,8 @@ def build(store, *, roots: dict[str, Path], library: str, torrents_dir,
     `reverify`. `aliases` is an AniList-style resolver or None (no lookups).
     `torrents_dir` is one directory or a sequence of them (scanned in order, repeats
     ignored); a torrent present in several is one torrent (same infohash), with protection
-    merged as for any duplicate.
+    merged as for any duplicate. After a complete build, titles under root labels that were not
+    given are marked absent unless `mark_absent` is False (for a deliberate partial rebuild).
     """
     _check_label(library, "Library")
     if not isinstance(roots, dict) or not roots:
@@ -458,7 +470,9 @@ def build(store, *, roots: dict[str, Path], library: str, torrents_dir,
         matches, unmatched = match_many(list(invs.values()), [m for m, _ in parsed.values()])
 
         # 3. Persist inventories, including titles that vanished from a root.
-        existing = {t["rel_path"]: t for t in repo.titles(library)}
+        # Absent titles are included so a title that comes back keeps its recorded identity and
+        # its stale links are superseded; they are never rewritten as "vanished" below.
+        existing = {t["rel_path"]: t for t in repo.titles(library, include_absent=True)}
         # A link that this scan no longer produces (torrent removed, now ambiguous, title
         # renamed) stops counting toward coverage; it still counts toward protection. Done
         # before the new inventory is published so an interrupt can only lose eligibility.
@@ -485,10 +499,11 @@ def build(store, *, roots: dict[str, Path], library: str, torrents_dir,
                 assessments[key] = assessment
                 rows.append(_title_row(key, title, _identity(kept, assessment)))
             for key, old in existing.items():
-                if key.startswith(label + "/") and key not in seen:
+                if key.startswith(label + "/") and key not in seen and old["absent_at"] is None:
                     rows.append({"rel_path": key, "kind": old["kind"], "total_bytes": 0,
                                  "newest_mtime_ns": old["newest_mtime_ns"], "file_count": 0,
-                                 "blocked": ["absent_from_scan"], "files": []})
+                                 "blocked": ["absent_from_scan"], "files": [],
+                                 "seen_at": old["seen_at"]})   # last seen stays the truth
             ids.update(repo.save_inventory(library, inv.root_dev, rows, inv.scanned_at))
 
         # 4. Per torrent: link it, verify each linked title (committed as each finishes).
@@ -498,6 +513,7 @@ def build(store, *, roots: dict[str, Path], library: str, torrents_dir,
         left = max_read_bytes
         stats = {"run": 0, "cached": 0, "deferred": 0, "skipped_protected": 0, "bytes_read": 0}
         interrupted = False
+        cut_short = False
         for infohash, (meta, protection) in parsed.items():
             if should_stop():
                 interrupted = True
@@ -521,6 +537,7 @@ def build(store, *, roots: dict[str, Path], library: str, torrents_dir,
                 v = verify_tree(meta, Path(roots[m.root]), m.mapping,
                                 max_read_bytes=left, should_stop=should_stop)
                 stats["run"] += 1
+                cut_short = cut_short or v.verdict in ("interrupted", "budget_exhausted")
                 stats["bytes_read"] += v.bytes_read
                 if left is not None:
                     left -= v.bytes_read
@@ -559,6 +576,18 @@ def build(store, *, roots: dict[str, Path], library: str, torrents_dir,
                     repo.save_inventory(library, inv.root_dev, [
                         _title_row(key, title, _identity(note, assessments[key]))], inv.scanned_at)
 
+        # 6. Titles under root labels this build was not given are absent, but only when the
+        # whole build ran to the end: a cut or failed run proves nothing about what is gone.
+        absent = {"marked": 0, "complete": False, "reason": None}
+        if not mark_absent:
+            absent["reason"] = "disabled"
+        elif interrupted or cut_short or stats["deferred"] or should_stop():
+            absent["reason"] = "incomplete_build"
+        elif any(not inv.titles for inv in invs.values()):
+            absent["reason"] = "empty_root"       # an unmounted share looks exactly like this
+        else:
+            absent.update(complete=True, marked=repo.mark_absent(library, invs, time.time()))
+
     shown = show(store, library)
     protected_count = sum(1 for m, p in parsed.values() if p.protected or m.private)
     return {
@@ -572,7 +601,72 @@ def build(store, *, roots: dict[str, Path], library: str, torrents_dir,
                      "skipped_count": len(skipped)},
         "matched": len(matches), "unmatched": unmatched[:MAX_LISTED],
         "unmatched_count": len(unmatched), "verification": stats,
-        "anilist": anilist, "interrupted": interrupted, "counts": shown["counts"]}
+        "anilist": anilist, "absent": absent, "interrupted": interrupted, "counts": shown["counts"]}
+
+
+# ---- prune -----------------------------------------------------------------------------
+
+def prune(store, library: str, *, older_than_days: float | None = None, dry_run: bool = True,
+          now: Callable[[], float] = time.time) -> dict:
+    """Delete absent and vanished titles of `library` from Kura's state (never from disk).
+
+    Candidates are titles marked absent (``absent_at`` at least `older_than_days` ago; None
+    means all) and, only when `older_than_days` is given, titles a scan found vanished (last
+    seen at least that long ago). Their file, link, verification, probe-result, absent-mark and
+    identity rows go with them (so a fully pruned library cannot leak them into AniList or
+    SeaDex lookups); owner pins from ``identity pin`` stay unless the prune leaves the library
+    with no titles at all. The dry run is advisory: it reads without a snapshot. A title whose links point at a protected or private torrent is
+    kept (``kept_protected``). Torrent rows, plans and reports stay. With `dry_run` (the
+    default) it only counts.
+    Nothing here opens a library root.
+    """
+    _check_label(library, "Library")
+    if older_than_days is not None and not (
+            isinstance(older_than_days, (int, float)) and not isinstance(older_than_days, bool)
+            and 0 <= older_than_days <= 36500):
+        raise KuraError("invalid_arguments", "--older-than-days must be between 0 and 36500")
+    cutoff = None if older_than_days is None else now() - older_than_days * 86400
+    with (contextlib.nullcontext() if dry_run else store.lock()):   # a preview never blocks a build
+        repo = ManifestRepo(store.db)
+        total = len(repo.titles(library, include_absent=True))
+        candidates, kept_protected = [], []
+        for c in repo.prunable(library, cutoff):
+            if _protection_evidence(repo, c["id"]):
+                kept_protected.append(c["rel_path"])   # its links prove a torrent is protected elsewhere
+            else:
+                candidates.append(c)
+        counts = repo.prune_titles(library, candidates, dry_run=dry_run,
+                                   empties_library=bool(candidates) and total == len(candidates))
+    by_root: dict[str, int] = {}
+    for c in candidates:
+        label = c["rel_path"].split("/", 1)[0]
+        by_root[label] = by_root.get(label, 0) + 1
+    return {"library": library, "dry_run": dry_run, "older_than_days": older_than_days,
+            "absent": sum(1 for c in candidates if c["state"] == "absent"),
+            "vanished": sum(1 for c in candidates if c["state"] == "vanished"),
+            "deleted" if not dry_run else "would_delete": counts,
+            "kept_protected": len(kept_protected), "kept_protected_sample": kept_protected[:20],
+            "by_root": dict(sorted(by_root.items())),
+            "sample": [c["rel_path"] for c in candidates[:20]],
+            "titles_kept": total - len(candidates)}
+
+
+def _protection_evidence(repo: ManifestRepo, title_id: int) -> bool:
+    """Does any link of the title point at a protected, private or unreadable torrent?
+
+    ``_protected_elsewhere`` uses the links of other libraries as the evidence that stops a
+    public copy from clearing a protection, so prune never deletes those links (fail closed).
+    """
+    try:
+        for link in repo.links(title_id):
+            row = repo.torrent(link["infohash"])
+            protection = row and row.get("protection")
+            if (not isinstance(protection, dict) or not isinstance(protection.get("protected"), bool)
+                    or protection["protected"] or row["private"]):
+                return True
+    except (ValueError, KeyError, TypeError, RecursionError):   # corrupt rows prove nothing: keep the title
+        return True
+    return False
 
 
 # ---- show ------------------------------------------------------------------------------

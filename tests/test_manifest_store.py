@@ -74,7 +74,7 @@ class TempCase(unittest.TestCase):
 class Migration(TempCase):
     def test_fresh_database_is_current(self):
         store = Store(self.root)
-        self.assertEqual(SCHEMA_VERSION, 3)
+        self.assertEqual(SCHEMA_VERSION, 4)
         self.assertEqual(store.db.execute("SELECT version FROM meta").fetchone()[0], SCHEMA_VERSION)
         self.assertTrue(NEW_TABLES <= tables(self.db_path))
         self.assertEqual(oct(self.db_path.stat().st_mode & 0o777), "0o600")

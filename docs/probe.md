@@ -116,7 +116,7 @@ device and inode compared with the inventory) when the inventory's size and mtim
 `unsupported_container`, `invalid`) and the probe was not cut by the per-file byte limit (a cut
 result is stored with the `allowance` it ran under and is retried only when a larger one is asked for). `unsafe`, `changed` and
 `io_error` rows record why a file was not probed and are retried every run. A hit also needs the title's root label to be given with `--root`, the
-root to open safely (no symlinks) and to be on the device the inventory recorded (`root_mismatch` otherwise). Re-run `manifest build` after files change.
+root to open safely (no symlinks) and to be on the device the inventory recorded (`root_mismatch` otherwise). Re-run `manifest build` after files change. Titles under root labels that a complete `manifest build` no longer saw are absent and are skipped (no `no_root` failures); `kura manifest prune` removes them from state.
 
 Budget: `--max-files` (default 2000) bounds the files that need I/O in one run (cache hits are free, so
 repeated runs progress through a larger selection); `--max-read-mib` is a hard cap on bytes read per run; a file gets the smaller of the
