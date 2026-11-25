@@ -12,6 +12,25 @@ the outcome in ``title_identities``. Two passes, cheapest first:
      candidates are kept too. The alias cache is not used here because it stores only one
      pick; a recent negative alias answer is remembered in the row instead.
 
+Name variants. Both sides are compared through one normalisation: case, compatibility forms,
+accents on Latin letters, every apostrophe variant dropped, ``\u00d7`` read as ``x`` and ``&`` as
+"and". A title whose words differ only in spacing or punctuation ("Tatte Iru" and "Tatteiru")
+is also an exact match, ranked just below a word-for-word one. A folder name that is mojibake
+(UTF-8 bytes read as cp1252 or latin-1) is repaired in memory for matching, only when the repair
+round-trips cleanly and removes mojibake marker characters; nothing on disk is renamed.
+
+File names as a second opinion. When the folder name matches nothing, the series name and
+season are read from the video file names inside (``names.series``; extras are ignored). They
+are used only if every video file agrees on both; the name then goes through the same offline
+and alias matching, and the ``query`` column records it. Any disagreement keeps the folder result.
+A loose video file at a root has its episode marker stripped before matching.
+
+Root entries that cannot be anime titles (a loose file that is not a video, such as a sidecar
+image, ``.nfo`` or a dotfile; a folder with files but no video in it) are left out of ``sync``,
+its counts, ``show``'s ``unrecorded`` and the audit's ``identity_unknown`` flag. They are not
+given a status, and an old non-owner row for one is dropped. They remain unidentified, so a retain
+plan still refuses to touch them.
+
 Season rule: a folder with a season marker 2 or higher is accepted only by an entry whose
 matched title carries that season ("Season N", "Nth Season", "SN" or a trailing "N"); a
 folder marked season 1 never binds to an entry titled for a later season; a folder spanning
@@ -26,23 +45,26 @@ spent, ``--offline``) ends up weaker than ``resolved``, never stale. The module 
 writes only Kura's private state database and never touches a library.
 """
 from contextlib import contextmanager
+import hashlib
 import json
 import re
 import time
 import unicodedata
 
-from .anilist import clean, parse_response
+from .anilist import MAX_TITLE, clean, parse_response
 from .core import ALIAS_FAILURE_TTL, ALIAS_TTL
 from .manifest_store import ManifestRepo
 from .models import KuraError
 from .releases import normalize
-from . import resolve
+from .sources.seadex import VIDEO_EXT
+from . import names, resolve
 
 STATUSES = ("resolved", "pinned", "ambiguous", "unresolved", "unavailable", "not_anime")
 IDENTIFIED = ("resolved", "pinned")
 MAX_LOOKUPS = 1000
 MAX_LISTED = 500
 MAX_ID = 10**9
+MEDIA_EXT = VIDEO_EXT + (".iso", ".vob", ".mpg", ".mpeg", ".flv", ".ogm", ".divx")
 
 _SEASON_WORDS = (
     lambda n: re.compile(rf"\bseason 0*{n}\b"),
@@ -73,28 +95,86 @@ def _tx(db):
         raise
 
 
+# ---- name normalisation ----------------------------------------------------------------
+
+_APOSTROPHES = re.compile("['\u2018\u2019\u201b\u02bc\u02b9\u2032`\u00b4]")
+_MOJIBAKE_MARKS = "\u00c3\u00c2\u00e2"        # A-tilde, A-circumflex, a-circumflex lead most UTF-8 mojibake
+
+
+def _fold(text: str) -> str:
+    """Drop accents from Latin letters only (kana voicing marks and the like stay)."""
+    out = []
+    for ch in text:
+        if ch.isascii():
+            out.append(ch)
+            continue
+        base = unicodedata.normalize("NFD", ch)[0]
+        out.append(base if base.isascii() else ch)
+    return "".join(out)
+
+
+def norm_words(value: str) -> str:
+    """Words of a title for comparison: see the module docstring ("Name variants")."""
+    text = _fold(unicodedata.normalize("NFKC", value).casefold())
+    text = _APOSTROPHES.sub("", text).replace("\u00d7", "x").replace("&", " and ")
+    return " ".join(re.findall(r"\w+", text))
+
+
+def repair_mojibake(text: str) -> str:
+    """``text`` with UTF-8-read-as-cp1252/latin-1 mojibake undone, or ``text`` itself unless the
+    repair round-trips cleanly into printable text with fewer marker characters."""
+    def marks(t):
+        return sum(t.count(c) for c in _MOJIBAKE_MARKS)
+    if not marks(text):
+        return text
+    for encoding in ("cp1252", "latin-1"):
+        try:
+            fixed = text.encode(encoding).decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            continue
+        if (fixed != text and marks(fixed) < marks(text)
+                and all(unicodedata.category(c) not in ("Cc", "Cf", "Cs", "Co", "Cn") for c in fixed)):
+            return fixed
+    return text
+
+
 # ---- title and season parsing ----------------------------------------------------------
 
 def folder_terms(key: str) -> tuple[str, int | None, bool]:
     """``(base title, season, undecidable)`` for a title key. Undecidable means a season range,
     several season markers or season 0: the folder cannot bind to one AniList entry."""
-    entry = key.partition("/")[2] or key
-    base = resolve.derive_terms(entry).base
-    # Markers inside brackets count too ("Title (Season 2)", "Title [S02]"): the title cleaner drops
-    # bracketed text, so look at the name with only the bracket characters removed as well.
-    plain = resolve._EXT.sub("", unicodedata.normalize("NFKC", entry.strip()))
-    texts = [resolve._PAIRS.sub(" ", resolve._flatten(resolve._EXT.sub("", entry.strip()))),
-             re.sub(r"[\[\](){}_]", " ", plain)]
+    entry = repair_mojibake(key.partition("/")[2] or key)
+    # A loose video file: the episode marker is not part of the title.
+    head = names.series(entry) if entry.lower().endswith(MEDIA_EXT) else None
+    base = resolve.derive_terms(head or entry).base
+    season, undecidable = season_markers([entry], episode_marker=head is not None)
+    return base, season, undecidable
+
+
+def season_markers(texts: list[str], *, episode_marker: bool = False) -> tuple[int | None, bool]:
+    """``(season, undecidable)`` from the season markers in ``texts`` (a name, or the parts of a path).
+
+    Markers inside brackets count too ("Title (Season 2)", "Title [S02]"): the title cleaner drops
+    bracketed text, so the name is also read with only the bracket characters removed.
+    ``episode_marker`` also reads the season of an ``SxxEyy`` marker in a release file name.
+    Undecidable: a range, several different seasons, or season 0."""
     numbers, ranged = set(), False
-    for text in texts:
-        for pattern in resolve._SEASONS:
-            for found in pattern.finditer(text):
-                numbers.add(int(found.group(1)))
-                if pattern.groups > 1 and found.group(2):
-                    ranged = True
-        ranged = ranged or bool(_RANGE.search(text))
+    for entry in texts:
+        plain = resolve._EXT.sub("", unicodedata.normalize("NFKC", entry.strip()))
+        for text in (resolve._PAIRS.sub(" ", resolve._flatten(resolve._EXT.sub("", entry.strip()))),
+                     re.sub(r"[\[\](){}_]", " ", plain)):
+            if episode_marker:      # "Show S2 - 05" is season 2, episode 5, not the range S2-05
+                text = names.DASH_EPISODE.sub(" ", text)
+            for pattern in resolve._SEASONS:
+                for found in pattern.finditer(text):
+                    numbers.add(int(found.group(1)))
+                    if pattern.groups > 1 and found.group(2):
+                        ranged = True
+            ranged = ranged or bool(_RANGE.search(text))
+        if episode_marker and (marked := names.parse(entry)["season"]) is not None:
+            numbers.add(marked)
     season = next(iter(numbers)) if len(numbers) == 1 else None
-    return base, season, ranged or len(numbers) > 1 or season == 0
+    return season, ranged or len(numbers) > 1 or season == 0
 
 
 def carries_season(title: str, season: int) -> bool:
@@ -155,7 +235,8 @@ def list_snapshot(db) -> list[dict]:
 
 def match(rows: list[dict], base: str, season: int | None) -> dict:
     """Match a folder title against ``rows`` with ``anilist.choose`` semantics plus the season rule."""
-    wanted = normalize(base)
+    wanted = norm_words(base)
+    squashed = wanted.replace(" ", "")
     tokens = set(wanted.split())
     scored = []
     for row in rows:
@@ -163,10 +244,12 @@ def match(rows: list[dict], base: str, season: int | None) -> dict:
         for title in row["titles"]:
             if not _title_ok(title, season, base):
                 continue
-            candidate = normalize(title)
+            candidate = norm_words(title)
             words = set(candidate.split())
             if candidate == wanted:
                 key = (0, 0)
+            elif squashed and candidate.replace(" ", "") == squashed:
+                key = (0, 1)                # same letters, different spacing or punctuation
             elif tokens and tokens <= words:
                 key = (1, len(words - tokens))
             else:
@@ -244,6 +327,19 @@ def _store(db, library: str, records: dict[str, dict], seen: dict[str, tuple], n
                  r.get("matched"), json.dumps(sorted(r["candidates"])), now))
 
 
+def _drop(db, library: str, titles: list[str], seen: dict[str, tuple]):
+    """Delete the non-owner rows of ``titles`` that are still as they were read (``seen``): a row
+    that changed since, or an owner row, is left alone, like in ``_store``."""
+    with _tx(db):
+        for title in titles:
+            row = db.execute(
+                "SELECT anilist_id, status, source, updated_at FROM title_identities WHERE library=? AND title=?",
+                (library, title)).fetchone()
+            if row is not None and tuple(row) == seen.get(title) and row[2] != "owner":
+                db.execute("DELETE FROM title_identities WHERE library=? AND title=? AND source<>'owner'",
+                           (library, title))
+
+
 def _record(found: dict, source: str, query: str | None) -> dict:
     return {**found, "source": source, "query": query[:200] if query else None}
 
@@ -263,7 +359,7 @@ def _carry(record: dict, before: dict | None) -> dict:
 
 def _same(old: dict | None, new: dict) -> bool:
     return old is not None and all(
-        old[k] == new[k] for k in ("anilist_id", "status", "source", "matched", "candidates"))
+        old[k] == new[k] for k in ("anilist_id", "status", "source", "matched", "candidates", "query"))
 
 
 class _Lookup:
@@ -291,7 +387,12 @@ class _Lookup:
     def page(self, query: str) -> list[dict]:
         self.made += 1
         self.rows = None
-        self.resolver.resolve(query)
+        try:
+            self.resolver.resolve(query)
+        except KuraError as e:
+            if e.code == "invalid_query":       # refused before any request: not a lookup
+                self.made -= 1
+            raise
         if self.rows is None:
             raise KuraError("alias_invalid", "AniList returned no usable page")
         return self.rows
@@ -300,39 +401,108 @@ class _Lookup:
 _FAILURES = ("alias_unavailable", "alias_invalid", "unsafe_url")
 
 
-def _alias(lookup, base: str, season: int | None, budget: int):
-    """Alias fallback for one title: ``(record, stop, out_of_budget)``. The season variant is
-    asked first; the returned page is matched here with the same rules as the offline pass."""
-    queries = [f"{base} Season {season}", base] if season is not None and season >= 2 else [base]
-    rejected: set[int] = set()
-    for query in queries:
+def alias_queries(base: str, season: int | None) -> list[str]:
+    """What the alias pass asks for one name, in order (the season variant first)."""
+    return [f"{base} Season {season}", base] if season is not None and season >= 2 else [base]
+
+
+def plan_steps(base: str, season: int | None, alt) -> list[tuple[str, str, int | None]]:
+    """The whole planned query sequence of a title: ``(query, name, season)`` per step. The folder
+    name's queries come first, then those of the file-name fallback ``alt`` (``(name, season)``
+    or None). ``name`` and ``season`` are what the returned page is matched against."""
+    steps = [(q, base, season) for q in alias_queries(base, season)]
+    if alt is not None:
+        steps += [(q, alt[0], alt[1]) for q in alias_queries(*alt)]
+    return steps
+
+
+_KEY = re.compile(r"v2:(\d+)/(\d+):")
+MAX_QUERY = 200
+
+
+def _key(steps, done: int) -> str:
+    """The ``query`` of a negative or undecided alias row: how many steps of the plan are finished
+    and the plan itself, ``v2:<done>/<total>:<query>@<season> | ...`` (``-`` for no season). A plan
+    too long for the column is replaced by its hash. Rows without this format are not trusted."""
+    plan = " | ".join(f"{q}@{'-' if s is None else s}" for q, _, s in steps)
+    head = f"v2:{done}/{len(steps)}:"
+    if len(head) + len(plan) > MAX_QUERY:
+        plan = "#" + hashlib.sha256(plan.encode()).hexdigest()[:32]
+    return head + plan
+
+
+def _done(text: str | None, steps) -> int | None:
+    """Steps finished according to a row's ``query``, or None unless it describes exactly ``steps``
+    (same queries, same order, same seasons): an older format or a changed plan is not remembered."""
+    found = _KEY.match(text or "")
+    if found is None:
+        return None
+    done, total = int(found.group(1)), int(found.group(2))
+    return done if total == len(steps) and 0 <= done <= total and text == _key(steps, done) else None
+
+
+def _memory(row: dict | None, moment: float, steps) -> int | None:
+    """How many steps of ``steps`` a recent alias row already settles, or None when it settles
+    none. ``len(steps)`` means nothing is asked: the plan is finished with no match, the answer
+    was ambiguous, or an outage is too recent to try again. Fewer is where to resume."""
+    if row is None or row["source"] != "alias" or moment - row["updated_at"] < 0:
+        return None
+    done, age, total = _done(row["query"], steps), moment - row["updated_at"], len(steps)
+    if done is None:
+        return None
+    if row["status"] == "unresolved":
+        return done if age < ALIAS_TTL else None
+    if row["status"] == "ambiguous":
+        return total if age < ALIAS_TTL else None
+    if row["status"] == "unavailable":
+        return total if age < ALIAS_FAILURE_TTL else (done if age < ALIAS_TTL else None)
+    return None
+
+
+_FAILURES = ("alias_unavailable", "alias_invalid", "unsafe_url")
+
+
+def askable(query: str) -> bool:
+    """False for a query AniList's resolver refuses (empty, over-long or with control characters)."""
+    return bool(normalize(query)) and len(query) <= MAX_TITLE and not any(ord(c) < 32 for c in query)
+
+
+def _alias(lookup, steps, start: int, budget: int, prior=()):
+    """Alias fallback for one title from step ``start``: ``(record, stop, out_of_budget)``.
+
+    Each step's page is matched here with the same rules as the offline pass, against the name
+    and season of that step. A record is None only when nothing new was learned; when the budget
+    ends part-way, the record keeps the finished steps (``_key``) so the next run resumes, and
+    ``prior`` (the candidates that row recorded) seeds what the steps run so far rejected."""
+    total, rejected = len(steps), set(prior)
+
+    def record(status, query, found=None, candidates=None):
+        base = found or {"status": status, "anilist_id": None, "matched": None,
+                         "candidates": sorted(rejected) if candidates is None else candidates}
+        return _record(base, "alias", query)
+
+    for i in range(start, total):
+        query, name, season = steps[i]
+        if not askable(query) or not norm_words(name):     # unaskable, or no name to match: skip this step only
+            continue
         if lookup.made >= budget:
-            return None, False, True
+            return (None if i == start else record("unresolved", _key(steps, i))), False, True
         try:
             rows = lookup.page(query)
         except KuraError as e:
-            if e.code == "invalid_query":
-                return _record({"status": "unresolved", "anilist_id": None, "matched": None,
-                                "candidates": []}, "alias", None), False, False
+            if e.code == "invalid_query":       # not charged; skip this step only
+                continue
             if e.code not in _FAILURES:
                 raise
-            return _record({"status": "unavailable", "anilist_id": None, "matched": None,
-                            "candidates": []}, "alias", query), True, False
-        found = match(rows, base, season)
-        if found["status"] != "unresolved":
-            return _record(found, "alias", query), False, False
-        loose = match(rows, base, None)         # entries only the season rule turned away
+            return record("unavailable", _key(steps, i)), True, False
+        found = match(rows, name, season)
+        if found["status"] == "resolved":
+            return record(None, query, found), False, False
+        if found["status"] == "ambiguous":
+            return record(None, _key(steps, i + 1), found), False, False
+        loose = match(rows, name, None)         # entries only the season rule turned away
         rejected.update(loose["candidates"] + ([loose["anilist_id"]] if loose["anilist_id"] else []))
-    found = {"status": "unresolved", "anilist_id": None, "matched": None, "candidates": sorted(rejected)}
-    return _record(found, "alias", queries[-1]), False, False
-
-
-def _fresh(row: dict | None, moment: float) -> bool:
-    """A recent negative alias answer is not asked again before its old cache time would run out."""
-    if row is None or row["source"] != "alias":
-        return False
-    ttl = {"unresolved": ALIAS_TTL, "ambiguous": ALIAS_TTL, "unavailable": ALIAS_FAILURE_TTL}.get(row["status"])
-    return ttl is not None and 0 <= moment - row["updated_at"] < ttl
+    return record("unresolved", _key(steps, total)), False, False
 
 
 def check_sync_args(library, titles, max_lookups):
@@ -349,6 +519,71 @@ def _manifest_titles(store, library: str) -> list[str]:
     if not keys:
         raise KuraError("not_found", "No manifest for that library; run manifest build first")
     return keys
+
+
+def _title_rows(store, library: str) -> dict[str, dict]:
+    """Manifest titles by key, in key order."""
+    rows = {r["rel_path"]: r for r in ManifestRepo(store.db).titles(library)}
+    if not rows:
+        raise KuraError("not_found", "No manifest for that library; run manifest build first")
+    return rows
+
+
+def has_media(kind: str, entry: str, files: list[str]) -> bool:
+    """False for a root entry that cannot be an anime title: a loose file that is not a video, or
+    a folder that holds files but no video. With nothing to look at, a folder counts as media
+    (fail toward identifying it)."""
+    if files:
+        return any(f.lower().endswith(MEDIA_EXT) for f in files)
+    return kind != "file" or entry.lower().endswith(MEDIA_EXT)
+
+
+def _local_files(repo: ManifestRepo, title: dict) -> list[str]:
+    """File paths of a title relative to it, as the audit reads them."""
+    prefix = title["rel_path"].partition("/")[2] + "/"
+    return [f["rel_path"][len(prefix):] if title["kind"] == "dir" and f["rel_path"].startswith(prefix)
+            else f["rel_path"].rsplit("/", 1)[-1] for f in repo.title_files(title["id"])]
+
+
+def file_terms(files: list[str], folder_base: str, folder_season: int | None):
+    """``(base, season)`` read from the video file names of a title, or None.
+
+    Used only when the folder name matched nothing. Every video file (extras ignored) must yield
+    a series name and the files must agree on name and season; a season the folder marks must not
+    contradict the files'. Returns None when the result adds nothing over the folder name."""
+    found: dict[tuple, str] = {}
+    for path in files:
+        if not path.lower().endswith(MEDIA_EXT):
+            continue
+        if names.parse(path)["extra"]:
+            continue
+        head = names.series(path)
+        if head is None:
+            return None
+        # Season markers are read from the whole relative path before the title is cleaned: the
+        # cleaner drops bracketed text, so "Show [Season 2] - 01" and "Show [Season 3] - 02"
+        # would both look like plain "Show".
+        season, undecidable = season_markers(path.split("/"), episode_marker=True)
+        base = resolve._name(head)[0]
+        if undecidable or not norm_words(base):
+            return None
+        found.setdefault((norm_words(base).replace(" ", ""), season), base)
+    if len(found) != 1:
+        return None
+    (squashed, season), base = next(iter(found.items()))
+    if season is not None and folder_season is not None and season != folder_season:
+        return None
+    season = season if season is not None else folder_season
+    if squashed == norm_words(folder_base).replace(" ", "") and season == folder_season:
+        return None
+    return base, season
+
+
+def _media_titles(store, titles: list[dict]) -> set[str]:
+    """Keys of the titles that can be anime titles (see ``has_media``)."""
+    repo = ManifestRepo(store.db)
+    return {t["rel_path"] for t in titles
+            if has_media(t["kind"], t["rel_path"].partition("/")[2], _local_files(repo, t))}
 
 
 def _counts(rows: dict[str, dict], wanted: list[str]) -> dict:
@@ -368,17 +603,28 @@ def sync(store, *, library: str, titles: list[str] | None = None, aliases=None,
          max_lookups: int = 60, refresh: bool = False, now=time.time) -> dict:
     """Identify titles. ``aliases`` is an AniList resolver or None (offline only)."""
     check_sync_args(library, titles, max_lookups)
-    manifest = _manifest_titles(store, library)
-    wanted = sorted(set(titles)) if titles is not None else manifest
-    missing = sorted(set(wanted) - set(manifest))
+    by_key = _title_rows(store, library)
+    wanted = sorted(set(titles)) if titles is not None else list(by_key)
+    missing = sorted(set(wanted) - set(by_key))
     if missing:
         raise KuraError("not_found", "Title not in the manifest", titles=missing[:20])
+    repo = ManifestRepo(store.db)
+    local, skipped = {}, []
+    for key in wanted:
+        local[key] = _local_files(repo, by_key[key])
+        if not has_media(by_key[key]["kind"], key.partition("/")[2], local[key]):
+            skipped.append(key)
+    wanted = [k for k in wanted if k not in set(skipped)]
     moment = now()
     existing = load(store.db, library)
     before = dict(existing)
     seen = _fingerprints(store.db, library)
     snapshot = list_snapshot(store.db)
     offline, need = {}, []
+    if skipped:             # an old row of a non-owner source for such an entry is noise
+        _drop(store.db, library, skipped, seen)
+        existing, seen = load(store.db, library), _fingerprints(store.db, library)
+        before = dict(existing)
     for key in wanted:
         current = existing.get(key)
         if current is not None and current["source"] == "owner":
@@ -388,11 +634,22 @@ def sync(store, *, library: str, titles: list[str] | None = None, aliases=None,
         base, season, undecidable = folder_terms(key)
         found = ({"status": "ambiguous", "anilist_id": None, "matched": None, "candidates": []}
                  if undecidable else match(snapshot, base, season))
+        query, alt = base, None
+        if found["status"] == "unresolved" and not undecidable:
+            alt = file_terms(local[key], base, season)
+            if alt is not None:
+                again = match(snapshot, *alt)
+                if again["status"] != "unresolved":
+                    found, query, alt = again, alt[0], None
         if found["status"] == "unresolved":
-            if _fresh(current, moment) and not refresh:
+            steps = plan_steps(base, season, alt)
+            memory = None if refresh else _memory(current, moment, steps)
+            if memory == len(steps):
                 continue                    # asked recently and nothing new offline
-            need.append((key, base, season))    # a refresh drops what it cannot reconfirm
-        record = _carry(_record(found, "list", base), current)
+            need.append((key, steps, memory or 0))      # a refresh drops what it cannot reconfirm
+            if memory:
+                continue                    # keep the row that remembers the finished steps
+        record = _carry(_record(found, "list", query), current)
         if not _same(current, record):
             offline[key] = record
     _store(store.db, library, offline, seen, moment)
@@ -402,16 +659,16 @@ def sync(store, *, library: str, titles: list[str] | None = None, aliases=None,
     if counter is not None:
         found_now, stop = {}, False
         try:
-            for key, base, season in need:
+            for key, steps, start in need:
                 if stop:
                     pending += 1
                     continue
-                if not normalize(base):
-                    continue
-                record, stop, exhausted = _alias(counter, base, season, max_lookups)
-                if exhausted:
+                prior = existing[key]["candidates"] if start and key in existing else ()
+                record, stop, exhausted = _alias(counter, steps, start, max_lookups, prior)
+                if exhausted:               # nothing is lost: finished steps are in the record
                     stop = True
                     pending += 1
+                if record is None:
                     continue
                 record = _carry(record, before.get(key))
                 if not _same(existing.get(key), record):
@@ -423,7 +680,7 @@ def sync(store, *, library: str, titles: list[str] | None = None, aliases=None,
     return {"library": library, "titles": len(wanted),
             "resolved": by_source, "pinned": counts["pinned"], "ambiguous": counts["ambiguous"],
             "unresolved": counts["unresolved"], "unavailable": counts["unavailable"],
-            "not_anime": counts["not_anime"],
+            "not_anime": counts["not_anime"], "non_media": len(skipped),
             "lookups": {"made": counter.made if counter else 0, "budget": max_lookups if counter else 0},
             "pending": pending}
 
@@ -498,22 +755,33 @@ def apply_pins(store, library: str, pins, *, now=time.time) -> dict:
 
 
 def show(store, library: str, status: str | None = None) -> dict:
-    """Recorded identities, newest state; read-only. ``unrecorded`` counts manifest titles with no row."""
+    """Recorded identities, newest state; read-only. ``unrecorded`` counts media manifest titles
+    with no row. ``counts``, ``unrecorded`` and ``titles`` cover the media entries only; a root
+    entry that is not media (see ``has_media``) that still has a row (an owner pin, or an old row
+    the next sync drops) is listed under ``non_media`` so nothing is hidden."""
     if status is not None and status not in STATUSES:
         raise _bad("Unknown status filter", allowed=list(STATUSES))
     rows = load(store.db, library)
-    keys = [r["rel_path"] for r in ManifestRepo(store.db).titles(library)]
+    manifest = ManifestRepo(store.db).titles(library)    # identities of absent or pruned titles stay out of sight
+    media = _media_titles(store, manifest)
+    keys = sorted(media)
     counts = {s: 0 for s in STATUSES}
     for key in keys:
         if key in rows:
             counts[rows[key]["status"]] += 1
-    present = set(keys)         # identities of absent or pruned titles stay out of sight
-    listed = [{"title": k, **v} for k, v in sorted(rows.items())
-              if k in present and (status is None or v["status"] == status)]
+
+    def listing(wanted):
+        return [{"title": k, **v} for k, v in sorted(rows.items())
+                if k in wanted and (status is None or v["status"] == status)]
+    listed = listing(media)
+    other = listing({r["rel_path"] for r in manifest} - media)
     out = {"library": library, "counts": {k: v for k, v in counts.items() if v},
-           "unrecorded": sum(1 for k in keys if k not in rows), "titles": listed[:MAX_LISTED]}
+           "unrecorded": sum(1 for k in keys if k not in rows), "titles": listed[:MAX_LISTED],
+           "non_media": other[:MAX_LISTED]}
     if len(listed) > MAX_LISTED:
         out["titles_truncated"] = len(listed) - MAX_LISTED
+    if len(other) > MAX_LISTED:
+        out["non_media_truncated"] = len(other) - MAX_LISTED
     return out
 
 
@@ -537,12 +805,13 @@ def retain_reasons(key: str, identities: dict[str, dict], retain) -> list[str]:
 def retain_check(store, library: str, retain) -> dict:
     """What a retain list would protect in this library. Read-only."""
     keys = _manifest_titles(store, library)
+    media = _media_titles(store, ManifestRepo(store.db).titles(library))
     rows = load(store.db, library)
     retained, possible, unidentified, bound = [], [], 0, set()
     for key in keys:
         row = rows.get(key)
         if row is None or row["status"] not in IDENTIFIED:
-            unidentified += 1
+            unidentified += key in media
         elif row["anilist_id"] in retain:
             bound.add(row["anilist_id"])
             retained.append({"title": key, "anilist_id": row["anilist_id"], "source": row["source"]})

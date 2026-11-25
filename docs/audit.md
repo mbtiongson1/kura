@@ -128,7 +128,7 @@ else `review` when it has any `warn` or `action` flag, else `none`.
 | `seadex_no_public_pick` | info | a SeaDex entry exists but no best pick is public (private trackers) |
 | `seadex_best_outside_band` | info | efficient title; every public best with a known size is outside 120 to 450 MB |
 | `size_above_band`, `size_below_band` | warn | efficient title with a resolved or pinned identity; median episode size outside the band (an unidentified title might be archival, so it is not judged) |
-| `identity_unknown` | info, warn under `--retain` | no resolved or pinned identity (not for `not_anime`) |
+| `identity_unknown` | info, warn under `--retain` | no resolved or pinned identity (not for `not_anime`, nor for a root entry that is not media: a loose non-video file, or a folder with files but no video) |
 | `probe_missing` | info | the title has video files and no usable probe result |
 | `unsupported_container` | info | a sampled file is not Matroska |
 | `retained` | info | on the retain list (`detail.reason` is `retained` or `retain_possible`) |

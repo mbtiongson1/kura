@@ -4,7 +4,9 @@
 episode, version, season, resolution, codec, bit depth, source, CRC and an extras flag. Every field
 that cannot be read is ``None``. It is deliberately forgiving and therefore sometimes wrong:
 its output feeds audit statistics and flags, and must never decide which torrent or title a
-file is (acquisition identity stays exact, see ``match`` and ``manifest``).
+file is (acquisition identity stays exact, see ``match`` and ``manifest``). ``series`` is the one
+other consumer: ``identity`` reads it as a second opinion on a folder name, and only when every
+video file of the title agrees.
 
 Pure: no I/O, no state, no network.
 """
@@ -24,10 +26,11 @@ _TAGLIKE = re.compile(
     r"hi10p?|10-?bits?|8-?bits?|bd|bdrip|blu-?ray|remux|web|webrip|web-?dl|dl|rip|tv|hdtv|dvd|"
     r"multi-?subs?|ddp?\d?|truehd|atmos|h|ray|audio|subs?|batch|[0-9a-f]{8})", re.I)
 _VER = r"(?:v(\d{1,2}))?"
+DASH_EPISODE = re.compile(r"\s-\s(\d{1,3})" + _VER + r"(?![0-9A-Za-z]|-[0-9])")    # "Show - 05"
 _EPISODES = (
     re.compile(r"(?<![A-Za-z0-9])S\d{1,2}E(\d{1,4})" + _VER + r"(?![A-Za-z0-9])", re.I),
     re.compile(r"(?<![A-Za-z0-9])EP?\.?\s?(\d{1,4})" + _VER + r"(?![A-Za-z0-9])", re.I),
-    re.compile(r"\s-\s(\d{1,3})" + _VER + r"(?![0-9A-Za-z]|-[0-9])"),
+    DASH_EPISODE,
     re.compile(r"(?<![A-Za-z0-9.#])#?(\d{2,3})v(\d{1,2})(?![A-Za-z0-9])", re.I),
     re.compile(r"#(\d{1,4})" + _VER + r"(?![A-Za-z0-9])"),
 )
@@ -89,6 +92,20 @@ def _episode(stem: str):
             version = int(m.group(2)) if m.group(2) else None
             return int(m.group(1)), version
     return None, None
+
+
+def series(name: str) -> str | None:
+    """The text before the episode marker of a release name (path allowed), or None when no
+    episode marker is found. Same episode patterns as ``parse``; season tokens and the scene
+    style dots stay in the text for the caller (``resolve._name`` reduces it to a title)."""
+    stem = _EXT.sub("", name.replace("\\", "/").rsplit("/", 1)[-1])
+    text = _NOISE.sub(" ", _BRACKETS.sub(" ", stem))
+    for pattern in _EPISODES:
+        m = pattern.search(text)
+        if m:
+            head = text[:m.start()].strip(" \t-")
+            return head or None
+    return None
 
 
 def parse(name: str) -> dict:

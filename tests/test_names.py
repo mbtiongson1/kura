@@ -88,6 +88,20 @@ class Tokens(unittest.TestCase):
     def test_path_and_backslashes_use_the_last_component(self):
         self.assertEqual(names.parse("Season 1\\[Example Subs] Show - 02.mkv")["group"], "Example Subs")
 
+    def test_series_is_the_text_before_the_episode_marker(self):
+        for name, head in (("[ASW] Kura Show! - 04 [1080p HEVC][A7801AD7].mkv", "Kura Show!"),
+                           ("[Lazy] Kura Show - 01v2 (1080p).mkv", "Kura Show"),
+                           ("[G] Kura Show S3 - 12 [1080p].mkv", "Kura Show S3"),
+                           ("Kura.Show.S02E05.1080p.WEB.x265-Grp.mkv", "Kura.Show."),
+                           ("Season 1/[G] Kura Show - S01E05.mkv", "Kura Show"),
+                           ("[G] Kura Show - 100 [720p].mkv", "Kura Show"),
+                           ("[G] 86 - Eighty Six - 03.mkv", "86 - Eighty Six")):
+            with self.subTest(name=name):
+                self.assertEqual(names.series(name), head)
+        for name in ("Kura Show.mkv", "[G] [1080p].mkv", "- 01.mkv", ""):
+            with self.subTest(name=name):
+                self.assertIsNone(names.series(name))
+
     def test_pure_and_repeatable(self):
         name = "[Example Subs] Show - 02 [720p].mkv"
         self.assertEqual(names.parse(name), names.parse(name))
