@@ -368,6 +368,57 @@ class Build(unittest.TestCase):
             with self.assertRaises(KuraError):
                 manifest.build(self.lab.store, **args)
 
+    def test_removed_torrent_stops_covering_but_keeps_protecting(self):
+        self.lab.build()
+        (self.lab.torrents / "Kura Sample Series.torrent").unlink()
+        (self.lab.torrents / "Kura Private Show.torrent").unlink()
+        self.lab.build()
+        gone = self.lab.status("Kura Sample Series")
+        self.assertEqual((gone["status"], gone["reasons"]), ("unmatched", ["no_torrent_linked"]))
+        self.assertEqual(self.lab.status("Kura Private Show")["status"], "protected")
+
+    def test_ambiguity_after_a_clean_build_supersedes_the_old_link(self):
+        self.lab.build()
+        self.lab.add("Kura Sample Series", GOOD, torrent=False, where=self.lab.lib / "Kura Elsewhere")
+        self.lab.build()
+        self.assertEqual(self.lab.status("Kura Sample Series")["status"], "unmatched")
+
+    def test_policy_change_without_reprocessing_is_never_reacquirable(self):
+        self.lab.build()
+        self.lab.deny.write_text("tracker.example\n")
+        self.lab.build(should_stop=lambda: True)               # re-assessed, torrents untouched
+        row = self.lab.status("Kura Sample Series")
+        self.assertEqual((row["status"], row["reasons"]), ("unverified", ["not_reclassified"]))
+        self.lab.build()                                       # now classified under the new policy
+        row = self.lab.status("Kura Sample Series")
+        self.assertEqual(row["status"], "protected")
+        self.assertIn("tracker_denylist", row["reasons"])
+
+    def test_duplicate_descriptor_with_denylisted_tracker_protects_the_torrent(self):
+        mirror = torrentgen.build("Kura Sample Series", GOOD, announce="http://tracker.blocked.example/announce")
+        self.assertEqual(mirror.infohash, self.public.infohash)  # announce data is outside the infohash
+        (self.lab.torrents / "a mirror.torrent").write_bytes(mirror.data)   # sorts after the public copy
+        (self.lab.torrents / "Kura Sample Series (copy).torrent").write_bytes(mirror.data)
+        out = self.lab.build()
+        self.assertEqual(out["torrents"]["duplicates"], 2)
+        row = self.lab.status("Kura Sample Series")
+        self.assertEqual(row["status"], "protected")
+        self.assertIn("tracker_denylist", row["reasons"])
+        stored = ManifestRepo(self.lab.store.db).torrent(self.public.infohash)
+        self.assertIsNone(stored["magnet"])
+        self.assertIsNone(stored["info"])
+
+    def test_only_a_complete_torrent_makes_its_files_reacquirable(self):
+        pack = self.lab.add("Kura Pad Pack", GOOD, pad=True)
+        (self.lab.lib / "Kura Pad Pack" / "ep02.mkv").unlink()    # title now holds ep01 only
+        self.lab.build()
+        row = self.lab.status("Kura Pad Pack")
+        self.assertEqual(row["torrents"][0]["verdict"], "partial")
+        self.assertEqual(row["coverage"]["verified"], 0)
+        self.assertEqual(row["status"], "partial")
+        self.assertEqual(row["reasons"], ["torrent_incomplete"])
+        self.assertEqual(pack.infohash, row["torrents"][0]["infohash"])
+
 
 class Identity_(unittest.TestCase):
     def setUp(self):
@@ -410,7 +461,7 @@ class TitleStatus(unittest.TestCase):
         return {"blocked": [], "identity": {"assessment": {**assessment, **identity}}}
 
     def test_unreadable_protection_record_fails_closed(self):
-        link = {"infohash": "a" * 40, "mapping": {"0": ["T", "f"]}}
+        link = {"infohash": "a" * 40, "strategy": "root_dir", "mapping": {"0": ["T", "f"]}}
         files = [{"rel_path": "T/f", "size": 1, "mtime_ns": 1, "dev": 1, "ino": 1}]
         for torrents in ({}, {"a" * 40: {"protection": {}, "private": False}},
                          {"a" * 40: {"protection": {"protected": False}, "private": None}}):
@@ -418,14 +469,17 @@ class TitleStatus(unittest.TestCase):
             self.assertEqual((got["status"], got["reasons"]), ("protected", ["protection_unknown"]))
 
     def test_missing_assessment_cannot_be_reacquirable(self):
-        link = {"infohash": "a" * 40, "mapping": {"0": ["T", "f"]}}
+        link = {"infohash": "a" * 40, "strategy": "root_dir", "mapping": {"0": ["T", "f"]}}
         files = [{"rel_path": "T/f", "size": 1, "mtime_ns": 1, "dev": 1, "ino": 1}]
         verification = {"verdict": "complete", "files": [
             {"index": 0, "local": "T/f", "status": "verified",
              "evidence": {"size": 1, "mtime_ns": 1, "dev": 1, "ino": 1}}]}
-        torrent = {"protection": {"protected": False, "reasons": []}, "private": False}
+        torrent = {"protection": {"protected": False, "reasons": [], "policy_sha256": "x"}, "private": False}
         title = {"blocked": [], "identity": None}
         got = manifest.title_status(title, files, [link], {"a" * 40: verification}, {"a" * 40: torrent})
+        self.assertEqual((got["status"], got["reasons"]), ("unverified", ["not_reclassified"]))
+        got = manifest.title_status(self.base(policy_complete=False), files, [link], {"a" * 40: verification},
+                                    {"a" * 40: torrent})
         self.assertEqual((got["status"], got["reasons"]), ("unverified", ["policy_incomplete"]))
         got = manifest.title_status(self.base(), files, [link], {"a" * 40: verification}, {"a" * 40: torrent})
         self.assertEqual(got["status"], "reacquirable")
@@ -433,9 +487,9 @@ class TitleStatus(unittest.TestCase):
         self.assertEqual((got["status"], got["reasons"]), ("unverified", ["not_verified"]))
 
     def test_incomplete_verification_is_never_reacquirable(self):
-        link = {"infohash": "a" * 40, "mapping": {"0": ["T", "f"]}}
+        link = {"infohash": "a" * 40, "strategy": "root_dir", "mapping": {"0": ["T", "f"]}}
         files = [{"rel_path": "T/f", "size": 1, "mtime_ns": 1, "dev": 1, "ino": 1}]
-        torrent = {"protection": {"protected": False, "reasons": []}, "private": False}
+        torrent = {"protection": {"protected": False, "reasons": [], "policy_sha256": "x"}, "private": False}
         verification = {"verdict": "interrupted", "files": [
             {"index": 0, "local": "T/f", "status": "unverified", "evidence": None}]}
         got = manifest.title_status(self.base(), files, [link], {"a" * 40: verification}, {"a" * 40: torrent})

@@ -157,7 +157,7 @@ status from the database alone:
 
 | status | meaning |
 | --- | --- |
-| `reacquirable` | every file is listed by a linked torrent and verified, nothing protected, both policy lists supplied |
+| `reacquirable` | every file is listed by a linked torrent whose files all verified (a `complete` verification), nothing protected, both policy lists supplied |
 | `partial` | some files verified; others failed, are unverified, or no torrent lists them (`uncovered_files`) |
 | `unverified` | linked but nothing verified (not yet read, budget spent, mismatching bytes, or policy lists missing) |
 | `unmatched` | no torrent linked |
@@ -174,7 +174,11 @@ credential-free trackers. `manifest build` needs both policy files; an absent fi
 the status cannot reach `reacquirable`. Policy files: `#` comments; denylist lines are
 tracker hosts (matching subdomains) or `source:TAG`; protected-list lines are 40-hex
 infohashes or `path:relative/prefix`. Descriptors that cannot be parsed are reported in
-`skipped` and never linked.
+`skipped` and never linked. Several descriptors of one infohash are merged conservatively
+(protected if any copy is). A link the latest scan no longer produces (torrent removed,
+now ambiguous) stops counting toward coverage but keeps protecting; a torrent whose
+protection was classified under a different policy than the title's last assessment is
+`unverified` until the next build reprocesses it.
 
 ## Storage, interruption and status
 Default state: `~/.local/share/kura/state.sqlite3` (preferences, receipts, audit events

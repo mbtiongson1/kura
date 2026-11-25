@@ -33,7 +33,13 @@ Title status (first rule that applies wins)
   unverified     linked but nothing verified, or the policy lists were not both supplied
   partial        some files verified, but others failed, were not verified, or no torrent
                  covers them (``uncovered_files``)
-  reacquirable   every file is covered by a linked torrent AND verified, nothing protected
+  reacquirable   every file is covered by a linked torrent whose verification is
+                 ``complete`` and verifies it, nothing protected, policy lists supplied
+
+A link the latest build no longer produces is rewritten as ``superseded`` (no mapping): it
+keeps protecting but covers nothing. A torrent classified under a policy other than the
+title's last assessment makes the title ``unverified`` (``not_reclassified``) until the
+next build reprocesses it.
 
 Reasons are short fixed tokens. ``uncovered_files`` means the title has files that no
 matched torrent lists (extra files); such a title is never reacquirable.
@@ -51,11 +57,12 @@ from .inventory import scan as scan_inventory
 from .match import match_many
 from .models import KuraError
 from .pieceverify import verify_tree
-from .protect import ProtectionPolicy, classify, magnet
+from .protect import Protection, ProtectionPolicy, classify, magnet
 from .torrent import decode
 from .torrentmeta import MAX_DESCRIPTOR, TorrentMeta, parse, release_group
 
 STATUSES = ("reacquirable", "protected", "partial", "unverified", "unmatched", "blocked", "stale")
+SUPERSEDED = "superseded"   # link strategy: no longer matched; keeps protection only
 CONCLUSIVE = ("complete", "partial", "failed")   # verdicts that a re-run would only repeat
 MAX_LISTED = 100
 _LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
@@ -235,16 +242,21 @@ def title_status(title: dict, files: list[dict], links: list[dict],
 
     if blocked:
         return result("blocked", ["blocked:" + b.split(":", 1)[0] for b in blocked])
+    active = [link for link in links if link["strategy"] != SUPERSEDED]
     if not files:
         return result("unmatched", ["no_files"])
-    if not links:
+    if not active:
         return result("unmatched", ["no_torrent_linked"])
+    for link in active:   # a classification made under another policy proves nothing now
+        if torrents[link["infohash"]]["protection"].get("policy_sha256") != assessment.get("policy_sha256"):
+            return result("unverified", ["not_reclassified"])
 
     current = _current(files)
-    best: dict[str, str] = {}      # mapped path -> best status any linked verification gave it
+    best: dict[str, str] = {}      # mapped path -> "verified" only via a complete verification
     covered: set[str] = set()
     reasons: list[str] = []
-    for link in links:
+    any_verified = False
+    for link in active:
         covered |= _link_paths(link)
         verification = verifications.get(link["infohash"])
         if verification is None:
@@ -252,12 +264,18 @@ def title_status(title: dict, files: list[dict], links: list[dict],
             continue
         if not evidence_current(verification["files"], current):
             return result("stale", ["evidence_changed"])
-        if verification["verdict"] in ("interrupted", "budget_exhausted"):
+        verdict = verification["verdict"]
+        if verdict in ("interrupted", "budget_exhausted"):
             reasons.append("verification_incomplete")
         for f in verification["files"]:
             local, state = f.get("local"), f.get("status")
-            if local is not None and best.get(local) != "verified":
-                best[local] = state
+            if local is None or best.get(local) == "verified":
+                continue
+            if state == "verified":
+                any_verified = True
+                # Only a torrent whose every file verified proves its data is re-downloadable.
+                state = "verified" if verdict == "complete" else "torrent_incomplete"
+            best[local] = state
     covered &= paths
     verified = {p for p in covered if best.get(p) == "verified"}
     uncovered = paths - covered
@@ -270,7 +288,7 @@ def title_status(title: dict, files: list[dict], links: list[dict],
         if assessment.get("policy_complete") is not True:
             return result("unverified", ["policy_incomplete"])
         return result("reacquirable", [])
-    return result("partial" if verified else "unverified", reasons)
+    return result("partial" if any_verified else "unverified", reasons)
 
 
 # ---- build -----------------------------------------------------------------------------
@@ -381,17 +399,23 @@ def build(store, *, roots: dict[str, Path], library: str, torrents_dir: Path,
                     reason = "unparsable"
             if reason is not None:
                 skipped.append({"file": name, "reason": reason})
-            elif meta.infohash in parsed:
+                continue
+            try:
+                protection = classify(meta, policy)
+            except Exception:
+                skipped.append({"file": name, "reason": "unclassifiable"})
+                continue
+            if meta.infohash in parsed:
+                # Announce data is outside the infohash: another copy of the same torrent can
+                # carry a denylisted tracker. Keep the first descriptor, merge protection.
                 duplicates += 1
+                first, kept = parsed[meta.infohash]
+                protection = Protection(
+                    kept.protected or protection.protected,
+                    tuple(dict.fromkeys((*kept.reasons, *protection.reasons))))
+                parsed[meta.infohash] = (first, protection)
             else:
-                try:
-                    protection = classify(meta, policy)
-                except Exception:
-                    protection = None
-                if protection is None:
-                    skipped.append({"file": name, "reason": "unclassifiable"})
-                else:
-                    parsed[meta.infohash] = (meta, protection)
+                parsed[meta.infohash] = (meta, protection)
 
         # 2. Inventory every root (metadata only) and match.
         invs = {label: scan_inventory(Path(path), label) for label, path in roots.items()}
@@ -425,6 +449,13 @@ def build(store, *, roots: dict[str, Path], library: str, torrents_dir: Path,
         by_torrent: dict[str, list] = {}
         for m in matches:
             by_torrent.setdefault(m.infohash, []).append(m)
+        # A link that this scan no longer produces (torrent removed, now ambiguous, title
+        # renamed) stops counting toward coverage; it still counts toward protection.
+        current = {(ids[f"{m.root}/{m.title_rel}"], m.infohash) for m in matches}
+        for title_id in ids.values():
+            for link in repo.links(title_id):
+                if (title_id, link["infohash"]) not in current and link["strategy"] != SUPERSEDED:
+                    repo.link(title_id, link["infohash"], SUPERSEDED, {})
         left = max_read_bytes
         stats = {"run": 0, "cached": 0, "deferred": 0, "skipped_protected": 0, "bytes_read": 0}
         interrupted = False
