@@ -175,6 +175,7 @@ def fetch_list(req: Requester, *, user_id: int | None, user_name: str | None, au
     user = None
     for chunk in range(1, MAX_CHUNKS + 1):
         variables = {"chunk": chunk, "perChunk": CHUNK_SIZE}
+        # The first chunk may be looked up by name; later ones pin the owner it returned.
         variables.update({"userId": user_id} if user_id is not None else {"userName": user_name})
         collection = req.call(LIST_QUERY, variables, auth=auth).get("MediaListCollection")
         if not isinstance(collection, dict):
@@ -183,7 +184,10 @@ def fetch_list(req: Requester, *, user_id: int | None, user_name: str | None, au
         owner_name = clean(owner.get("name"))
         if not valid_id(owner.get("id")) or not owner_name or (user_id is not None and owner["id"] != user_id):
             raise KuraError("anilist_invalid_response", "AniList returned a list for an unexpected user")
+        if user is not None and owner["id"] != user["id"]:
+            raise KuraError("anilist_invalid_response", "AniList returned lists for different users")
         user = {"id": owner["id"], "name": owner_name}
+        user_id = owner["id"]
         lists, more = collection.get("lists"), collection.get("hasNextChunk")
         if not isinstance(lists, list) or not isinstance(more, bool):    # never replace a snapshot with a partial one
             raise KuraError("anilist_invalid_response", "AniList returned an incomplete list")
@@ -472,13 +476,18 @@ def media_sync(store, ani, *, ids=None, library=None, missing=False, max_request
         if not isinstance(items, list):
             error = "anilist_invalid_response"
             break
-        rows = [m for m in (parse_media(i) for i in items) if m and m["anilist_id"] in batch]
+        rows = [parse_media(i) for i in items]
+        if any(m is None or m["anilist_id"] not in batch for m in rows):
+            error = "anilist_invalid_response"      # unreadable or unexpected items are not proof of absence
+            break
         with db:
             upsert_media(db, rows, now)
         got = {r["anilist_id"] for r in rows}
         fetched += len(got)
         absent += [i for i in batch if i not in got]
         pending = pending[len(batch):]
+    if error is not None and fetched == 0 and not absent:
+        raise KuraError(error, "AniList returned unreadable media data", requests=req.info())
     return {"requested": len(wanted), "fetched": fetched, "not_found": absent[:100],
             "remaining": len(pending), "complete": error is None, "error": error,
             "requests": req.info(), "rate_limit": _limiter_state(ani), "warnings": []}

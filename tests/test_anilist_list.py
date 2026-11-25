@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from anilistfake import BASE_ID, CLIENT_ID, VIEWER, FakeAniList, entry, http_error, make_token, tokens_in
+from anilistfake import media as media_row, BASE_ID, CLIENT_ID, VIEWER, FakeAniList, entry, http_error, make_token, tokens_in
 from kura import anilist_auth, anilist_list
 from kura.anilist import AniList
 from kura.models import KuraError
@@ -201,6 +201,28 @@ class ListSync(Lab):
         self.assertNotIn("userId", self.fake.calls[-2]["variables"])
         self.assertEqual(out["user"]["id"], BASE_ID + 801)
         self.assertEqual(self.sync(user_name="RenamedKura")["user"]["id"], BASE_ID + 801)
+
+    def test_chunks_must_belong_to_one_owner_and_later_chunks_pin_the_id(self):
+        self.fake.per_chunk = 2
+        self.sync()
+        chunks = [c["variables"] for c in self.fake.calls if "MediaListCollection" in c["query"]]
+        self.assertEqual([("userId" in v, "userName" in v) for v in chunks], [(True, False)] * 3)
+        anilist_auth.remove(self.root)
+        self.fake.viewer = {"id": BASE_ID + 810, "name": "PublicKura"}
+        original = self.fake.respond
+
+        def respond(query, variables):
+            data = original(query, variables)
+            if "MediaListCollection" in query and variables["chunk"] == 2:
+                data["MediaListCollection"]["user"] = {"id": BASE_ID + 811, "name": "Someone Else"}
+            return data
+        self.fake.respond = respond
+        with self.assertRaises(KuraError) as cm:
+            self.sync(user_name="PublicKura")
+        self.assertEqual(cm.exception.code, "anilist_invalid_response")
+        public = [c["variables"] for c in self.fake.calls if "userName" in c["variables"]]
+        self.assertEqual(len(public), 1)                                # chunk 2 already pinned the ID
+        self.assertEqual(self.rows("SELECT COUNT(*) FROM anilist_list_entries WHERE user_id=?", BASE_ID + 810)[0][0], 0)
 
     def test_partial_failure_keeps_the_old_snapshot_and_reports_stale(self):
         self.fake.per_chunk = 3
@@ -419,6 +441,14 @@ class MediaSync(Lab):
         out = anilist_list.media_sync(self.store, self.ani(), ids=ids, max_requests=2)
         self.assertEqual((out["fetched"], out["remaining"], out["complete"], out["error"]),
                          (100, 20, False, "anilist_budget_exhausted"))
+
+    def test_unreadable_media_items_are_not_reported_as_not_found(self):
+        ids = [BASE_ID + 1, BASE_ID + 2]
+        original = self.fake.respond
+        self.fake.respond = lambda q, v: {"Page": {"media": [media_row(ids[0]), None]}} if "id_in" in q else original(q, v)
+        with self.assertRaises(KuraError):
+            anilist_list.media_sync(self.store, self.ani(), ids=ids)
+        self.assertEqual(self.rows("SELECT COUNT(*) FROM anilist_media")[0][0], 0)
 
     def test_id_arguments_are_validated(self):
         for kw in ({"ids": [0]}, {"ids": [10**9]}, {}, {"ids": [1], "library": "x"}):
