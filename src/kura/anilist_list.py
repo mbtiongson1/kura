@@ -195,7 +195,9 @@ def fetch_list(req: Requester, *, user_id: int | None, user_name: str | None, au
         for group in sorted(lists, key=lambda g: g.get("isCustomList") is True):
             for item in group["entries"]:
                 parsed = parse_entry(item)
-                if parsed is None or parsed[0]["anilist_id"] in entries:
+                if parsed is None:          # never replace a snapshot with a response we could not fully read
+                    raise KuraError("anilist_invalid_response", "AniList returned an unreadable list entry")
+                if parsed[0]["anilist_id"] in entries:
                     continue
                 entries[parsed[0]["anilist_id"]] = parsed[0]
                 if parsed[1]:

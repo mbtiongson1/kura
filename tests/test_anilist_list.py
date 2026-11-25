@@ -270,15 +270,23 @@ class ListSync(Lab):
                 self.sync(**kw)
             self.assertEqual(cm.exception.code, "invalid_arguments")
 
-    def test_hostile_values_are_dropped_not_stored(self):
-        bad = entry(IDS[5], "WATCHING")                       # not an AniList status
+    def test_hostile_values_are_sanitized_not_stored(self):
         weird = entry(IDS[6], "PAUSED", score=99)
         weird["media"]["title"]["romaji"] = "x" * 500
         weird["media"]["format"] = "tv; DROP"
-        self.fake.entries = [bad, weird]
+        self.fake.entries = [weird]
         self.sync()
         self.assertEqual(self.rows("SELECT anilist_id, score FROM anilist_list_entries"), [(IDS[6], None)])
         self.assertEqual(self.rows("SELECT title_romaji, format FROM anilist_media"), [(None, None)])
+
+    def test_an_unreadable_entry_keeps_the_previous_snapshot(self):
+        self.sync()
+        before = self.rows("SELECT * FROM anilist_list_entries ORDER BY 1")
+        for bad in (entry(IDS[5], "WATCHING"), {**entry(IDS[5]), "mediaId": None}):
+            self.fake.entries = [bad]
+            out = self.sync(refresh=True)
+            self.assertEqual((out["stale"], out["error"]), (True, "anilist_invalid_response"))
+        self.assertEqual(self.rows("SELECT * FROM anilist_list_entries ORDER BY 1"), before)
 
 
 class MediaSync(Lab):
