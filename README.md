@@ -193,7 +193,7 @@ entry of `preconditions` (same device for source and destination, `tree_sha256` 
 fresh re-inventory, destination absent, a rename that never replaces, swarm checked again
 right before the move). A title is proposed only if it is `reacquirable`, its policy lists
 were complete, its inventory is at most 24 hours old, nothing inside it changed for 14
-days, it was assessed under the same policy as the newest build, and every linked torrent has a recent stored swarm check with at least 3 seeders.
+days, it was assessed under the same policy as the newest build, and every linked torrent has a recent stored swarm check with at least 3 seeders (3 is also the floor for `--min-seeders`).
 Swarm data has no collector yet, so until it exists the plan needs `--skip-swarm`, which is
 recorded as `swarm_unchecked` in the plan and on every move. Every other title appears in
 `refused` with fixed reason tokens. Each move goes to `.kura-quarantine/<batch_id>/<title>`

@@ -47,6 +47,7 @@ QUARANTINE_DIR = ".kura-quarantine"   # the only name the inventory scanner skip
 SUPERSEDED = "superseded"
 DAY = 86400
 MAX_REFUSED = 200
+MIN_SEEDERS = 3            # founder decision: floor at plan time and again before the move
 MIN_QUARANTINE_DAYS = 30   # founder decision: never purge earlier
 MAX_TITLES = 10_000
 NOTICE = ("Proposal only. Kura never moves, renames, deletes or purges anything: the owner's "
@@ -106,7 +107,7 @@ def check_args(library, titles, quarantine_dir, min_seeders, max_inventory_age_h
         if (not isinstance(titles, list) or len(titles) > MAX_TITLES
                 or not all(isinstance(t, str) for t in titles)):
             raise _bad("Titles must be a list of title keys")
-    for name, value, low in (("min_seeders", min_seeders, 1), ("min_quiet_days", min_quiet_days, 0),
+    for name, value, low in (("min_seeders", min_seeders, MIN_SEEDERS), ("min_quiet_days", min_quiet_days, 0),
                              ("max_inventory_age_h", max_inventory_age_h, 0),
                              ("quarantine_days", quarantine_days, MIN_QUARANTINE_DAYS),
                              ("max_swarm_age_h", max_swarm_age_h, 0)):
@@ -232,8 +233,7 @@ def _document(library, moves, refused, created_at, quarantine_dir, skip_swarm, p
               quarantine_days, policy_sha256) -> dict:
     refused_total = len(refused)
     preconditions = list(PRECONDITIONS)
-    preconditions.append("swarm_unchecked_recheck_before_move" if skip_swarm
-                         else f"swarm_recheck_at_least_{parameters['min_seeders']}_seeders_before_move")
+    preconditions.append(f"swarm_recheck_at_least_{parameters['min_seeders']}_seeders_before_move")
     if skip_swarm:
         preconditions.append("swarm_unchecked")
     body = {

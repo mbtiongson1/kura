@@ -379,6 +379,7 @@ class Swarm(Base):
         doc = self.plan(skip_swarm=True)
         self.assertEqual((doc["moves"][0]["swarm"], doc["moves"][0]["seeders"]), ("unchecked", None))
         self.assertIn("swarm_unchecked", doc["preconditions"])
+        self.assertIn("swarm_recheck_at_least_3_seeders_before_move", doc["preconditions"])
         self.assertTrue(doc["parameters"]["skip_swarm"])
         self.assertEqual(self.repo.plan(doc["plan_hash"])["plan"]["moves"][0]["swarm"], "unchecked")
 
@@ -397,7 +398,7 @@ class Arguments(Base):
             self.assertEqual(caught.exception.code, "invalid_arguments")
 
     def test_bad_numbers_and_titles(self):
-        for kw in ({"min_seeders": 0}, {"min_seeders": -1}, {"min_seeders": True},
+        for kw in ({"min_seeders": 0}, {"min_seeders": 2}, {"min_seeders": -1}, {"min_seeders": True},
                    {"min_seeders": 2.5}, {"min_seeders": "3"}, {"min_quiet_days": -1},
                    {"min_quiet_days": float("nan")}, {"max_inventory_age_h": -1},
                    {"quarantine_days": 0}, {"quarantine_days": 29.9}, {"titles": "main/Kura Good"}, {"titles": [1]},
@@ -465,6 +466,7 @@ class CommandLine(Base):
         self.assertEqual([m["from"] for m in out["data"]["plan"]["moves"]], ["Kura Fresh"])
         for extra, expected in ((["--quarantine-dir", "elsewhere"], "invalid_arguments"),
                                 (["--min-seeders", "0"], "invalid_arguments"),
+                                (["--min-seeders", "2"], "invalid_arguments"),
                                 (["--library", "never-built"], "not_found")):
             argv = ["manifest", "plan", "--library", "home", "--skip-swarm", *extra]
             code, out = self.cli(*argv)
