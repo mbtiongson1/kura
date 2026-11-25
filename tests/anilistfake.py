@@ -59,6 +59,9 @@ class FakeAniList:
         self.media_overrides: dict[int, dict] = {}
         self.missing_media: set[int] = set()
         self.bad_request_over = None            # media batches larger than this get HTTP 400
+        self.list_entries: dict[int, dict] = {}  # the viewer's entries as seen by Media.mediaListEntry
+        self.search_results: list[int] = []
+        self.saves: list[dict] = []
         self.headers = headers or {"X-RateLimit-Limit": "90", "X-RateLimit-Remaining": "89"}
 
     def __call__(self, query, variables, token=None, limit=None):
@@ -75,6 +78,30 @@ class FakeAniList:
         return sum(needle in c["query"] for c in self.calls)
 
     def respond(self, query, variables):
+        if "SaveMediaListEntry" in query:
+            self.saves.append(dict(variables))
+            identifier = variables["mediaId"]
+            row = dict(self.list_entries.get(identifier) or {"status": "PLANNING", "progress": 0, "score": 0,
+                                                              "repeat": 0})
+            for name, value in variables.items():
+                if name == "scoreRaw":
+                    row["score"] = value / 10
+                elif name != "mediaId":
+                    row[name] = value
+            self.list_entries[identifier] = row
+            return {"SaveMediaListEntry": {"id": 7, "userId": self.viewer["id"], "mediaId": identifier,
+                                           "updatedAt": 1_800_000_000, **row}}
+        if "mediaListEntry" in query:
+            identifier = variables["id"]
+            if identifier in self.missing_media:
+                raise http_error(404, "Not Found.")
+            item = dict(self.media_overrides.get(identifier, media(identifier)))
+            row = self.list_entries.get(identifier)
+            item["mediaListEntry"] = None if row is None else {
+                "id": 7, "userId": self.viewer["id"], "mediaId": identifier, "updatedAt": 1_700_000_000, **row}
+            return {"Media": item}
+        if "media(search" in query:
+            return {"Page": {"media": [self.media_overrides.get(i, media(i)) for i in self.search_results]}}
         if "Viewer" in query:
             return {"Viewer": {**self.viewer, "mediaListOptions": {"scoreFormat": "POINT_10_DECIMAL"}}}
         if "MediaListCollection" in query:

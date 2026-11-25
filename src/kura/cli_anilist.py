@@ -1,6 +1,6 @@
-"""`kura anilist`: login (PIN flow), whoami, logout, list, media, limits.
+"""`kura anilist`: login (PIN flow), whoami, logout, list, media, limits, update.
 
-Read-only against AniList. There is deliberately no `--token` option: the access token is typed
+Only `update` writes to AniList (one entry of the token owner's list, see anilist_update). There is deliberately no `--token` option: the access token is typed
 into a hidden prompt or piped on stdin, stored in a private file, and never printed.
 `login --print-url` is stateless (it never opens Kura's state).
 """
@@ -9,7 +9,7 @@ import sys
 import time
 import warnings
 
-from . import anilist_auth, anilist_list
+from . import anilist_auth, anilist_list, anilist_update
 from .anilist import AniList
 from .models import KuraError
 from .ratelimit import SharedLimiter
@@ -46,6 +46,16 @@ def register(sub, parser_class):
     q.add_argument("--missing", action="store_true", help="Only IDs not already stored")
     q.add_argument("--max-requests", type=int, default=10)
     leaf("limits")
+    q = leaf("update")
+    what = q.add_mutually_exclusive_group(required=True)
+    what.add_argument("--id", type=int, metavar="N", help="AniList media ID")
+    what.add_argument("--title", help="Title, matched against the stored list and media (never guessed)")
+    q.add_argument("--search", action="store_true", help="With --title: one online lookup if nothing stored matches")
+    q.add_argument("--progress", type=int, metavar="N", help="Episodes watched")
+    q.add_argument("--status", choices=anilist_list.STATUSES)
+    q.add_argument("--score", type=float, metavar="X", help="0..10, one decimal; 0 clears the score")
+    q.add_argument("--allow-decrease", action="store_true", help="Allow lowering progress")
+    q.add_argument("--dry-run", action="store_true", help="Read and plan only; write nothing")
 
 
 def _ani(store) -> AniList:
@@ -169,6 +179,18 @@ def _limits(args, open_store) -> dict:
         store.db.close()
 
 
+def _update(args, open_store) -> dict:
+    anilist_update.check_args(anilist_id=args.id, title=args.title, progress=args.progress,
+                              status=args.status, score=args.score)
+    store = open_store()
+    try:
+        return anilist_update.update(store, _ani(store), anilist_id=args.id, title=args.title, search=args.search,
+                                     progress=args.progress, status=args.status, score=args.score,
+                                     allow_decrease=args.allow_decrease, dry_run=args.dry_run)
+    finally:
+        store.db.close()
+
+
 def dispatch(args, open_store):
     """Return ``(True, data)`` for a command this module owns, else ``(False, None)``."""
     if args.command != "anilist":
@@ -183,4 +205,6 @@ def dispatch(args, open_store):
         return True, _list(args, open_store)
     if args.operation == "media":
         return True, _media(args, open_store)
+    if args.operation == "update":
+        return True, _update(args, open_store)
     return True, _limits(args, open_store)

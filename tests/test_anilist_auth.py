@@ -466,6 +466,24 @@ class EndToEnd(Cli):
         self.assertEqual(out["error"]["code"], "anilist_auth_invalid")
         self.assertNotIn(token, json.dumps(self.fake.calls[0]["variables"]))
 
+    def test_update_through_the_cli_writes_once_and_never_leaks_the_token(self):
+        token, _ = self.login()
+        from anilistfake import BASE_ID
+        self.fake.list_entries[BASE_ID + 1] = {"status": "CURRENT", "progress": 7, "score": 0, "repeat": 0}
+        self.fake.calls.clear()
+        code, out, _ = self.run_cli("anilist", "update", "--id", str(BASE_ID + 1), "--progress", "8", "--dry-run")
+        self.assertEqual((code, out["data"]["written"], out["data"]["change"]), (0, False, {"progress": 8}))
+        code, out, _ = self.run_cli("anilist", "update", "--id", str(BASE_ID + 1), "--progress", "8")
+        self.assertEqual((code, out["data"]["written"], out["data"]["after"]["progress"]), (0, True, 8))
+        self.assertEqual(self.fake.saves, [{"mediaId": BASE_ID + 1, "progress": 8}])
+        self.assertEqual([c["token"] for c in self.fake.calls], [token] * 3)
+        code, out, _ = self.run_cli("anilist", "update", "--id", str(BASE_ID + 1), "--progress", "7")
+        self.assertEqual((code, out["error"]["code"]), (2, "anilist_progress_decrease"))
+        code, out, _ = self.run_cli("anilist", "update", "--progress", "1")
+        self.assertEqual((code, out["error"]["code"]), (2, "invalid_arguments"))
+        code, out, _ = self.run_cli("anilist", "update", "--id", str(BASE_ID + 1))
+        self.assertEqual(out["error"]["code"], "invalid_arguments")
+
     def test_list_user_needs_no_login(self):
         code, out, _ = self.run_cli("anilist", "list", "--user", "KuraTester")
         self.assertEqual(code, 0)
