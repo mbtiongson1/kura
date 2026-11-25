@@ -223,6 +223,34 @@ class Budget(Lib):
         (status, result), = self.rows().values()
         self.assertEqual(status, "partial")                                    # per-file cut is a result
 
+    def test_per_file_cut_is_retried_with_a_larger_allowance(self):
+        self.write("Kura Big Show/Kura Big Show - 01 [1080p].mkv",
+                   mkvgen.build(attach=[("big.ttf", "font/ttf", 3 * (1 << 20))]))
+        self.inventory()
+        keys = {"titles": ["main/Kura Big Show"]}
+        self.assertEqual(self.probe(per_file_bytes=200, **keys)["probed"], 1)
+        again = self.probe(per_file_bytes=200, **keys)
+        self.assertEqual((again["cached"], again["probed"]), (0, 1))          # still cut, so still retried
+        full = self.probe(**keys)
+        self.assertEqual(full["probed"], 1)
+        self.assertEqual(self.probe(**keys)["cached"], 1)                      # complete result is cached
+        self.assertEqual(self.rows()["Kura Big Show/Kura Big Show - 01 [1080p].mkv"][0], "ok")
+
+    def test_bytes_read_before_a_read_error_are_charged(self):
+        real = os.pread
+        state = {"n": 0}
+
+        def flaky(fd, n, offset):
+            state["n"] += 1
+            if state["n"] > 3:
+                raise OSError(5, "Input/output error")
+            return real(fd, n, offset)
+
+        with patch("os.pread", flaky):
+            out = self.probe(titles=["main/Kura Loose Movie.mkv"])
+        self.assertEqual((out["probed"], out["failed"]), (0, {"io_error": 1}))
+        self.assertGreater(out["bytes_read"], 0)
+
     def test_should_stop_leaves_the_rest_pending(self):
         calls = iter([False, True])
         out = self.probe(should_stop=lambda: next(calls, True))
