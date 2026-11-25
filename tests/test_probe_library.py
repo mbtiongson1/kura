@@ -113,10 +113,21 @@ class Sampling(Lib):
 
     def test_probe_version_bump_invalidates_the_cache(self):
         self.probe()
-        with patch.object(mkvprobe, "PROBE_VERSION", 2):
+        version = mkvprobe.PROBE_VERSION
+        with patch.object(mkvprobe, "PROBE_VERSION", version + 1):
             out = self.probe()
         self.assertEqual((out["probed"], out["cached"]), (4, 0))
-        self.assertEqual({r[0] for r in self.store.db.execute("SELECT probe_version FROM probe_results")}, {2})
+        self.assertEqual({r[0] for r in self.store.db.execute("SELECT probe_version FROM probe_results")},
+                         {version + 1})
+
+    def test_results_stored_by_the_previous_probe_version_are_probed_again(self):
+        self.probe()
+        self.store.db.execute("UPDATE probe_results SET probe_version=?", (mkvprobe.PROBE_VERSION - 1,))
+        self.store.db.commit()
+        out = self.probe()
+        self.assertEqual((out["probed"], out["cached"]), (4, 0))
+        self.assertEqual({r[0] for r in self.store.db.execute("SELECT probe_version FROM probe_results")},
+                         {mkvprobe.PROBE_VERSION})
 
     def test_title_filter_and_unknown_title(self):
         out = self.probe(titles=["main/Kura Loose Movie.mkv"])

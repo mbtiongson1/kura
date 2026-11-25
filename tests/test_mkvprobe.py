@@ -275,7 +275,8 @@ class Facts(unittest.TestCase):
         self.assertEqual(run(mkvgen.build(avc_profile=110))[0]["video"]["profile"], "high10")
 
     def test_bitrate_from_tags_else_size_over_duration(self):
-        tagged = mkvgen.build(tag_values={1001: {"BPS": "4500000"}, 2000: {"BPS": "192000"}})
+        tagged = mkvgen.build(tag_values={1001: {"BPS": "4500000"}, 2000: {"BPS": "192000"}},
+                              attach=[("a.ttf", "font/ttf", 8 * MIB)], duration=10.0)
         video = run(tagged)[0]["video"]
         self.assertEqual((video["bitrate_kbps"], video["bitrate_source"]), (4500, "tags"))
         plain = mkvgen.build(attach=[("a.ttf", "font/ttf", 1_000_000)])
@@ -284,6 +285,78 @@ class Facts(unittest.TestCase):
         self.assertEqual(result["video"]["bitrate_kbps"], round(len(plain) * 8 / 1420.0 / 1000))
         junk = run(mkvgen.build(tag_values={1001: {"BPS": "²"}}))[0]["video"]       # isdigit() but not a number
         self.assertEqual(junk["bitrate_source"], "size_over_duration")
+
+    # -- statistics tags copied from a source stream ------------------------------------------
+
+    def tagged(self, video, audio=None, *, extra=None, **kw):
+        """A ~2 MiB, 8 s file: about 2100 kbps in total."""
+        values = {1001: {"BPS": str(video), **(extra or {})}}
+        if audio is not None:
+            values[2000] = {"BPS": str(audio)}
+        kw.setdefault("duration", 8.0)
+        return mkvgen.build(tag_values=values, attach=[("a.ttf", "font/ttf", 2 * MIB)], **kw)
+
+    def total_kbps(self, data, seconds=8.0):
+        return len(data) * 8 / seconds / 1000
+
+    def test_a_bps_tag_larger_than_the_file_allows_is_replaced(self):
+        data = self.tagged(8_000_000, 192_000)
+        result, _ = run(data)
+        video = result["video"]
+        self.assertEqual(video["bitrate_source"], "size_over_duration")
+        self.assertEqual(video["bitrate_kbps"], round(self.total_kbps(data) - 192))      # audio taken off
+        self.assertIn("stale_statistics_tags", result["warnings"])
+        self.assertEqual(result["status"], "ok")
+
+    def test_a_stale_tag_without_audio_tags_falls_back_to_the_whole_file_rate(self):
+        data = self.tagged(8_000_000)
+        result, _ = run(data)
+        self.assertEqual(result["video"]["bitrate_kbps"], round(self.total_kbps(data)))
+        self.assertIn("stale_statistics_tags", result["warnings"])
+
+    def test_an_implausible_audio_tag_is_not_subtracted(self):
+        data = self.tagged(8_000_000, 6_000_000)
+        result, _ = run(data)
+        self.assertEqual(result["video"]["bitrate_kbps"], round(self.total_kbps(data)))
+
+    def test_a_plausible_tag_is_kept(self):
+        result, _ = run(self.tagged(1_500_000, 192_000))
+        self.assertEqual((result["video"]["bitrate_kbps"], result["video"]["bitrate_source"]), (1500, "tags"))
+        self.assertEqual(set(result["warnings"]) & {"stale_statistics_tags", "bitrate_unverified"}, set())
+
+    def test_the_size_test_allows_two_percent_of_slack(self):
+        data = self.tagged(1_500_000)
+        total = self.total_kbps(data)
+        kept, _ = run(self.tagged(int(total * 1000 * 1.01)))
+        self.assertEqual(kept["video"]["bitrate_source"], "tags")
+        over, _ = run(self.tagged(int(total * 1000 * 1.05)))
+        self.assertEqual(over["video"]["bitrate_source"], "size_over_duration")
+
+    def test_a_tag_duration_far_from_the_segment_duration_is_stale(self):
+        result, _ = run(self.tagged(1_500_000, extra={"DURATION-eng": "00:00:20.000000000"}))
+        self.assertEqual(result["video"]["bitrate_source"], "size_over_duration")
+        self.assertIn("stale_statistics_tags", result["warnings"])
+        near, _ = run(self.tagged(1_500_000, extra={"DURATION-eng": "00:00:08.100000000"}))
+        self.assertEqual(near["video"]["bitrate_source"], "tags")
+
+    def test_a_statistics_writer_from_another_muxer_is_stale(self):
+        other, _ = run(self.tagged(1_500_000, extra={"_STATISTICS_WRITING_APP-eng": "Other Tool 3.2"}))
+        self.assertEqual(other["video"]["bitrate_source"], "size_over_duration")
+        self.assertIn("stale_statistics_tags", other["warnings"])
+        same, _ = run(self.tagged(1_500_000, extra={"_STATISTICS_WRITING_APP-eng": "Kura Writer 0.9"}))
+        self.assertEqual(same["video"]["bitrate_source"], "tags")        # same product, other version
+        self.assertNotIn("stale_statistics_tags", same["warnings"])
+
+    def test_without_a_duration_the_tag_is_kept_but_unverified(self):
+        result, _ = run(self.tagged(8_000_000, duration=None, default_duration=0))
+        self.assertEqual((result["video"]["bitrate_kbps"], result["video"]["bitrate_source"]), (8000, "tags"))
+        self.assertIn("bitrate_unverified", result["warnings"])
+        self.assertNotIn("stale_statistics_tags", result["warnings"])
+
+    def test_no_tag_and_no_duration_means_no_bitrate_and_no_warning(self):
+        result, _ = run(mkvgen.build(duration=None, default_duration=0))
+        self.assertIsNone(result["video"]["bitrate_kbps"])
+        self.assertNotIn("bitrate_unverified", result["warnings"])
 
     def test_duration_and_fps_fall_back_to_tags(self):
         data = mkvgen.build(duration=None, default_duration=0,
@@ -325,7 +398,8 @@ class Facts(unittest.TestCase):
                 self.assertEqual(result["duration_s"], 1420.0)
 
     def test_tags_are_found_through_the_seekhead_past_the_cluster(self):
-        data = mkvgen.build(tag_values={1001: {"BPS": "1234000"}}, attach=[("a.ttf", "font/ttf", 3 * MIB)])
+        data = mkvgen.build(tag_values={1001: {"BPS": "1234000"}}, attach=[("a.ttf", "font/ttf", 3 * MIB)],
+                            duration=10.0)
         result, src = run(data)
         self.assertEqual(result["video"]["bitrate_source"], "tags")
         self.assertLess(result["bytes_read"], MIB)
@@ -528,7 +602,7 @@ class Limits(unittest.TestCase):
     def test_the_module_is_pure(self):
         for name in ("os", "sys", "socket", "subprocess", "open", "io"):
             self.assertFalse(hasattr(mkvprobe, name), name)
-        self.assertEqual(mkvprobe.PROBE_VERSION, 1)
+        self.assertEqual(mkvprobe.PROBE_VERSION, 2)
 
 
 if __name__ == "__main__":

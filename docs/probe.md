@@ -66,7 +66,26 @@ tests assert never occurs). Only the caller's own `read` can raise.
 ```
 
 Every string is printable and at most 200 characters. `video` is null when the file has no
-enabled video track. `size_over_duration` is the whole file (audio included) over the duration.
+enabled video track.
+
+Video bitrate: a re-encoder's muxer can copy the `BPS` statistics tag unchanged from the source
+stream, so the tag is trusted only when it is plausible. With the file size and the duration known,
+`total_kbps = size x 8 / duration`. The tag is **stale** when any of these hold:
+
+- it exceeds `total_kbps x 1.02` (the primary test: the video cannot outrun the whole file);
+- the track's `_STATISTICS_WRITING_APP` names a different product (first word, case-insensitive,
+  version ignored) than both the segment's `writing_app` and `muxing_app`;
+- the track's `DURATION` tag differs from the segment duration by more than 2% (both must exist).
+
+A stale tag is replaced: `bitrate_kbps` is `total_kbps` minus the `BPS` of every audio track whose own
+tags pass the same tests, else `total_kbps` itself, with `bitrate_source: "size_over_duration"` and the
+warning `stale_statistics_tags`. Attachments and subtitles stay inside the estimate, so it is a slight
+over-estimate. A plain `size_over_duration` (no usable video tag) is whole file over duration. When the
+file size or duration is unknown, or the file was cut short, the tag cannot be checked: it is kept
+(`bitrate_source: "tags"`) and the result carries `bitrate_unverified`. With no tag and no duration the
+bitrate is null.
+
+`PROBE_VERSION` is 2 (stale-tag handling). Cached results of version 1 are probed again.
 Status meaning: `ok` complete; `partial` truncated file, budget or limit reached;
 `invalid` nothing usable parsed; `unsupported_container` an MP4 or anything that is not EBML.
 
