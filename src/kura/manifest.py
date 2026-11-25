@@ -664,7 +664,7 @@ def _protection_evidence(repo: ManifestRepo, title_id: int) -> bool:
             if (not isinstance(protection, dict) or not isinstance(protection.get("protected"), bool)
                     or protection["protected"] or row["private"]):
                 return True
-    except (ValueError, KeyError, TypeError):       # corrupt rows prove nothing: keep the title
+    except (ValueError, KeyError, TypeError, RecursionError):   # corrupt rows prove nothing: keep the title
         return True
     return False
 

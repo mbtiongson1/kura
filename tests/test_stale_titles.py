@@ -367,6 +367,19 @@ class Prune(Base):
         self.assertEqual(anilist_list.media_ids(self.db, [], "home", False), [])
         self.assertEqual(seadex.library_ids(self.lab.store, "home"), [])
 
+    def test_emptying_a_library_clears_leftover_identities_of_earlier_prunes(self):
+        from kura import anilist_list
+        self.build("anime")
+        self.db.execute("INSERT INTO title_identities(library, title, anilist_id, status, source, updated_at)"
+                        " VALUES ('home', 'disk9/Kura Long Gone', 999000005, 'pinned', 'owner', 1.0)")
+        self.db.execute("INSERT OR REPLACE INTO library_absent SELECT id, 1.0 FROM library_titles")
+        self.db.commit()
+        dry = manifest.prune(self.lab.store, "home")
+        self.assertEqual(dry["would_delete"]["identities"], 1)
+        manifest.prune(self.lab.store, "home", dry_run=False)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM title_identities").fetchone()[0], 0)
+        self.assertEqual(anilist_list.media_ids(self.db, [], "home", False), [])
+
     def test_titles_linked_to_a_protected_torrent_are_kept(self):
         victim = next(t for t in self.repo.titles("home", include_absent=True) if t["rel_path"].startswith("disk1/"))
         infohash = self.repo.links(victim["id"])[0]["infohash"]

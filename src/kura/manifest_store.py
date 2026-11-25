@@ -242,7 +242,8 @@ class ManifestRepo:
         own state only. Returns the row counts (what was deleted, or with `dry_run` what would
         be). Torrent rows are shared and never deleted. A dry run only reads. Owner decisions
         (``identity pin``) are kept, unless `empties_library` says no title of the library
-        remains afterwards: then nothing is left to pin and every identity row goes."""
+        remains afterwards: then nothing is left to pin and every identity row of the library
+        goes, including leftovers of earlier prunes."""
         ids = list(dict.fromkeys(t["id"] for t in titles))
         keys = list(dict.fromkeys(t["rel_path"] for t in titles))
         plan = (("titles", "library_titles", "id", ids, ""),
@@ -251,7 +252,8 @@ class ManifestRepo:
                 ("verifications", "verifications", "title_id", ids, ""),
                 ("probe_results", "probe_results", "title_id", ids, ""),
                 ("marks", "library_absent", "title_id", ids, ""),
-                ("identities", "title_identities", "title", keys, " AND library=?" if empties_library else " AND library=? AND source<>'owner'"))
+                ("identities", "title_identities", "library", [library], "") if empties_library else
+                ("identities", "title_identities", "title", keys, " AND library=? AND source<>'owner'"))
         counts = {name: 0 for name, *_ in plan}
 
         def run(db):
