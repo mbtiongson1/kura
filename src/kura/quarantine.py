@@ -19,6 +19,10 @@ fixed reason tokens:
     status ``ok`` and at least ``min_seeders`` seeders, or the caller passed ``skip_swarm``,
     which is recorded in the plan (``swarm_unchecked``) and on every move
   * its root label and title name are plain single path components
+  * with a retain list (``retain``): the title has a resolved or pinned AniList identity
+    (``identity_unknown`` otherwise), that ID is not in the list (``retained``) and none of
+    the candidate IDs recorded with the identity is in it (``retain_possible``). A retained
+    title can never appear in ``moves``: this is checked again on the finished move list.
 
 ``plan`` returns ``{"plan", "plan_id", "stored"}``; ``plan`` is exactly the document that
 ``plan_hash`` covers and that is stored.
@@ -28,6 +32,8 @@ Plan document (``plan_version`` 1). Paths are relative to a root label, never ab
            seeders, swarm}
   undo    {root, from, to}: the exact inverse of ``moves``, same order
   refused {title, status, reasons}
+  retain  {sha256, ids} of the retain list (its digest and number of IDs, never the IDs), or
+          null when no list was given; always present
 ``to`` is ``<quarantine_dir>/<batch_id>/<title>`` on the same root, hence the same
 filesystem. A plan cannot name its own hash, so ``batch_id`` (first 16 hex of the hash of
 everything that decides the moves) names the folder; ``plan_hash`` then covers the whole
@@ -39,6 +45,8 @@ import re
 import time
 from typing import Callable
 
+from . import identity
+from .idlist import IdList
 from .manifest import show
 from .manifest_store import ManifestRepo, canonical
 from .models import KuraError
@@ -141,14 +149,19 @@ def plan(store, *, library: str, titles: list[str] | None = None,
          quarantine_dir: str = QUARANTINE_DIR, min_seeders: int = 3, skip_swarm: bool = False,
          max_inventory_age_h: float = 24, min_quiet_days: float = 14,
          quarantine_days: float = 30, max_swarm_age_h: float = 24,
-         now: Callable[[], float] = time.time) -> dict:
+         retain: IdList | None = None, now: Callable[[], float] = time.time) -> dict:
     """Propose moves for the eligible titles. Moves nothing; stores the plan when non-empty.
+
+    With a ``retain`` list every candidate also needs a known identity that the list does not
+    cover (see the module docstring); the plan records the list's digest under ``retain``.
 
     Returns ``{"plan": <the exact hashed document>, "plan_id", "stored"}``; metadata sits
     outside ``plan`` so ``plan_hash_of(result["plan"]) == result["plan"]["plan_hash"]``.
     """
     check_args(library, titles, quarantine_dir, min_seeders, max_inventory_age_h,
                 min_quiet_days, quarantine_days, max_swarm_age_h)
+    if retain is not None and not isinstance(retain, IdList):
+        raise _bad("retain must be a parsed ID list")
     moment = now()
     created_at = int(moment)
     with store.lock():      # never read a manifest that a build is rewriting
@@ -156,6 +169,7 @@ def plan(store, *, library: str, titles: list[str] | None = None,
         manifest = show(store, library)
         shown = {t["title"]: t for t in manifest["titles"]}
         rows = {r["rel_path"]: r for r in repo.titles(library)}
+        identities = identity.load(store.db, library) if retain is not None else {}
         wanted = sorted(set(titles)) if titles is not None else sorted(rows)
         moves, refused = [], []
         for key in wanted:
@@ -166,15 +180,22 @@ def plan(store, *, library: str, titles: list[str] | None = None,
             reasons = _refusals(repo, row, info, moment=moment, policy=manifest["policy_sha256"], min_seeders=min_seeders,
                                 skip_swarm=skip_swarm, max_inventory_age_h=max_inventory_age_h,
                                 min_quiet_days=min_quiet_days, max_swarm_age_h=max_swarm_age_h)
+            if not isinstance(reasons, list) and retain is not None:
+                reasons = identity.retain_reasons(key, identities, retain) or reasons
             if isinstance(reasons, list):
                 refused.append({"title": key, "status": info["status"], "reasons": reasons})
             else:
                 moves.append(reasons)
+        if retain is not None:      # defence in depth: re-check the finished list
+            for move in moves:
+                if identity.retain_reasons(f"{move['root']}/{move['from']}", identities, retain):
+                    raise KuraError("retain_violation", "A retained or unidentified title reached the move list")
         body = _document(library, moves, refused, created_at, quarantine_dir, skip_swarm,
                          {"min_seeders": min_seeders, "min_quiet_days": min_quiet_days,
                           "max_inventory_age_h": max_inventory_age_h,
                           "max_swarm_age_h": max_swarm_age_h, "skip_swarm": bool(skip_swarm)},
-                         quarantine_days, manifest["policy_sha256"])
+                         quarantine_days, manifest["policy_sha256"],
+                         retain.summary() if retain is not None else None)
         document = {**body, "plan_hash": plan_hash_of(body)}
         stored = False
         if moves:
@@ -230,7 +251,7 @@ def _refusals(repo, row, info, *, moment, policy, min_seeders, skip_swarm, max_i
 
 
 def _document(library, moves, refused, created_at, quarantine_dir, skip_swarm, parameters,
-              quarantine_days, policy_sha256) -> dict:
+              quarantine_days, policy_sha256, retain) -> dict:
     refused_total = len(refused)
     preconditions = list(PRECONDITIONS)
     preconditions.append(f"swarm_recheck_at_least_{parameters['min_seeders']}_seeders_before_move")
@@ -249,6 +270,7 @@ def _document(library, moves, refused, created_at, quarantine_dir, skip_swarm, p
         "undo": [],
         "refused": refused[:MAX_REFUSED],
         "refused_total": refused_total,
+        "retain": retain,
         "preconditions": preconditions,
     }
     batch = hashlib.sha256(canonical({**body, "moves": moves}).encode("ascii")).hexdigest()[:16]
