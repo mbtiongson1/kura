@@ -114,11 +114,14 @@ class Pins(Case):
                                "again.tsv")
         self.assertEqual(parse_pins(reordered).sha256, pins.sha256)
         self.assertEqual(parse_pins(self.write("", "empty.tsv")).entries, {})
+        odd = self.write("999000001\tmain/Kura Alpha \r\n999000002\tmain/a\tb\x0c\n999000003\tmain/c", "odd.tsv")
+        self.assertEqual(parse_pins(odd).entries, {"main/Kura Alpha ": 999000001, "main/a\tb\x0c": 999000002,
+                                                   "main/c": 999000003})
 
     def test_bad_lines_refuse_the_whole_file(self):
         for text in ("999000001 main/Kura Alpha\n",            # no tab
                      "abc\tmain/Kura Alpha\n", "0\tmain/Kura Alpha\n", "1000000000\tmain/Kura Alpha\n",
-                     "999000001\t\n", "999000001\tmain/Kura Alpha \n", "999000001\tmain/a\tb\n",
+                     "999000001\t\n", "999000001\r\n",
                      "999000001\tmain/Kura Alpha\nnot-anime\tmain/Kura Alpha\n",
                      "999000001\tmain/Kura Alpha\n999000001\tmain/Kura Alpha\n"):
             details = self.refused_pins(self.write(text, "bad.tsv"))

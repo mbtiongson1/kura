@@ -14,8 +14,9 @@ Duplicates merge; a duplicate with a different tag is refused. Reading is bounde
 
 A pins file (``parse_pins``) holds the owner's title identity decisions, one per line:
 ``<AniList ID or not-anime><TAB><title key>``. The key is everything after the first tab, taken
-verbatim (it may contain spaces and ``#``), so only whole-line comments are allowed. A title
-listed twice is refused, even with the same value.
+verbatim up to the newline (spaces, tabs, trailing whitespace and ``#`` included; a trailing CR
+is dropped), so only whole-line comments are allowed. A title listed twice is refused, even
+with the same value.
 """
 from dataclasses import dataclass
 import hashlib
@@ -128,17 +129,20 @@ def parse_pins(path: Path) -> Pins:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
         _error(None, "Pins file is not UTF-8")
-    lines = text.splitlines()
+    lines = text.split("\n")            # only \n ends a line: a key may hold any other character
+    if lines and lines[-1] == "":
+        lines.pop()
     if len(lines) > MAX_LINES:
         _error(None, f"Pins file exceeds {MAX_LINES} lines")
     entries: dict[str, int | None] = {}
     for number, line in enumerate(lines, 1):
         if not line.strip() or line.lstrip().startswith("#"):
             continue
+        line = line.removesuffix("\r")    # CRLF files work; a key ending in CR cannot be written
         value, sep, title = line.partition("\t")
         value = value.strip()
-        if not sep or not title or title != title.strip() or "\t" in title:
-            _error(number, "Expected <AniList ID or not-anime>, one tab, then the title key")
+        if not sep or not title:
+            _error(number, "Expected <AniList ID or not-anime>, a tab, then the title key")
         if value == NOT_ANIME:
             target = None
         elif _ID.fullmatch(value):

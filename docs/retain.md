@@ -63,8 +63,8 @@ budget, `--offline`) ends up `unresolved` or `unavailable`, never stale. Owner r
 `kura identity pin --library NAME --title KEY (--anilist-id N | --not-anime | --clear)`
 records the owner's decision; `--clear` removes only an owner row.
 `kura identity pins --library NAME --from FILE` applies a pins file of such decisions in one
-transaction. Each line is `<AniList ID or not-anime>`, one tab, then the title key verbatim
-(spaces and `#` allowed, so only whole-line `#` comments); a bad or duplicated line refuses the
+transaction. Each line is `<AniList ID or not-anime>`, a tab, then the title key verbatim up
+to the newline (spaces, tabs and `#` allowed, so only whole-line `#` comments); a bad or duplicated line refuses the
 whole file. Titles missing from the manifest are reported under `missing` and skipped, a pin
 that already matches is left untouched (`unchanged`), and nothing is ever cleared: dropping a
 line keeps the earlier decision until `identity pin --clear`. Keeping the file next to the
