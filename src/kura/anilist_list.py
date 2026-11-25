@@ -290,8 +290,12 @@ def save_favourites(db, user_id: int, ids: list[int], now: float):
 def record_failure(db, user_id, code: str, now: float):
     if user_id is None:
         return
+    detail = {"error": code}
+    provenance = snapshot_authenticated(db, user_id)    # describes the stored rows, not this attempt
+    if provenance is not None:
+        detail["authenticated"] = provenance
     with db:
-        _sync_state(db, f"anilist:list:{user_id}", now, "error", {"error": code}, False)
+        _sync_state(db, f"anilist:list:{user_id}", now, "error", detail, False)
 
 
 def snapshot_authenticated(db, user_id) -> bool | None:
@@ -405,7 +409,7 @@ def list_sync(store, ani, *, user_name=None, max_age_h=12.0, refresh=False, entr
             fav_fetched, fetched_now = None, True
         except KuraError as e:
             e.details.setdefault("requests", req.info())
-            if e.code not in TRANSIENT or fetched is None:
+            if e.code not in TRANSIENT or fetched is None or not matches:
                 raise
             record_failure(db, user_id, e.code, now)
             error = e.code

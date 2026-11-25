@@ -165,6 +165,24 @@ class ListSync(Lab):
         self.assertEqual(anilist_list.snapshot_authenticated(self.store.db, VIEWER["id"]), False)
         self.assertTrue(self.sync(user_name=VIEWER["name"])["from_cache"])   # now a public snapshot
 
+    def test_stale_fallback_never_serves_a_snapshot_of_the_other_kind(self):
+        self.sync()
+        anilist_auth.remove(self.root)
+        anilist_list.clear_viewer(self.store.db)
+        self.fake.queue = [http_error(500)]
+        with self.assertRaises(KuraError) as cm:
+            self.sync(user_name=VIEWER["name"], refresh=True)
+        self.assertEqual(cm.exception.code, "anilist_query_error")
+
+    def test_a_failed_refresh_keeps_the_snapshot_provenance(self):
+        self.sync()
+        self.fake.queue = [http_error(500)]
+        self.assertTrue(self.sync(refresh=True)["stale"])
+        self.assertIs(anilist_list.snapshot_authenticated(self.store.db, VIEWER["id"]), True)
+        made = len(self.fake.calls)
+        self.assertTrue(self.sync(max_age_h=1000)["from_cache"])      # still servable from cache
+        self.assertEqual(len(self.fake.calls), made)
+
     def test_public_snapshot_does_not_answer_an_authenticated_list(self):
         anilist_auth.remove(self.root)
         self.sync(user_name=VIEWER["name"])
