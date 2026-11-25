@@ -178,7 +178,7 @@ infohashes or `path:relative/prefix`. Descriptors that cannot be parsed are repo
 (protected if any copy is). A link the latest scan no longer produces (torrent removed,
 now ambiguous) stops counting toward coverage but keeps protecting; a torrent whose
 protection was classified under a different policy than the title's last assessment is
-`unverified` until the next build reprocesses it.
+`unverified` until the next build reprocesses it (descriptors are reclassified first thing in every build, even one that is later interrupted).
 
 ## Storage, interruption and status
 Default state: `~/.local/share/kura/state.sqlite3` (preferences, receipts, audit events

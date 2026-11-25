@@ -383,16 +383,25 @@ class Build(unittest.TestCase):
         self.lab.build()
         self.assertEqual(self.lab.status("Kura Sample Series")["status"], "unmatched")
 
-    def test_policy_change_without_reprocessing_is_never_reacquirable(self):
+    def test_policy_change_applies_even_if_the_build_is_interrupted(self):
         self.lab.build()
         self.lab.deny.write_text("tracker.example\n")
-        self.lab.build(should_stop=lambda: True)               # re-assessed, torrents untouched
-        row = self.lab.status("Kura Sample Series")
-        self.assertEqual((row["status"], row["reasons"]), ("unverified", ["not_reclassified"]))
-        self.lab.build()                                       # now classified under the new policy
+        self.lab.build(should_stop=lambda: True)               # descriptors reclassified up front
         row = self.lab.status("Kura Sample Series")
         self.assertEqual(row["status"], "protected")
         self.assertIn("tracker_denylist", row["reasons"])
+
+    def test_title_assessed_under_a_new_policy_needs_reclassified_torrents(self):
+        self.lab.build()
+        repo = ManifestRepo(self.lab.store.db)
+        title = next(t for t in repo.titles("home") if t["rel_path"] == "main/Kura Sample Series")
+        stale = {**title["identity"]["assessment"], "policy_sha256": "0" * 64}
+        repo.save_inventory("home", title["root_dev"], [{
+            "rel_path": title["rel_path"], "kind": title["kind"], "total_bytes": title["total_bytes"],
+            "newest_mtime_ns": title["newest_mtime_ns"], "files": repo.title_files(title["id"]),
+            "identity": {"anilist": None, "assessment": stale}}], title["seen_at"])
+        row = self.lab.status("Kura Sample Series")
+        self.assertEqual((row["status"], row["reasons"]), ("unverified", ["not_reclassified"]))
 
     def test_duplicate_descriptor_with_denylisted_tracker_protects_the_torrent(self):
         mirror = torrentgen.build("Kura Sample Series", GOOD, announce="http://tracker.blocked.example/announce")
@@ -407,6 +416,15 @@ class Build(unittest.TestCase):
         stored = ManifestRepo(self.lab.store.db).torrent(self.public.infohash)
         self.assertIsNone(stored["magnet"])
         self.assertIsNone(stored["info"])
+
+    def test_new_protection_is_recorded_before_an_interrupt_can_expose_old_links(self):
+        self.lab.build()
+        mirror = torrentgen.build("Kura Sample Series", GOOD, announce="http://tracker.blocked.example/announce")
+        (self.lab.torrents / "Kura Sample Series.torrent").write_bytes(mirror.data)
+        self.lab.build(should_stop=lambda: True)
+        row = self.lab.status("Kura Sample Series")
+        self.assertEqual(row["status"], "protected")
+        self.assertIn("tracker_denylist", row["reasons"])
 
     def test_only_a_complete_torrent_makes_its_files_reacquirable(self):
         pack = self.lab.add("Kura Pad Pack", GOOD, pad=True)

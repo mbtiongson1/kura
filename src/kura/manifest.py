@@ -417,6 +417,11 @@ def build(store, *, roots: dict[str, Path], library: str, torrents_dir: Path,
             else:
                 parsed[meta.infohash] = (meta, protection)
 
+        # Record every torrent's current protection before anything else can expose an old
+        # link: an interrupted build must never leave a stale "public" classification live.
+        for meta, protection in parsed.values():
+            repo.upsert_torrent(_torrent_row(meta, protection, policy))
+
         # 2. Inventory every root (metadata only) and match.
         invs = {label: scan_inventory(Path(path), label) for label, path in roots.items()}
         matches, unmatched = match_many(list(invs.values()), [m for m, _ in parsed.values()])
@@ -445,7 +450,7 @@ def build(store, *, roots: dict[str, Path], library: str, torrents_dir: Path,
                                  "blocked": ["absent_from_scan"], "files": []})
             ids.update(repo.save_inventory(library, inv.root_dev, rows, inv.scanned_at))
 
-        # 4. Per torrent: record it, link it, verify each linked title.
+        # 4. Per torrent: link it, verify each linked title (committed as each finishes).
         by_torrent: dict[str, list] = {}
         for m in matches:
             by_torrent.setdefault(m.infohash, []).append(m)
@@ -463,7 +468,6 @@ def build(store, *, roots: dict[str, Path], library: str, torrents_dir: Path,
             if should_stop():
                 interrupted = True
                 break
-            repo.upsert_torrent(_torrent_row(meta, protection, policy))
             for m in by_torrent.get(infohash, []):
                 repo.link(ids[f"{m.root}/{m.title_rel}"], infohash, m.strategy,
                           {str(i): list(p) for i, p in m.mapping.items()})
