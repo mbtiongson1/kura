@@ -43,6 +43,14 @@ Python is an MVP decision for portability, not a requirement for future clients.
   records and classifies the result (`manifest_store` is its repository). `cli_handover`
   is the thin command layer; its inventory/inspect/verify commands never open state.
   None of it writes to a library or descriptor directory.
+- **Library audit** (read-only, offline; `audit.py`, `names.py`, `policy.py`, `cli_audit.py`):
+  joins state tables written by earlier steps (inventory, links, title identities, probe results,
+  the SeaDex mirror, the AniList list snapshot) with the owner's retain list and policy overrides
+  into one report of flags and suggestions. It imports no network client and opens no library
+  root; the media-reading step is `probe`, the networked steps are `seadex`, `anilist` and
+  `identity`. `names.py` is a tolerant tokenizer used only for scoring, never for acquisition
+  identity; `policy.py` holds the archival/efficient rules and the efficient size band. The only
+  write is a row in `audit_reports`; every output is a proposal.
 - **Downloader adapter**: local aria2c argument-array subprocess, no shell or RPC.
   Validated torrent metadata supplies exact expected paths, size and piece hashes.
 - **Local repository**: versioned preferences and acquisition/audit records in SQLite;

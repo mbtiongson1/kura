@@ -278,6 +278,19 @@ database is not downloaded again: a public torrent whose info dictionary is kept
 name equals the folder name, so a candidate saved under another name is verified only after
 the folder is named like it.
 
+## Library quality (offline report)
+`kura audit --library NAME [--retain FILE] [--policy-overrides FILE] [--user NAME] [--title KEY]...
+[--flag CODE]... [--limit 200] [--no-store]` joins the manifest inventory, title identities
+(`kura identity`), probe results (`kura probe`), the SeaDex mirror (`kura seadex`) and the owner's
+synced AniList list into one report: per title a policy (`archival` for favourites, list scores of
+9.0 or more and owner overrides, else `efficient` at 120 to 450 MB per episode), compact encoder
+settings, flags such as `mixed_groups`, `low_bpp_8bit`, `ass_missing_fonts`, `seadex_best_differs`
+and `size_above_band`, and a suggestion (`none`, `review` or `upgrade_candidate`). It reads only
+Kura's private state: no library file is opened, nothing touches the network, nothing is
+fetched, moved or deleted, and the report is a proposal for the owner. The only write is the
+stored report (`--no-store` skips it). See [docs/audit.md](docs/audit.md) for the flags, the
+untouched-stream rule for web rips and the Unraid runner contract.
+
 ## Storage, interruption and status
 Default state: `~/.local/share/kura/state.sqlite3` (preferences, receipts, audit events
 and validated sanitized descriptors for explicit offline resume). This is private data,

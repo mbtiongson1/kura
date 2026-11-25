@@ -33,9 +33,13 @@ each title. Foundation landed first: state schema v3 (cache tables for the quali
 cross-process request limiter shared by every networked service, and a CLI command registry so
 later modules add commands without touching the core parser.
 
+Landed: the foundation, the Nyaa request pacing, the AniList login and list sync, the SeaDex
+mirror, title identity with retain lists, the Matroska header probe, and the audit
+(`kura audit`, [audit.md](audit.md)).
+
 Build order, each step read-only toward the library:
-1. Audit: per-title identity (AniList), the owner's list, community best-release data, and local
-   file probing, combined into one offline report.
+1. Audit (landed): per-title identity (AniList), the owner's list, community best-release data,
+   and local file probing, combined into one offline report.
 2. Release cards and a `best` view per title.
 3. Wanted list: titles the audit shows as missing or weak.
 4. Upgrade proposals: owner-approved candidates only.
