@@ -27,7 +27,9 @@ kura audit --library NAME [--retain FILE] [--policy-overrides FILE] [--user NAME
 - `--no-store` skips the `audit_reports` row. Otherwise the report is stored as canonical JSON
   and the newest 30 per library are kept.
 
-A library with no inventory is refused (`no_inventory`): run `manifest build` first.
+A library with no inventory is refused (`no_inventory`): run `manifest build` first. The audit reads
+state in one snapshot and does not take the state lock, so a running probe or sync does not block
+it; only storing the report takes the lock (`busy` if another mutation runs).
 
 ## Policy
 
@@ -48,7 +50,7 @@ file is never judged by an episode band.
  "inputs": {"inventory_at",
             "probe": {"files_probed", "video_files", "coverage", "changed"},
             "seadex": {"synced_at", "stale"},
-            "anilist": {"user", "fetched_at", "stale"},
+            "anilist": {"user", "fetched_at", "favourites_fetched_at", "stale"},
             "retain": {"sha256", "ids", "unmatched_ids"} | null,
             "policy": {"efficient": {"target_mb", "min_mb", "max_mb"}, "archival": {"cap": null},
                        "overrides_sha256", "overrides_ids"}},
@@ -71,8 +73,9 @@ same hash. `flagged` counts titles with at least one `warn` or `action` flag. `c
 low by design.
 
 Inputs that are old are reported and never stop the run: SeaDex is `stale` when its last
-successful sync is older than 7 days or missing; the AniList list when older than 48 hours or
-missing (then every title falls back to `efficient`).
+successful sync is older than 7 days or missing; the AniList list when its list or its favourites are older than 48 hours or missing. Favourites
+that were never fetched are ignored, not read as empty; with no synced list every title falls back
+to `efficient`.
 
 ### Probe summary
 
@@ -110,15 +113,15 @@ else `review` when it has any `warn` or `action` flag, else `none`.
 | code | severity | when |
 | --- | --- | --- |
 | `mixed_groups` | warn | two or more known release groups across episode files (extras excluded) |
-| `superseded_version_present` | action | the same group and episode held as v1 and as vN |
+| `superseded_version_present` | action | the same group, season and episode held as v1 and as vN (season from `SxxExx` or a `Season N` directory) |
 | `v2_known_upstream` | warn | a public SeaDex file list has `vN` of an episode (same group) for which a v1 is held |
 | `low_bpp_8bit` | warn, action below 0.035 | a sampled 8-bit file has bits per pixel below 0.06; `detail.style` says whether it is an untouched stream |
 | `ass_missing_fonts` | warn | an ASS track with no attached fonts and no `Fonts/` directory in the title (skipped when the attachment scan was cut short) |
-| `seadex_best_differs` | warn archival, info efficient | a public SeaDex best exists and the held group or infohash is not a best |
+| `seadex_best_differs` | warn archival, info efficient | a public SeaDex best exists and what is held is comparable (`held_matches` `none` or `alt`) and not a best |
 | `seadex_alt_held` | info | the held group or infohash is a SeaDex alternative |
 | `seadex_no_public_pick` | info | a SeaDex entry exists but no best pick is public (private trackers) |
 | `seadex_best_outside_band` | info | efficient title; every public best with a known size is outside 120 to 450 MB |
-| `size_above_band`, `size_below_band` | warn | efficient title; median episode size outside the band |
+| `size_above_band`, `size_below_band` | warn | efficient title with a resolved or pinned identity; median episode size outside the band (an unidentified title might be archival, so it is not judged) |
 | `identity_unknown` | info, warn under `--retain` | no resolved or pinned identity (not for `not_anime`) |
 | `probe_missing` | info | the title has video files and no usable probe result |
 | `unsupported_container` | info | a sampled file is not Matroska |
@@ -128,11 +131,12 @@ else `review` when it has any `warn` or `action` flag, else `none`.
 nothing held to compare). Held means the release groups parsed from the episode file names
 (compared case- and punctuation-insensitively) plus the infohashes and groups of manifest links.
 SeaDex flags are only produced for a resolved or pinned identity. A probe row counts only while
-its size and mtime still equal the inventory and its probe version is current; others add to
+its status is `ok`, `partial` or `unsupported_container` (an `invalid` row says nothing), its size and mtime still equal the inventory and its probe version is current; others add to
 `inputs.probe.changed` and are ignored.
 
 `upgrade_candidate`: archival and `seadex_best_differs`; or efficient with a public SeaDex best
-whose median episode size is inside the band and that is not already held. It is a proposal for
+whose median episode size is inside the band and that is not held (`held_matches` `none` or `alt`;
+an `unknown` comparison never proposes anything). It is a proposal for
 the owner to look at, nothing more.
 
 ## Runner contract

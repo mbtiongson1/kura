@@ -48,6 +48,7 @@ MAX_LIMIT = 10_000
 KEEP_REPORTS = 30
 MAX_LIST = 10
 CRF_BAND = (18.0, 24.0)
+USABLE_STATUSES = ("ok", "partial", "unsupported_container")      # "invalid" says nothing about the file
 ASS_PARTIAL = {"attachments_truncated", "budget_exhausted", "truncated", "element_limit"}
 SIDECAR_FONT_DIRS = ("fonts", "font")
 
@@ -71,11 +72,6 @@ def _num(value):
     except ValueError:
         return None
     return x if math.isfinite(x) else None
-
-
-def _int(value):
-    x = _num(value)
-    return int(x) if x is not None and x == int(x) else None
 
 
 def _lead(value):
@@ -244,7 +240,7 @@ def _probe_rows(db, title, files):
             changed += 1
             continue
         result = _json(text)
-        if status in probe_mod.CONTENT_STATUSES and version == mkvprobe.PROBE_VERSION and result is not None:
+        if status in USABLE_STATUSES and version == mkvprobe.PROBE_VERSION and result is not None:
             usable[path] = (status, result)
     return usable, changed
 
@@ -311,7 +307,7 @@ def _upstream_revisions(torrents, videos):
     for f in videos:
         n = f["n"]
         if n["episode"] is not None and n["group"] and (n["version"] or 1) < 2:
-            held.setdefault((_norm(n["group"]), n["episode"]), True)
+            held.setdefault((_norm(n["group"]), _season(f), n["episode"]), True)
     if not held:
         return []
     found = set()
@@ -329,10 +325,28 @@ def _upstream_revisions(torrents, videos):
                 continue
             n = names.parse(name)
             group = _norm(n["group"]) or _norm(t["group"])
-            if not n["extra"] and n["episode"] is not None and (n["version"] or 1) >= 2 \
-                    and (group, n["episode"]) in held:
+            if n["extra"] or n["episode"] is None or (n["version"] or 1) < 2:
+                continue
+            # A file list that names no season matches whatever season the held file is in.
+            season = _season({"n": n, "local": name})
+            if any(h == (group, season, n["episode"]) or (season is None and h[0] == group and h[2] == n["episode"])
+                   for h in held):
                 found.add(n["episode"])
     return sorted(found)
+
+
+_SEASON_DIR = re.compile(r"(?:season|s)[ ._-]?0*(\d{1,2})", re.I)
+
+
+def _season(f):
+    """Season of a file: from SxxExx in its name, else a 'Season N' / 'SN' directory, else None."""
+    if f["n"]["season"] is not None:
+        return f["n"]["season"]
+    for part in reversed(f["local"].split("/")[:-1]):
+        m = _SEASON_DIR.fullmatch(part.strip())
+        if m:
+            return int(m.group(1))
+    return None
 
 
 def _superseded(videos):
@@ -340,8 +354,8 @@ def _superseded(videos):
     for f in videos:
         n = f["n"]
         if n["episode"] is not None:
-            seen.setdefault((_norm(n["group"]), n["episode"]), set()).add(n["version"] or 1)
-    return sorted({ep for (_g, ep), versions in seen.items() if 1 in versions and max(versions) >= 2})
+            seen.setdefault((_norm(n["group"]), _season(f), n["episode"]), set()).add(n["version"] or 1)
+    return sorted({ep for (_g, _s, ep), versions in seen.items() if 1 in versions and max(versions) >= 2})
 
 
 # ---- one title ----------------------------------------------------------------------------
@@ -390,9 +404,9 @@ def _audit_title(ctx, title):
     median = file_doc["per_episode_mb"]["median"]
     episodic = file_doc["video"] >= 2 or any(f["n"]["episode"] is not None for f in videos)
     position = policy.band_position(median) if episodic else None
-    if pol == "efficient" and position == "above":
+    if known and pol == "efficient" and position == "above":
         flags.add("size_above_band", "warn", median_mb=median, max_mb=policy.EFFICIENT["max_mb"])
-    if pol == "efficient" and position == "below":
+    if known and pol == "efficient" and position == "below":
         flags.add("size_below_band", "warn", median_mb=median, min_mb=policy.EFFICIENT["min_mb"])
 
     # probe
@@ -445,7 +459,7 @@ def _audit_title(ctx, title):
                 flags.add("seadex_no_public_pick", "info", best=len(best))
             if matches == "alt":
                 flags.add("seadex_alt_held", "info")
-            differs = public_best and matches != "best"
+            differs = bool(public_best) and matches in ("none", "alt")
             if differs:
                 flags.add("seadex_best_differs", "warn" if pol == "archival" else "info",
                           held_matches=matches, best_groups=sorted({t["group"] or "" for t in public_best})[:MAX_LIST])
@@ -457,7 +471,7 @@ def _audit_title(ctx, title):
                 if sized and not inside:
                     flags.add("seadex_best_outside_band", "info",
                               median_mb=sorted(_mb(t["median"]) for t in sized)[0])
-                upgrade = bool(inside) and matches != "best"
+                upgrade = bool(inside) and matches in ("none", "alt")
             revised = _upstream_revisions(torrents, videos)
             if revised:
                 flags.add("v2_known_upstream", "warn", episodes=revised[:20], count=len(revised))
@@ -476,21 +490,23 @@ def _audit_title(ctx, title):
 
 def _anilist(db, user, moment):
     if user is not None:
-        row = db.execute("SELECT user_id, name, list_fetched_at FROM anilist_users WHERE lower(name)=lower(?)"
+        row = db.execute("SELECT user_id, name, list_fetched_at, favourites_fetched_at FROM anilist_users WHERE lower(name)=lower(?)"
                          " ORDER BY user_id LIMIT 1", (user,)).fetchone()
         if row is None:
             raise _bad("That AniList user has no synced list; run kura anilist list first")
     else:
-        row = db.execute("SELECT user_id, name, list_fetched_at FROM anilist_users WHERE is_viewer=1"
+        row = db.execute("SELECT user_id, name, list_fetched_at, favourites_fetched_at FROM anilist_users WHERE is_viewer=1"
                          " ORDER BY user_id LIMIT 1").fetchone()
     if row is None:
-        return {"user": None, "fetched_at": None, "stale": True}, set(), {}
-    uid, name, fetched = row
-    favourites = {r[0] for r in db.execute("SELECT anilist_id FROM anilist_favourites WHERE user_id=?", (uid,))}
+        return {"user": None, "fetched_at": None, "favourites_fetched_at": None, "stale": True}, set(), {}
+    uid, name, fetched, fav_fetched = row
+    # Favourites decide the policy: a set that was never (or no longer) fetched is not trusted.
+    favourites = ({r[0] for r in db.execute("SELECT anilist_id FROM anilist_favourites WHERE user_id=?", (uid,))}
+                  if fav_fetched is not None else set())
     scores = {r[0]: r[1] for r in db.execute(
         "SELECT anilist_id, score FROM anilist_list_entries WHERE user_id=? AND score IS NOT NULL", (uid,))}
-    stale = fetched is None or moment - fetched > ANILIST_STALE
-    return {"user": name, "fetched_at": fetched, "stale": stale}, favourites, scores
+    stale = any(t is None or moment - t > ANILIST_STALE for t in (fetched, fav_fetched))
+    return {"user": name, "fetched_at": fetched, "favourites_fetched_at": fav_fetched, "stale": stale}, favourites, scores
 
 
 def _retain_doc(retain, identities, titles):
@@ -516,7 +532,10 @@ def run(store, *, library, retain=None, overrides=None, user=None, titles=None, 
     check_args(library, titles, flags, limit, retain, overrides)
     moment = now()
     db = store.db
-    with store.lock():
+    began = not db.in_transaction
+    if began:
+        db.execute("BEGIN")             # one read snapshot; the state lock is only needed to store the report
+    try:
         repo = ManifestRepo(db)
         every = repo.titles(library)
         if not every:
@@ -566,10 +585,14 @@ def run(store, *, library, retain=None, overrides=None, user=None, titles=None, 
                            "overrides_ids": len(overrides.ids) if overrides else None}},
             "counts": counts, "titles": shown[:limit], "titles_truncated": max(0, len(shown) - limit)}
         report["report_sha256"] = _digest(report)
-        if store_report:
+    finally:
+        if began and db.in_transaction:
+            db.rollback()
+    if store_report:
+        with store.lock():
             with db:
                 db.execute("INSERT INTO audit_reports(library, created_at, report_sha256, report) VALUES (?,?,?,?)",
                            (library, moment, report["report_sha256"], canonical(report)))
                 db.execute("DELETE FROM audit_reports WHERE library=? AND id NOT IN (SELECT id FROM audit_reports"
                            " WHERE library=? ORDER BY id DESC LIMIT ?)", (library, library, KEEP_REPORTS))
-        return report
+    return report

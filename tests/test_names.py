@@ -19,6 +19,19 @@ class Tokens(unittest.TestCase):
         n = names.parse("Show - 03 1080p WEB-DL.mkv")
         self.assertEqual((n["group"], n["episode"], n["source"]), (None, 3, "WEB-DL"))
 
+    def test_hyphenated_words_are_not_groups(self):
+        for text in ("Show - S01E01 - Anti-Hero.mkv", "Show - 01 Blu-ray", "Show - 01 Dual-Audio", "Show - 01 Multi-Subs"):
+            with self.subTest(text=text):
+                self.assertIsNone(names.parse(text)["group"])
+        self.assertEqual(names.parse("Show - 01 1080p BluRay-Example.mkv")["group"], "Example")
+        self.assertEqual(names.parse("Show.01.720p.x265-Example")["group"], "Example")
+
+    def test_season_and_ordinal_titles(self):
+        self.assertEqual(names.parse("Show S02E05v2.mkv")["season"], 2)
+        self.assertIsNone(names.parse("Show - 05.mkv")["season"])
+        n = names.parse("[G] Show - 2nd Season - 05v2.mkv")
+        self.assertEqual((n["episode"], n["version"]), (5, 2))
+
     def test_tag_like_leading_brackets_are_not_groups(self):
         self.assertIsNone(names.parse("[1080p] Show - 01.mkv")["group"])
         self.assertIsNone(names.parse("[ABCD1234] Show - 01.mkv")["group"])

@@ -111,9 +111,11 @@ class Lab(unittest.TestCase):
                         " VALUES ('seadex',?,?,?, 'ok')", (synced, synced, synced))
         self.db.commit()
 
-    def viewer(self, *, favourites=(), scores=None, fetched=NOW - 60, name="kura_user", uid=999001):
-        self.db.execute("INSERT OR REPLACE INTO anilist_users(user_id, name, is_viewer, list_fetched_at, updated_at)"
-                        " VALUES (?,?,1,?,1.0)", (uid, name, fetched))
+    def viewer(self, *, favourites=(), scores=None, fetched=NOW - 60, name="kura_user", uid=999001,
+               fav_fetched="same"):
+        fav_fetched = fetched if fav_fetched == "same" else fav_fetched
+        self.db.execute("INSERT OR REPLACE INTO anilist_users(user_id, name, is_viewer, list_fetched_at,"
+                        " favourites_fetched_at, updated_at) VALUES (?,?,1,?,?,1.0)", (uid, name, fetched, fav_fetched))
         for al in favourites:
             self.db.execute("INSERT OR REPLACE INTO anilist_favourites VALUES (?,?,1,1.0)", (uid, al))
         for al, score in (scores or {}).items():
@@ -264,6 +266,8 @@ class Flags(Lab):
         self.assertNotIn("ass_missing_fonts", self.codes())
 
     def test_size_bands_follow_the_efficient_policy(self):
+        self.eps(3)
+        self.identify()
         for size, code in ((500 * MB, "size_above_band"), (100 * MB, "size_below_band")):
             self.eps(3, size=size)
             self.assertIn(code, self.codes())
@@ -273,10 +277,34 @@ class Flags(Lab):
         self.eps(3, size=120 * MB)
         self.assertFalse({"size_above_band", "size_below_band"} & set(self.codes()))
         self.eps(3, size=900 * MB)
-        self.identify()
         self.viewer(favourites=[A])
         self.assertEqual(self.doc()["policy"], "archival")
         self.assertFalse({"size_above_band", "size_below_band"} & set(self.codes()))        # no cap when archival
+
+    def test_band_flags_wait_for_an_identity(self):
+        self.eps(3, size=900 * MB)                      # might be an archival favourite: not judged yet
+        self.assertFalse({"size_above_band", "size_below_band"} & set(self.codes()))
+
+    def test_seasons_do_not_collide_in_version_checks(self):
+        self.title(files=[(f"Season 1/{ep(1)}", 250 * MB), (f"Season 2/{ep(1, ver='v2')}", 250 * MB)])
+        self.assertNotIn("superseded_version_present", self.codes())
+        self.title(files=[(f"Season 1/{ep(1)}", 250 * MB), (f"Season 1/{ep(1, ver='v2')}", 250 * MB)])
+        self.assertIn("superseded_version_present", self.codes())
+        self.title(files=[(f"{SHOW} S01E01 [G].mkv", 1), (f"{SHOW} S02E01v2 [G].mkv", 1)])
+        self.assertNotIn("superseded_version_present", self.codes())
+
+    def test_v2_upstream_respects_seasons(self):
+        self.title(files=[(f"Season 1/{ep(1)}", 250 * MB)])
+        self.identify()
+        self.seadex(A, [{"files": [[f"Season 2/{ep(1, ver='v2')}", 1000]]}])
+        self.assertNotIn("v2_known_upstream", self.codes())
+        self.seadex(A, [{"files": [[f"Season 1/{ep(1, ver='v2')}", 1000]]}])
+        self.assertIn("v2_known_upstream", self.codes())
+
+    def test_invalid_probe_row_is_not_a_probe(self):
+        self.eps(1)
+        self.probe(ep(1), {**result(), "status": "invalid", "video": None, "encoder": None})
+        self.assertIn("probe_missing", self.codes())
 
     def test_identity_unknown(self):
         self.eps()
@@ -409,6 +437,15 @@ class SeaDex(Lab):
         self.seadex(A, [{"group": GROUP, "median": 700 * MB}])                   # archival but already holds best
         self.assertNotEqual(self.doc()["suggestion"], "upgrade_candidate")
 
+    def test_nothing_comparable_is_not_a_difference(self):
+        self.title(files=[(f"{SHOW} - S01E01.mkv", 250 * MB), (f"{SHOW} - S01E02.mkv", 250 * MB)])   # no group
+        self.viewer(favourites=[A])
+        self.seadex(A, [{"group": OTHER, "median": 300 * MB}])
+        d = self.doc()
+        self.assertEqual(d["seadex"]["held_matches"], "unknown")
+        self.assertNotIn("seadex_best_differs", self.codes())
+        self.assertNotEqual(d["suggestion"], "upgrade_candidate")
+
     def test_unknown_identity_never_consults_seadex(self):
         self.identify(status="ambiguous", candidates=[A])
         self.seadex(A, [{"group": OTHER}])
@@ -455,6 +492,13 @@ class PolicyInAudit(Lab):
         self.assertEqual(report["inputs"]["policy"]["overrides_ids"], 1)
         self.assertEqual(len(report["inputs"]["policy"]["overrides_sha256"]), 64)
 
+    def test_unsynced_favourites_are_not_trusted(self):
+        self.viewer(favourites=[A], fav_fetched=None)
+        report = self.audit()
+        self.assertEqual(self.doc(report)["policy"], "efficient")
+        self.assertTrue(report["inputs"]["anilist"]["stale"])
+        self.assertIsNone(report["inputs"]["anilist"]["favourites_fetched_at"])
+
     def test_named_user_selects_another_snapshot(self):
         self.viewer(favourites=[A])
         self.viewer(name="Other_User", uid=999002, scores={A: 9.5}, favourites=[])
@@ -481,14 +525,15 @@ class Inputs(Lab):
         report = self.audit()
         self.assertEqual(report["inputs"]["seadex"], {"synced_at": NOW - 8 * 86400, "stale": True})
         self.assertEqual(report["inputs"]["anilist"], {"user": "kura_user", "fetched_at": NOW - 3 * 86400,
-                                                       "stale": True})
+                                                       "favourites_fetched_at": NOW - 3 * 86400, "stale": True})
         self.assertEqual(report["counts"]["titles"], 1)
 
     def test_never_synced_is_stale_and_fresh_is_not(self):
         self.eps()
         report = self.audit()
         self.assertEqual(report["inputs"]["seadex"], {"synced_at": None, "stale": True})
-        self.assertEqual(report["inputs"]["anilist"], {"user": None, "fetched_at": None, "stale": True})
+        self.assertEqual(report["inputs"]["anilist"], {"user": None, "fetched_at": None,
+                                                       "favourites_fetched_at": None, "stale": True})
         self.viewer()
         self.seadex(A, [])
         report = self.audit()
@@ -623,6 +668,14 @@ class Report(Lab):
         self.assertEqual(self.db.execute("SELECT MAX(created_at) FROM audit_reports").fetchone()[0],
                          NOW + audit.KEEP_REPORTS + 4)
 
+    def test_reading_does_not_need_the_state_lock(self):
+        with self.store.lock():
+            report = self.audit()                       # a probe or sync may be running
+            self.assertEqual(report["counts"]["titles"], 1)
+            with self.assertRaises(KuraError) as e:
+                self.audit(store_report=True)
+        self.assertEqual(e.exception.code, "busy")
+
     def test_report_is_json_serialisable_and_ascii(self):
         text = json.dumps(self.audit(), ensure_ascii=True)
         self.assertIn(KEY, text)
@@ -641,6 +694,7 @@ class Report(Lab):
         self.title(name="Kura Quiet Show", files=[(f"Kura Quiet Show - {n:02d}.mkv", 250 * MB) for n in (1, 2)])
         self.db.execute("INSERT INTO title_identities(library, title, status, source, updated_at)"
                         " VALUES ('home','main/Kura Quiet Show','not_anime','owner',1.0)")
+        self.identify(B, name="Kura Big Show")
         self.probe("Kura Quiet Show - 01.mkv", result(), name="Kura Quiet Show")
         self.db.commit()
         report = self.audit()
