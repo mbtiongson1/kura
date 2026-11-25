@@ -167,7 +167,7 @@ class SchemaV3(Case):
 
 class Registry(Case):
     STUBS = ("cli_anilist", "cli_seadex", "cli_probe", "cli_identity", "cli_audit")
-    IMPLEMENTED = ("cli_anilist", "cli_seadex", "cli_identity")       # modules that no longer are stubs
+    IMPLEMENTED = ("cli_anilist", "cli_seadex", "cli_probe", "cli_identity")       # modules that no longer are stubs
 
     def test_registry_order_and_contract(self):
         self.assertEqual([m.__name__.rsplit(".", 1)[1] for m in cli.COMMAND_MODULES],
@@ -189,7 +189,7 @@ class Registry(Case):
         sub = next(a for a in cli.parser()._actions if isinstance(a, argparse._SubParsersAction))
         self.assertEqual(sorted(sub.choices),
                          ["aliases", "anilist", "download", "downloads", "identity", "library", "manifest", "prefs",
-                          "retain", "seadex", "search", "torrent"])
+                          "probe", "retain", "seadex", "search", "torrent"])
 
     def test_dispatch_falls_through_in_order(self):
         calls = []
