@@ -315,6 +315,7 @@ class _Reader:
 
     def __init__(self, read, size, max_bytes):
         self._read, self.size, self.max, self.used, self.asked = read, size, max_bytes, 0, 0
+        self.short = False                              # some read returned fewer bytes than asked
 
     def read(self, offset, n):
         if n <= 0 or offset < 0 or offset >= self.size:
@@ -324,6 +325,7 @@ class _Reader:
             raise _Budget
         self.asked += n
         data = bytes(self._read(offset, n))[:n]
+        self.short = self.short or len(data) < n
         self.used += len(data)
         return data
 
@@ -851,6 +853,8 @@ class _Probe:
         return None
 
     def result(self):
+        if self.rd.short:
+            self.truncated()                    # whatever the cause, the file was not read in full
         if self.status is None:
             if self.tracks:
                 self.status = "partial" if self.partial else "ok"

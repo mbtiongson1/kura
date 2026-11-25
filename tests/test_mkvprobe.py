@@ -395,6 +395,18 @@ class Limits(unittest.TestCase):
         self.assertEqual(silent["status"], "invalid")
         self.assertNotIn("internal_error", silent["warnings"])
 
+    def test_a_short_reading_callback_gives_a_partial_result_not_an_ok_one(self):
+        data = mkvgen.build()
+        cut = data.rindex(mkvgen.eid(0x1F43B675))           # the Cluster
+
+        def clipped(offset, n):                              # EOF arrives early for everything past the Cluster
+            return data[offset:min(offset + n, cut + 12)]
+
+        result = probe(clipped, len(data))
+        self.assertEqual(result["status"], "partial")
+        self.assertIn("truncated", result["warnings"])
+        self.assertEqual(result["video"]["codec"], "h264")
+
     def test_the_cap_counts_bytes_requested_even_when_reads_come_back_short(self):
         data = mkvgen.build()
         asked = []
