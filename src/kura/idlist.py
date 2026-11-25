@@ -49,7 +49,7 @@ def _error(line: int | None, message: str):
 
 def _read(path: Path) -> bytes:
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)   # a FIFO must not hang
     except OSError as e:
         raise KuraError("invalid_policy", "ID list file is unreadable") from e
     try:

@@ -17,7 +17,9 @@ several seasons (or season 0) is ``ambiguous``. Everything undecidable stays unr
 ambiguous, never guessed: a wrong binding is the one way a retained title could be quarantined.
 
 Owner rows (``pinned`` and ``not_anime``, source ``owner``) are never overwritten by a sync;
-only ``pin`` changes them. A failed lookup never degrades a resolved row. The module reads and
+only ``pin`` changes them. A resolved row is kept as it is until ``refresh`` asks to revalidate
+it; a refresh that cannot reconfirm it (no match, failed lookup, or an offline refresh of a
+row that came from the list) replaces it with the weaker status, never keeps it. The module reads and
 writes only Kura's private state database and never touches a library.
 """
 from contextlib import contextmanager
@@ -161,7 +163,9 @@ def match(rows: list[dict], base: str, season: int | None) -> dict:
     if len(tied) > 1:
         return {"status": "ambiguous", "anilist_id": None, "matched": None, "candidates": tied}
     _, chosen, matched = next(s for s in scored if s[1] == tied[0])
-    others = sorted({i for _, i, _ in scored if i != chosen}) if top[0] == 1 else []
+    # Weaker matches stay plausible (an unmarked folder may hold several seasons), so retain
+    # planning must see them even when the winner is an exact match.
+    others = sorted({i for _, i, _ in scored if i != chosen})
     return {"status": "resolved", "anilist_id": chosen, "matched": matched, "candidates": others}
 
 
@@ -311,7 +315,7 @@ def sync(store, *, library: str, titles: list[str] | None = None, aliases=None,
             if known and not refresh:
                 continue                    # keep the earlier identity; no new lookup
             need.append((key, base, season))
-            if known:
+            if known and (aliases is not None or current["source"] == "alias"):
                 continue                    # a refresh replaces it only with a network answer
         record = _record(found, "list", base)
         if not _same(current, record):
@@ -336,11 +340,7 @@ def sync(store, *, library: str, titles: list[str] | None = None, aliases=None,
                     stop = True
                     pending += 1
                     continue
-                current = existing.get(key)
-                if record["status"] == "unavailable" and current is not None \
-                        and current["status"] in IDENTIFIED:
-                    continue                # a failure never degrades a known identity
-                if not _same(current, record):
+                if not _same(existing.get(key), record):
                     found_now[key] = record
         finally:
             _store(store.db, library, found_now, now())

@@ -133,6 +133,9 @@ class OfflineMatch(Base):
         got = identity.match(rows, "Kura Show", None)
         self.assertEqual((status, identity_.anilist_id), (got["status"], got["anilist_id"]))
         self.assertEqual(got["candidates"], [1])           # the weaker subset match is recorded
+        exact = identity.match([{"id": 1, "titles": ["Kura Show"]}, {"id": 2, "titles": ["Kura Show Season 2"]}],
+                               "Kura Show", None)
+        self.assertEqual((exact["anilist_id"], exact["candidates"]), (1, [2]))   # even behind an exact match
         tied = [{"id": 1, "titles": ["Kura Show"]}, {"id": 2, "titles": ["kura  show"]}]
         self.assertEqual(choose(tied, "Kura Show"), (None, "ambiguous"))
         self.assertEqual(identity.match(tied, "Kura Show", None)["status"], "ambiguous")
@@ -217,11 +220,30 @@ class AliasFallback(Base):
         self.assertEqual(resolver.queries, ["Kura Alpha", "Kura Beta"])       # nothing after the outage
         self.assertEqual((out["ambiguous"], out["unavailable"], out["pending"]), (1, 1, 1))
 
-    def test_a_failed_refresh_never_degrades_a_resolved_row(self):
+    def test_a_refresh_that_cannot_reconfirm_replaces_the_row(self):
         self.sync(aliases=Resolver({"Kura Alpha": (A, ["Kura Alpha"])}), titles=["main/Kura Alpha"])
         with patch.object(Core, "alias_status", return_value={"status": "unavailable", "titles": [], "identity": None}):
-            self.sync(aliases=Resolver({}), titles=["main/Kura Alpha"], refresh=True)
-        self.assertEqual((self.row("Kura Alpha")["status"], self.row("Kura Alpha")["anilist_id"]), ("resolved", A))
+            out = self.sync(aliases=Resolver({}), titles=["main/Kura Alpha"], refresh=True)
+        self.assertEqual((self.row("Kura Alpha")["status"], self.row("Kura Alpha")["anilist_id"]), ("unavailable", None))
+        self.assertEqual(out["unavailable"], 1)
+
+    def test_an_unconfirmed_resolved_row_is_kept_without_refresh(self):
+        self.sync(aliases=Resolver({"Kura Alpha": (A, ["Kura Alpha"])}), titles=["main/Kura Alpha"])
+        with patch.object(Core, "alias_status", return_value={"status": "unavailable", "titles": [], "identity": None}):
+            self.sync(aliases=Resolver({}), titles=["main/Kura Alpha"])
+        self.assertEqual(self.row("Kura Alpha")["anilist_id"], A)
+
+    def test_offline_refresh_revalidates_list_rows_but_cannot_judge_alias_rows(self):
+        seed(self.store.db, [(B, "Kura Beta", None, [])])
+        self.sync(aliases=Resolver({"Kura Alpha": (A, ["Kura Alpha"])}))
+        self.assertEqual(self.row("Kura Beta")["source"], "list")
+        self.store.db.execute("DELETE FROM anilist_list_entries")
+        self.store.db.commit()
+        self.sync(aliases=None)                                    # no refresh: both kept
+        self.assertEqual((self.row("Kura Alpha")["anilist_id"], self.row("Kura Beta")["anilist_id"]), (A, B))
+        self.sync(aliases=None, refresh=True)
+        self.assertEqual(self.row("Kura Beta")["status"], "unresolved")
+        self.assertEqual(self.row("Kura Alpha")["anilist_id"], A)
 
     def test_refresh_asks_again(self):
         resolver = Resolver({"Kura Alpha": (A, ["Kura Alpha"])})

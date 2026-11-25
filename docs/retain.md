@@ -34,11 +34,13 @@ Titles are matched in two passes, cheapest first.
    synced). The folder name, reduced by the same cleaner `manifest resolve` uses (group,
    resolution, codec, source and batch tags removed), must equal a title or be a whole-word
    subset of one. The closest match wins; a tie is `ambiguous` and the tied IDs are
-   recorded. A subset match also records the weaker candidates it passed over.
+   recorded. Every resolved row also records the weaker candidates it passed over, even
+   behind an exact match (an unmarked folder may hold several seasons); `identity pin`
+   settles such a title.
 2. Alias fallback over the network, through the shared AniList rate limiter and the
    existing alias cache, at most `--max-lookups` actual requests per run. Titles left
    over are reported as `pending` and picked up by the next run. A rate-limit or network
-   failure stops the run's lookups and never degrades an identity that is already known.
+   failure stops the run's lookups.
    `--offline` skips this pass.
 
 Season rule. A folder marked season 2 or higher binds only to an entry whose matched title
@@ -49,8 +51,10 @@ For the alias pass the season variant (`<title> Season N`) is asked first, and a
 that fails the season check is `unresolved` with the rejected ID kept as a candidate.
 
 Statuses: `resolved` (source `list` or `alias`), `pinned` and `not_anime` (owner),
-`ambiguous`, `unresolved`, `unavailable`. Unchanged resolved rows are not looked up again
-unless `--refresh`. Owner rows are never overwritten by a sync.
+`ambiguous`, `unresolved`, `unavailable`. Unchanged resolved rows are kept, not looked up again,
+unless `--refresh`, which revalidates them: a row it cannot reconfirm (no match, failed
+lookup, or an offline refresh of a row that came from the list) is replaced by the weaker
+status. An offline refresh cannot judge an alias row and keeps it. Owner rows are never overwritten by a sync.
 
 `kura identity pin --library NAME --title KEY (--anilist-id N | --not-anime | --clear)`
 records the owner's decision; `--clear` removes only an owner row.

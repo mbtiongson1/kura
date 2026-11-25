@@ -68,6 +68,11 @@ class Parsing(Case):
         self.refused(link)
         self.refused(self.dir)
 
+    def test_a_fifo_is_refused_without_blocking(self):
+        fifo = self.dir / "pipe"
+        os.mkfifo(fifo)
+        self.refused(fifo)
+
 
 class Tags(Case):
     TAGS = ("archival", "efficient")

@@ -531,6 +531,25 @@ class RetainPlan(Base):
         self.assertNotIn("Kura Epsilon", self.moved(doc))
         self.assertIn("Kura Epsilon", self.moved(self.plan(retain=self.retain(999000099))))
 
+    def test_a_retained_later_season_behind_an_exact_match_blocks_the_title(self):
+        self.add("Kura Zeta")
+        self.lab.build()
+        db = self.lab.store.db
+        db.execute("INSERT INTO anilist_users(user_id, name, is_viewer, updated_at) VALUES (1, 'kura-viewer', 1, 1.0)")
+        for anilist_id, title in ((999000010, "Kura Zeta"), (999000011, "Kura Zeta Season 2")):
+            db.execute("INSERT INTO anilist_media(anilist_id, title_romaji, fetched_at) VALUES (?,?,1.0)", (anilist_id, title))
+            db.execute("INSERT INTO anilist_list_entries(user_id, anilist_id, status, fetched_at) VALUES (1,?,'COMPLETED',1.0)",
+                       (anilist_id,))
+        db.commit()
+        identity.sync(self.lab.store, library="home", titles=["main/Kura Zeta"])
+        row = identity.load(db, "home")["main/Kura Zeta"]
+        self.assertEqual((row["anilist_id"], row["candidates"]), (999000010, [999000011]))
+        doc = self.plan(retain=self.retain(999000011))
+        self.assertEqual(self.refused(doc)["main/Kura Zeta"]["reasons"], ["retain_possible"])
+        self.assertNotIn("Kura Zeta", self.moved(doc))
+        identity.pin(self.lab.store, "home", "main/Kura Zeta", 999000010)   # the owner settles it
+        self.assertIn("Kura Zeta", self.moved(self.plan(retain=self.retain(999000011))))
+
     def test_an_empty_list_still_requires_identities(self):
         doc = self.plan(retain=self.retain())
         self.assertEqual(self.moved(doc), ["Kura Alpha", "Kura Beta", "Kura Gamma"])
