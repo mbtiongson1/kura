@@ -53,6 +53,7 @@ next build reprocesses it.
 Reasons are short fixed tokens. ``uncovered_files`` means the title has files that no
 matched torrent lists (extra files); such a title is never reacquirable.
 """
+import contextlib
 import os
 from pathlib import Path
 import re
@@ -580,7 +581,7 @@ def build(store, *, roots: dict[str, Path], library: str, torrents_dir,
         absent = {"marked": 0, "complete": False, "reason": None}
         if not mark_absent:
             absent["reason"] = "disabled"
-        elif interrupted or cut_short or stats["deferred"]:
+        elif interrupted or cut_short or stats["deferred"] or should_stop():
             absent["reason"] = "incomplete_build"
         elif any(not inv.titles for inv in invs.values()):
             absent["reason"] = "empty_root"       # an unmounted share looks exactly like this
@@ -609,8 +610,9 @@ def prune(store, library: str, *, older_than_days: float | None = None, dry_run:
           now: Callable[[], float] = time.time) -> dict:
     """Delete absent and vanished titles of `library` from Kura's state (never from disk).
 
-    Candidates are titles marked absent (``absent_at`` at least `older_than_days` ago) and
-    titles a scan found vanished (last seen at least that long ago); None means all. Their
+    Candidates are titles marked absent (``absent_at`` at least `older_than_days` ago; None
+    means all) and, only when `older_than_days` is given, titles a scan found vanished (last
+    seen at least that long ago). Their
     file, link, verification, probe-result and absent-mark rows go with them. Torrent rows,
     identities, plans and reports stay. With `dry_run` (the default) it only counts.
     Nothing here opens a library root.
@@ -621,7 +623,7 @@ def prune(store, library: str, *, older_than_days: float | None = None, dry_run:
             and 0 <= older_than_days <= 36500):
         raise KuraError("invalid_arguments", "--older-than-days must be between 0 and 36500")
     cutoff = None if older_than_days is None else now() - older_than_days * 86400
-    with store.lock():
+    with (contextlib.nullcontext() if dry_run else store.lock()):   # a preview never blocks a build
         repo = ManifestRepo(store.db)
         total = len(repo.titles(library, include_absent=True))
         candidates = repo.prunable(library, cutoff)

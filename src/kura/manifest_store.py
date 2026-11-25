@@ -20,6 +20,14 @@ from urllib.parse import parse_qsl, urlsplit
 from .models import KuraError
 from .torrent import decode, encode
 
+# SQL condition on ``title_identities.title`` (two ``library`` parameters): the identity belongs to
+# a title that is present in the manifest. A library with no manifest rows at all keeps every
+# identity, so identities recorded before any build still count. Absent, vanished-and-pruned
+# and deleted titles do not.
+PRESENT_IDENTITY_SQL = (
+    "(NOT EXISTS (SELECT 1 FROM library_titles WHERE library=?) OR title IN ("
+    "SELECT t.rel_path FROM library_titles t LEFT JOIN library_absent a ON a.title_id=t.id"
+    " WHERE t.library=? AND a.title_id IS NULL))")
 _INFOHASH = re.compile(r"[0-9a-f]{40}\Z")
 _PLAN_HASH = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -208,8 +216,10 @@ class ManifestRepo:
 
     def prunable(self, library: str, cutoff: float | None = None) -> list[dict]:
         """Titles `prune_titles` may delete: absent-marked ones whose mark is at or before
-        `cutoff`, and titles a scan found vanished (``absent_from_scan``) last seen at or
-        before it. None means no age limit. Keys: id, rel_path, state ('absent'|'vanished')."""
+        `cutoff` (None: all of them), and, only when a cutoff is given, titles a scan found
+        vanished (``absent_from_scan``) last seen at or before it: a root that was down for one
+        build must not cost the history of everything in it. Keys: id, rel_path, state
+        ('absent'|'vanished')."""
         out = []
         for r in self.db.execute(
                 "SELECT t.id, t.rel_path, t.blocked, t.seen_at, a.absent_at FROM library_titles t"
@@ -217,7 +227,7 @@ class ManifestRepo:
                 (library,)):
             if r[4] is not None:
                 state, when = "absent", r[4]
-            elif "absent_from_scan" in (_load(r[2]) or []):
+            elif cutoff is not None and "absent_from_scan" in (_load(r[2]) or []):
                 state, when = "vanished", r[3]
             else:
                 continue

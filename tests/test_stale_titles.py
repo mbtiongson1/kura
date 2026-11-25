@@ -110,6 +110,13 @@ class Marking(Base):
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM library_absent").fetchone()[0], 0)
         self.assertEqual(len(self.keys()), 4)
 
+    def test_a_stop_requested_after_the_last_step_marks_nothing(self):
+        self.build("disk1")
+        for torrent in self.lab.torrents.glob("*.torrent"):
+            torrent.unlink()                  # nothing to loop over: the stop is only seen at the end
+        out = self.build("anime", should_stop=lambda: True)
+        self.assertEqual((out["absent"]["complete"], out["absent"]["marked"]), (False, 0))
+
     def test_a_failed_build_marks_nothing(self):
         self.build("disk1", "disk2")
         with self.assertRaises(KuraError):
@@ -294,11 +301,39 @@ class Prune(Base):
         self.build("anime")
         self.assertEqual(self.counts()["library_titles"], 4)
         out = manifest.prune(self.lab.store, "home")
+        self.assertEqual((out["absent"], out["vanished"]), (2, 0))      # vanished rows need an age
+        out = manifest.prune(self.lab.store, "home", older_than_days=0)
         self.assertEqual((out["absent"], out["vanished"]), (2, 1))
         young = manifest.prune(self.lab.store, "home", older_than_days=1)
         self.assertEqual(young["vanished"], 0)         # seen_at is the last real sighting, not the last build
         self.assertEqual(manifest.prune(self.lab.store, "home", older_than_days=1,
                                         now=lambda: time.time() + 2 * DAY)["vanished"], 1)
+
+    def test_every_table_keyed_by_title_id_is_pruned(self):
+        keyed = set()
+        for (name,) in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'"):
+            cols = {r[1] for r in self.db.execute(f"PRAGMA table_info({name})")}
+            if "title_id" in cols:
+                keyed.add(name)
+        self.assertEqual(keyed, {"library_files", "manifest_links", "verifications", "probe_results",
+                                 "library_absent"})
+        deleted = manifest.prune(self.lab.store, "home")["would_delete"]
+        self.assertEqual(set(deleted), {"titles", "files", "links", "verifications", "probe_results", "marks"})
+
+    def test_pruned_titles_identities_stay_out_of_media_and_seadex_ids(self):
+        from kura import anilist_list
+        from kura.sources import seadex
+        rows = [(self.absent_key, 999000002), ("anime/Kura Extra Show", 999000003)]
+        self.db.executemany(
+            "INSERT INTO title_identities(library, title, anilist_id, status, source, updated_at)"
+            " VALUES ('home', ?, ?, 'resolved', 'list', 1.0)", rows)
+        self.db.commit()
+        for stage in ("absent", "pruned"):
+            self.assertEqual(anilist_list.media_ids(self.db, [], "home", False), [999000003], stage)
+            self.assertEqual(seadex.library_ids(self.lab.store, "home"), [999000003], stage)
+            manifest.prune(self.lab.store, "home", dry_run=False)
+
+    absent_key = "disk1/Kura Sample Series"
 
     def test_other_libraries_are_untouched(self):
         row = next(iter(self.repo.titles("home")))

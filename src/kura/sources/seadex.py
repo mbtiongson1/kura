@@ -28,6 +28,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from ..manifest_store import PRESENT_IDENTITY_SQL
 from ..models import KuraError
 from ..provider import NoRedirect
 from ..ratelimit import SharedLimiter
@@ -562,7 +563,8 @@ def library_ids(store, library: str) -> list[int]:
     db = store.db
     ids = [r[0] for r in db.execute(
         "SELECT DISTINCT anilist_id FROM title_identities WHERE library=? AND anilist_id IS NOT NULL "
-        "AND status IN ('resolved','pinned') ORDER BY anilist_id", (library,))]
+        "AND status IN ('resolved','pinned') AND " + PRESENT_IDENTITY_SQL + " ORDER BY anilist_id",
+        (library, library, library))]
     ids += [r[0] for r in db.execute(
         "SELECT DISTINCT e.anilist_id FROM anilist_list_entries e JOIN anilist_users u "
         "ON u.user_id=e.user_id WHERE u.is_viewer=1 ORDER BY e.anilist_id")]

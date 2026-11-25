@@ -206,11 +206,12 @@ no titles, such as an unmounted share) marks nothing, and so does a failed build
 only some roots on purpose, pass `--keep-other-roots`. A title that vanishes from a root that
 *was* scanned keeps its older behaviour: it stays visible as `stale` (and a plan refuses it).
 
-`kura manifest prune --library home` deletes rows from Kura's own state: absent titles and
-titles that vanished from a scanned root, with their file, link, verification and probe-result
+`kura manifest prune --library home` deletes rows from Kura's own state: absent titles and, with
+`--older-than-days`, titles that vanished from a scanned root, with their file, link, verification and probe-result
 rows (torrent rows are shared and stay). It never touches media or `.torrent` files. Without
 `--yes` it only prints the counts (`--dry-run` is the default; the two flags are mutually
-exclusive). `--older-than-days N` keeps titles absent (or last seen) for less than N days.
+exclusive). `--older-than-days N` keeps titles absent (or last seen) for less than N days; vanished titles are only
+deleted when it is given (a root that was down for one build must not cost their history).
 
 ### Quarantine plan (a proposal only)
 ```sh
