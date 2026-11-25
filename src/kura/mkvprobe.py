@@ -3,7 +3,7 @@
 No I/O of its own: every byte arrives through the ``read(offset, length)`` callable the
 caller supplies (``probe.py`` and the CLI give it ``os.pread`` on a descriptor that came
 from ``rofs``). The probe never needs the whole file. It walks the Segment's level-1
-element headers (at most 16 bytes per header), skips bodies, and reads a body only when it
+element headers (at most 12 bytes per header, requested incrementally), skips bodies, and reads a body only when it
 holds something wanted, each under its own cap:
 
   Info, Tracks (<= 1 MiB), Chapters (<= 256 KiB, presence and atom count), Attachments
@@ -404,6 +404,22 @@ class _Probe:
 
     # -- iteration -----------------------------------------------------------------------
 
+    def fetch_header(self, pos, end):
+        """The bytes of the element header at `pos`, requested incrementally so a read never
+        reaches past the header into the body (attachment data must stay unread)."""
+        room = end - pos
+        head = self.rd.read(pos, 1)
+        if not head or head[0] == 0 or 9 - head[0].bit_length() > 4:
+            return head                                   # empty or invalid: _header will say so
+        n = 9 - head[0].bit_length()
+        head += self.rd.read(pos + 1, min(n, room - 1))   # rest of the id, first byte of the size
+        if len(head) < n + 1 or head[n] == 0:
+            return head
+        m = 9 - head[n].bit_length()
+        if m > 1:
+            head += self.rd.read(pos + n + 1, min(m - 1, room - n - 1))
+        return head
+
     def file_children(self, start, end):
         """Yield ``(id, body, body_end, complete)`` for the elements in ``[start, end)`` of the
         file, reading only their headers. A size beyond `end` is clipped (and flagged); an
@@ -411,7 +427,7 @@ class _Probe:
         pos = start
         while pos < end:
             self.count()
-            head = self.rd.read(pos, min(16, end - pos))
+            head = self.fetch_header(pos, end)
             try:
                 eid, size, hl = _header(head, 0, len(head))
             except _Short:

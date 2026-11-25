@@ -21,7 +21,7 @@ kura probe library --library NAME --root LABEL=PATH... [--sample groups|all] [--
 length)` callable. The CLI passes `os.pread` on a descriptor opened by `rofs`
 (`O_RDONLY|O_NOFOLLOW|O_CLOEXEC`, regular files only).
 
-1. The EBML header and the Segment's level-1 element headers (at most 16 bytes each). Bodies
+1. The EBML header and the Segment's level-1 element headers (at most 12 bytes each, requested a few at a time so a read never reaches into a body). Bodies
    are skipped by size, so a multi-megabyte font attachment costs nothing.
 2. Bodies are read only for: Info; Tracks (at most 1 MiB); Chapters (presence and atom count,
    at most 256 KiB); Attachments (child headers only: name, mime type and the size of the data;

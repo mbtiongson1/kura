@@ -92,6 +92,26 @@ class Encoder(unittest.TestCase):
         self.assertEqual(result["bytes_read"], sum(len(src.data[o:o + n]) for o, n in src.reads))
         self.assertEqual(result["attachments"], {"count": 1, "fonts": 1, "bytes": 5 * MIB, "names": ["Kura Sans.ttf"]})
 
+    def test_no_read_ever_touches_attachment_data(self):
+        size = 700
+        data = mkvgen.build(attach=[("a.ttf", "font/ttf", size), ("b.ttf", "font/ttf", size)])
+        spans, at = [], 0
+        pattern = mkvgen.eid(0x465C) + mkvgen.vint(size)
+        while (at := data.find(pattern, at)) >= 0:
+            spans.append((at + len(pattern), at + len(pattern) + size))
+            at += len(pattern) + size
+        self.assertEqual(len(spans), 2)
+
+        def guarded(offset, n):
+            for lo, hi in spans:
+                self.assertFalse(offset < hi and offset + n > lo, (offset, n, lo, hi))
+            return data[offset:offset + n]
+
+        result = probe(guarded, len(data))
+        self.assertEqual((result["status"], result["attachments"]["count"], result["attachments"]["bytes"]),
+                         ("ok", 2, 2 * size))
+        self.assertEqual(result["encoder"]["library"], "x264")
+
     def test_audio_block_first_in_the_cluster_is_ignored(self):
         result, _ = run(mkvgen.build(decoy_audio=True))
         self.assertEqual(result["encoder"]["settings"]["crf"], "18.0")
