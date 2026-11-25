@@ -10,7 +10,7 @@ their arguments validated. Every command returns data for the v1 envelope that
 import os
 from pathlib import Path
 
-from . import manifest
+from . import manifest, quarantine
 from .anilist import AniList
 from .inventory import scan
 from .models import KuraError
@@ -63,6 +63,16 @@ def register(sub, parser_class):
     q.add_argument("--library", required=True)
     q.add_argument("--status", choices=manifest.STATUSES)
     q.add_argument("--title", help="Exact title key, <root label>/<entry>")
+    q = leaf(manifest_, "plan")
+    q.add_argument("--library", required=True)
+    q.add_argument("--title", action="append", metavar="KEY",
+                   help="Only consider this title key (repeatable); default all titles")
+    q.add_argument("--min-seeders", type=int, default=3)
+    q.add_argument("--skip-swarm", action="store_true",
+                   help="Propose without swarm data; recorded as swarm_unchecked in the plan")
+    q.add_argument("--quarantine-dir", default=quarantine.QUARANTINE_DIR)
+    q.add_argument("--max-inventory-age-h", type=float, default=24)
+    q.add_argument("--min-quiet-days", type=float, default=14)
 
 
 def _abs(value: str) -> Path:
@@ -136,6 +146,20 @@ def _verify(args) -> dict:
             "verification": _trim(result.json(), "files")}
 
 
+def _plan(args, open_store) -> dict:
+    """Write a quarantine *proposal*; nothing is moved, renamed or deleted, ever."""
+    options = dict(library=args.library, titles=args.title, quarantine_dir=args.quarantine_dir,
+                   min_seeders=args.min_seeders, skip_swarm=args.skip_swarm,
+                   max_inventory_age_h=args.max_inventory_age_h, min_quiet_days=args.min_quiet_days)
+    checked = {k: v for k, v in options.items() if k != "skip_swarm"}
+    quarantine.check_args(**checked, quarantine_days=30, max_swarm_age_h=24)
+    store = open_store()
+    try:
+        return quarantine.plan(store, **options)
+    finally:
+        store.db.close()
+
+
 def _manifest(args, open_store) -> dict:
     if args.operation == "show":
         store = open_store()
@@ -143,6 +167,8 @@ def _manifest(args, open_store) -> dict:
             return manifest.show(store, args.library, args.status, args.title)
         finally:
             store.db.close()
+    if args.operation == "plan":
+        return _plan(args, open_store)
     roots = _roots(args.root)
     policy = load_policy(_abs(args.tracker_denylist), _abs(args.protected))
     budget = _budget(args.max_read_gib)
