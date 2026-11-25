@@ -88,16 +88,9 @@ class Marking(Base):
 
     def test_incomplete_builds_mark_nothing(self):
         self.build("disk1", "disk2")
-        # Read budget spent: verification is deferred.
-        out = self.build("anime", max_read_bytes=0)
-        self.assertEqual((out["absent"]["complete"], out["absent"]["reason"], out["absent"]["marked"]),
-                         (False, "incomplete_build", 0))
         # Interrupted.
         out = self.build("anime", reverify=True, should_stop=lambda: True)
         self.assertEqual((out["interrupted"], out["absent"]["marked"]), (True, 0))
-        # Budget that runs dry in the middle of a verification.
-        out = self.build("anime", reverify=True, max_read_bytes=100)
-        self.assertEqual((out["absent"]["complete"], out["absent"]["marked"]), (False, 0))
         # A root with nothing in it (an unmounted share) proves nothing.
         empty = self.lab.tmp / "empty"
         empty.mkdir()
@@ -109,6 +102,21 @@ class Marking(Base):
         self.assertEqual((out["absent"]["reason"], out["absent"]["marked"]), ("disabled", 0))
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM library_absent").fetchone()[0], 0)
         self.assertEqual(len(self.keys()), 4)
+
+    def test_a_spent_read_budget_still_marks(self):
+        # Verification rotates across nights under a read budget; the inventory is still complete.
+        self.build("disk1", "disk2")
+        out = self.build("anime", max_read_bytes=0)
+        self.assertGreater(out["verification"]["deferred"], 0)
+        self.assertEqual(out["absent"], {"marked": 2, "complete": True, "reason": None})
+
+    def test_a_budget_spent_mid_verification_still_marks(self):
+        self.build("disk1", "disk2")
+        out = self.build("anime", reverify=True, max_read_bytes=100)
+        verdicts = {r[0] for r in self.db.execute(
+            "SELECT verdict FROM verifications ORDER BY id DESC LIMIT 1")}
+        self.assertEqual(verdicts, {"budget_exhausted"})     # the case really is a mid-verification cut
+        self.assertEqual((out["absent"]["complete"], out["absent"]["marked"]), (True, 2))
 
     def test_a_stop_requested_after_the_last_step_marks_nothing(self):
         self.build("disk1")

@@ -513,7 +513,6 @@ def build(store, *, roots: dict[str, Path], library: str, torrents_dir,
         left = max_read_bytes
         stats = {"run": 0, "cached": 0, "deferred": 0, "skipped_protected": 0, "bytes_read": 0}
         interrupted = False
-        cut_short = False
         for infohash, (meta, protection) in parsed.items():
             if should_stop():
                 interrupted = True
@@ -537,7 +536,6 @@ def build(store, *, roots: dict[str, Path], library: str, torrents_dir,
                 v = verify_tree(meta, Path(roots[m.root]), m.mapping,
                                 max_read_bytes=left, should_stop=should_stop)
                 stats["run"] += 1
-                cut_short = cut_short or v.verdict in ("interrupted", "budget_exhausted")
                 stats["bytes_read"] += v.bytes_read
                 if left is not None:
                     left -= v.bytes_read
@@ -577,11 +575,13 @@ def build(store, *, roots: dict[str, Path], library: str, torrents_dir,
                         _title_row(key, title, _identity(note, assessments[key]))], inv.scanned_at)
 
         # 6. Titles under root labels this build was not given are absent, but only when the
-        # whole build ran to the end: a cut or failed run proves nothing about what is gone.
+        # inventory is complete and the run was not stopped: a stopped or failed run proves
+        # nothing about what is gone. A spent read budget is normal (verification rotates across
+        # nights) and says nothing about which titles exist, so it does not block the mark.
         absent = {"marked": 0, "complete": False, "reason": None}
         if not mark_absent:
             absent["reason"] = "disabled"
-        elif interrupted or cut_short or stats["deferred"] or should_stop():
+        elif interrupted or should_stop():
             absent["reason"] = "incomplete_build"
         elif any(not inv.titles for inv in invs.values()):
             absent["reason"] = "empty_root"       # an unmounted share looks exactly like this
