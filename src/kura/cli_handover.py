@@ -10,7 +10,7 @@ their arguments validated. Every command returns data for the v1 envelope that
 import os
 from pathlib import Path
 
-from . import manifest, quarantine, resolve, scrape
+from . import idlist, manifest, quarantine, resolve, scrape
 from .anilist import AniList
 from .inventory import scan
 from .models import KuraError
@@ -76,6 +76,9 @@ def register(sub, parser_class):
     q.add_argument("--quarantine-dir", default=quarantine.QUARANTINE_DIR)
     q.add_argument("--max-inventory-age-h", type=float, default=24)
     q.add_argument("--min-quiet-days", type=float, default=14)
+    q.add_argument("--retain", metavar="FILE",
+                   help="AniList ID list whose titles are never proposed; with it every title "
+                        "needs a known identity (see 'kura identity sync')")
     q = leaf(manifest_, "swarm")
     q.add_argument("--library", required=True)
     q.add_argument("--title", action="append", metavar="KEY",
@@ -181,9 +184,10 @@ def _plan(args, open_store) -> dict:
                    max_inventory_age_h=args.max_inventory_age_h, min_quiet_days=args.min_quiet_days)
     checked = {k: v for k, v in options.items() if k != "skip_swarm"}
     quarantine.check_args(**checked, quarantine_days=30, max_swarm_age_h=24)
+    retain = idlist.parse(_abs(args.retain)) if args.retain else None
     store = open_store()
     try:
-        return quarantine.plan(store, **options)
+        return quarantine.plan(store, retain=retain, **options)
     finally:
         store.db.close()
 
