@@ -93,6 +93,35 @@ class Spacing(Base):
 
 
 class Penalty(Base):
+    def test_penalty_recorded_during_the_sleep_is_waited_out(self):
+        self.limiter().acquire(10)
+        other = self.limiter()
+        sleeps = []
+
+        def sleeper(seconds):
+            sleeps.append(seconds)
+            self.wall.now += seconds
+            if len(sleeps) == 1:                        # another process hits a 429 while we sleep
+                other.penalize(self.wall.now + 20)
+
+        lim = SharedLimiter(self.root, "anilist", interval=2.0, wall=self.wall, sleep=sleeper)
+        self.assertEqual(lim.acquire(60), 22.0)
+        self.assertEqual(sleeps, [2.0, 20.0])
+
+    def test_penalty_during_the_sleep_beyond_budget_refuses(self):
+        self.limiter().acquire(10)
+        other = self.limiter()
+
+        def sleeper(seconds):
+            self.wall.now += seconds
+            other.penalize(self.wall.now + 500)
+
+        lim = SharedLimiter(self.root, "anilist", interval=2.0, wall=self.wall, sleep=sleeper)
+        with self.assertRaises(KuraError) as caught:
+            lim.acquire(10)
+        self.assertEqual(caught.exception.code, "rate_limited")
+        self.assertEqual(caught.exception.details["retry_after"], 500.0)
+
     def test_penalty_persists_across_instances(self):
         self.limiter().penalize(self.wall.now + 30)
         self.assertEqual(self.limiter().acquire(60), 30.0)
