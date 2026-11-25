@@ -3,14 +3,14 @@
 Three commands are *stateless*: ``library inventory``, ``torrent inspect`` and
 ``torrent verify`` never open the state database, never touch HOME and write nothing, so
 they run in a container with a read-only root filesystem and a read-only library mount.
-Only ``manifest build`` and ``manifest show`` open Kura's private state, lazily, after
+Only the ``manifest`` commands (``build``, ``show``, ``plan``, ``swarm``) open Kura's private state, lazily, after
 their arguments validated. Every command returns data for the v1 envelope that
 ``cli.main`` prints; this module never prints.
 """
 import os
 from pathlib import Path
 
-from . import manifest, quarantine
+from . import manifest, quarantine, scrape
 from .anilist import AniList
 from .inventory import scan
 from .models import KuraError
@@ -73,6 +73,12 @@ def register(sub, parser_class):
     q.add_argument("--quarantine-dir", default=quarantine.QUARANTINE_DIR)
     q.add_argument("--max-inventory-age-h", type=float, default=24)
     q.add_argument("--min-quiet-days", type=float, default=14)
+    q = leaf(manifest_, "swarm")
+    q.add_argument("--library", required=True)
+    q.add_argument("--title", action="append", metavar="KEY",
+                   help="Only scrape this title key (repeatable); default every reacquirable title")
+    q.add_argument("--max-requests", type=int, default=scrape.MAX_REQUESTS,
+                   help="Upper bound on tracker requests in this run")
 
 
 def _abs(value: str) -> Path:
@@ -160,6 +166,17 @@ def _plan(args, open_store) -> dict:
         store.db.close()
 
 
+def _swarm(args, open_store) -> dict:
+    """HTTP tracker scrape of public, unprotected torrents. Needs network; touches no library."""
+    scrape.check_args(args.library, args.title, args.max_requests)
+    store = open_store()
+    try:
+        return scrape.scrape(store, library=args.library, titles=args.title,
+                             max_requests=args.max_requests)
+    finally:
+        store.db.close()
+
+
 def _manifest(args, open_store) -> dict:
     if args.operation == "show":
         store = open_store()
@@ -169,6 +186,8 @@ def _manifest(args, open_store) -> dict:
             store.db.close()
     if args.operation == "plan":
         return _plan(args, open_store)
+    if args.operation == "swarm":
+        return _swarm(args, open_store)
     roots = _roots(args.root)
     policy = load_policy(_abs(args.tracker_denylist), _abs(args.protected))
     budget = _budget(args.max_read_gib)

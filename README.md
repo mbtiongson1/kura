@@ -194,13 +194,32 @@ fresh re-inventory, destination absent, a rename that never replaces, swarm chec
 right before the move). A title is proposed only if it is `reacquirable`, its policy lists
 were complete, its inventory is at most 24 hours old, nothing inside it changed for 14
 days, it was assessed under the same policy as the newest build, and every linked torrent has a recent stored swarm check with at least 3 seeders (3 is also the floor for `--min-seeders`).
-Swarm data has no collector yet, so until it exists the plan needs `--skip-swarm`, which is
+Swarm data comes from `kura manifest swarm` (below); without a recent check the plan needs `--skip-swarm`, which is
 recorded as `swarm_unchecked` in the plan and on every move. Every other title appears in
 `refused` with fixed reason tokens. Each move goes to `.kura-quarantine/<batch_id>/<title>`
 on the same root (the only quarantine name the inventory ignores); `undo` lists the exact
 inverse renames and `purge_not_before` is 30 days after the plan was created. Paths are
 relative to a root label, never absolute. The `plan_hash` is the SHA-256 of the canonical
 plan without that field, so any edit invalidates the approval.
+
+### Swarm health (network, public torrents only)
+```sh
+kura manifest swarm --library home [--title media/Some\ Title ...] [--max-requests 100]
+```
+`manifest swarm` asks the trackers of every `reacquirable` title's torrents how many seeders
+they report (HTTP(S) scrape, BEP 48) and stores the answers for `manifest plan`; it is the only
+Kura command that talks to trackers, so run it where there is network (the inventory and
+verify containers stay network-less). It reads only the state database, never the library.
+Private and protected torrents are never scraped and get no row. Trackers are taken from the
+stored magnet link, which holds only credential-free `/announce` URLs; the scrape URL is derived
+by replacing `announce` with `scrape` in the last path component. At most 3 trackers are tried per
+torrent (the first that lists it decides), at most 74 infohashes go into one request, requests to
+one host are spaced, and a run is capped by `--max-requests`. Every request is bounded: 5 seconds
+in total, 256 KiB, no redirects, no proxy settings, and the DNS answers must all be public
+addresses; the connection is made to the validated address itself. A tracker that fails, answers
+garbage or does not list the torrent is recorded as `unavailable` and never fails the run. Output
+and stored detail name tracker hosts only, never full URLs. UDP trackers (BEP 15) are not
+queried yet; a torrent with only UDP trackers is `unavailable` (`no_tracker`).
 
 ## Storage, interruption and status
 Default state: `~/.local/share/kura/state.sqlite3` (preferences, receipts, audit events
