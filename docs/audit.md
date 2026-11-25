@@ -144,7 +144,8 @@ the owner to look at, nothing more.
 
 The audit is a state-only step for a runner: it needs no media and no network, so a runner should
 run it in an offline container with the policy files staged read-only. Absent titles (marked
-`absent_from_scan` by `manifest build`) and superseded manifest links are ignored.
+`absent_from_scan` by `manifest build`, or absent after a build with retired root labels; see
+`kura manifest prune`) and superseded manifest links are ignored.
 
 ```
 audit  ->  kura audit --library LIBRARY --retain /policy/retain.txt [--policy-overrides /policy/policy-overrides.txt]

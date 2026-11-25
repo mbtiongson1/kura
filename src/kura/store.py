@@ -25,7 +25,7 @@ def validate_prefs(p: Preferences) -> Preferences:
     return p
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Each migration is idempotent DDL (IF NOT EXISTS) so a concurrent opener that
 # queued behind the writer re-runs it harmlessly; the version bump is guarded.
@@ -136,6 +136,14 @@ MIGRATIONS = {
           id INTEGER PRIMARY KEY, library TEXT NOT NULL, created_at REAL NOT NULL,
           report_sha256 TEXT NOT NULL CHECK(length(report_sha256)=64), report TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS audit_reports_library ON audit_reports(library, created_at);
+    """,
+    # Absent titles: rows that a complete build no longer saw (for example titles recorded
+    # under root labels that were retired). A side table rather than ALTER TABLE so the
+    # migration stays idempotent DDL like the others; a row here hides the title everywhere,
+    # deleting the row (a build that sees the title again) brings it back.
+    4: """
+        CREATE TABLE IF NOT EXISTS library_absent (
+            title_id INTEGER PRIMARY KEY, absent_at REAL NOT NULL);
     """,
 }
 

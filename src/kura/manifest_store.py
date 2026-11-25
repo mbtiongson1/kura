@@ -127,8 +127,10 @@ class ManifestRepo:
         blocked (list[str], default []), optional identity (JSON-able dict or None;
         omitted keeps the stored identity), optional files (list of dicts with
         rel_path, size, mtime_ns, dev, ino; omitted means no file rows, so callers
-        that need evidence must pass them). Titles absent from `titles` are left
-        untouched, keeping their old seen_at. Returns {rel_path: title_id}.
+        that need evidence must pass them), optional seen_at (overrides the call's value
+        for that title, so a vanished title keeps its true last-seen time). Titles absent
+        from `titles` are left untouched, keeping their old seen_at. Saving a title makes
+        it present again (any absent mark is cleared). Returns {rel_path: title_id}.
         """
         if not isinstance(library, str) or not library:
             raise _invalid("Library label is required")
@@ -153,11 +155,12 @@ class ManifestRepo:
                     (library, title["rel_path"], title["kind"], root_dev,
                      title.get("file_count", len(files)), title["total_bytes"],
                      title["newest_mtime_ns"], canonical(list(title.get("blocked") or [])),
-                     identity, seen_at, 1 if has_identity else 0))
+                     identity, title.get("seen_at", seen_at), 1 if has_identity else 0))
                 title_id = db.execute(
                     "SELECT id FROM library_titles WHERE library=? AND rel_path=?",
                     (library, title["rel_path"])).fetchone()[0]
                 ids[title["rel_path"]] = title_id
+                db.execute("DELETE FROM library_absent WHERE title_id=?", (title_id,))
                 db.execute("DELETE FROM library_files WHERE title_id=?", (title_id,))
                 db.executemany(
                     "INSERT INTO library_files VALUES (?,?,?,?,?,?)",
@@ -165,20 +168,83 @@ class ManifestRepo:
                      for f in files])
         return ids
 
-    def titles(self, library: str) -> list[dict]:
+    def titles(self, library: str, include_absent: bool = False) -> list[dict]:
         """Titles of a library ordered by rel_path.
 
+        Titles marked absent (see ``mark_absent``) are left out unless `include_absent`.
         Keys: id, library, rel_path, kind, root_dev, file_count, total_bytes,
-        newest_mtime_ns, blocked (list[str]), identity (dict|None), seen_at.
+        newest_mtime_ns, blocked (list[str]), identity (dict|None), seen_at, absent_at
+        (float|None; always None unless `include_absent`).
         """
         rows = self.db.execute(
-            "SELECT id, library, rel_path, kind, root_dev, file_count, total_bytes,"
-            " newest_mtime_ns, blocked, identity, seen_at FROM library_titles"
-            " WHERE library=? ORDER BY rel_path", (library,)).fetchall()
+            "SELECT t.id, t.library, t.rel_path, t.kind, t.root_dev, t.file_count, t.total_bytes,"
+            " t.newest_mtime_ns, t.blocked, t.identity, t.seen_at, a.absent_at FROM library_titles t"
+            " LEFT JOIN library_absent a ON a.title_id=t.id"
+            " WHERE t.library=? AND (? OR a.title_id IS NULL) ORDER BY t.rel_path",
+            (library, 1 if include_absent else 0)).fetchall()
         return [{"id": r[0], "library": r[1], "rel_path": r[2], "kind": r[3], "root_dev": r[4],
                  "file_count": r[5], "total_bytes": r[6], "newest_mtime_ns": r[7],
-                 "blocked": _load(r[8]), "identity": _load(r[9]), "seen_at": r[10]}
+                 "blocked": _load(r[8]), "identity": _load(r[9]), "seen_at": r[10],
+                 "absent_at": r[11]}
                 for r in rows]
+
+    def mark_absent(self, library: str, scanned_labels, at: float) -> int:
+        """Mark every present title whose root label is not in `scanned_labels` as absent.
+
+        The title key is ``<root label>/<entry>``. The mark is reversible (saving the title
+        again clears it) and keeps its first timestamp. Returns the number newly marked.
+        Callers must only use this after a complete build.
+        """
+        scanned = set(scanned_labels)
+        with self._tx() as db:
+            rows = db.execute(
+                "SELECT t.id, t.rel_path FROM library_titles t LEFT JOIN library_absent a"
+                " ON a.title_id=t.id WHERE t.library=? AND a.title_id IS NULL",
+                (library,)).fetchall()
+            ids = [i for i, rel in rows if rel.split("/", 1)[0] not in scanned]
+            db.executemany("INSERT OR IGNORE INTO library_absent(title_id, absent_at) VALUES (?,?)",
+                           [(i, at) for i in ids])
+            return len(ids)
+
+    def prunable(self, library: str, cutoff: float | None = None) -> list[dict]:
+        """Titles `prune_titles` may delete: absent-marked ones whose mark is at or before
+        `cutoff`, and titles a scan found vanished (``absent_from_scan``) last seen at or
+        before it. None means no age limit. Keys: id, rel_path, state ('absent'|'vanished')."""
+        out = []
+        for r in self.db.execute(
+                "SELECT t.id, t.rel_path, t.blocked, t.seen_at, a.absent_at FROM library_titles t"
+                " LEFT JOIN library_absent a ON a.title_id=t.id WHERE t.library=? ORDER BY t.rel_path",
+                (library,)):
+            if r[4] is not None:
+                state, when = "absent", r[4]
+            elif "absent_from_scan" in (_load(r[2]) or []):
+                state, when = "vanished", r[3]
+            else:
+                continue
+            if cutoff is None or when <= cutoff:
+                out.append({"id": r[0], "rel_path": r[1], "state": state})
+        return out
+
+    def prune_titles(self, title_ids: list[int], dry_run: bool = True) -> dict[str, int]:
+        """Delete these titles with their files, links, verifications, probe results and
+        absent marks, from Kura's own state only. Returns the row counts (what was deleted,
+        or with `dry_run` what would be). Torrent rows are shared and never deleted."""
+        ids = list(dict.fromkeys(title_ids))
+        tables = (("titles", "library_titles", "id"), ("files", "library_files", "title_id"),
+                  ("links", "manifest_links", "title_id"), ("verifications", "verifications", "title_id"),
+                  ("probe_results", "probe_results", "title_id"), ("marks", "library_absent", "title_id"))
+        counts = {name: 0 for name, _, _ in tables}
+        with self._tx() as db:
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                marks = ",".join("?" * len(chunk))
+                for name, table, column in tables:
+                    where = f" WHERE {column} IN ({marks})"
+                    if dry_run:
+                        counts[name] += db.execute(f"SELECT COUNT(*) FROM {table}{where}", chunk).fetchone()[0]
+                    else:
+                        counts[name] += db.execute(f"DELETE FROM {table}{where}", chunk).rowcount
+        return counts
 
     def title_files(self, title_id: int) -> list[dict]:
         """File evidence of one title ordered by rel_path.

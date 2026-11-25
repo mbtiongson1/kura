@@ -3,7 +3,7 @@
 Three commands are *stateless*: ``library inventory``, ``torrent inspect`` and
 ``torrent verify`` never open the state database, never touch HOME and write nothing, so
 they run in a container with a read-only root filesystem and a read-only library mount.
-Only the ``manifest`` commands (``build``, ``show``, ``plan``, ``swarm``, ``resolve``) open Kura's private state, lazily, after
+Only the ``manifest`` commands (``build``, ``show``, ``prune``, ``plan``, ``swarm``, ``resolve``) open Kura's private state, lazily, after
 their arguments validated. Every command returns data for the v1 envelope that
 ``cli.main`` prints; this module never prints.
 """
@@ -62,6 +62,17 @@ def register(sub, parser_class):
     q.add_argument("--reverify", action="store_true", help="Ignore cached verifications")
     q.add_argument("--no-anilist", action="store_true",
                    help="Skip AniList identity lookups (on by default, rate-limited and cached)")
+    q.add_argument("--keep-other-roots", action="store_true",
+                   help="Partial rebuild: do not mark titles under root labels not given here as absent")
+    q = leaf(manifest_, "prune")
+    q.add_argument("--library", required=True)
+    q.add_argument("--older-than-days", type=float, metavar="N",
+                   help="Only titles absent (or last seen) at least N days ago; default all")
+    approval = q.add_mutually_exclusive_group()
+    approval.add_argument("--dry-run", action="store_true",
+                          help="Count what would be deleted (the default without --yes)")
+    approval.add_argument("--yes", action="store_true",
+                          help="Delete absent titles from Kura's state; media is never touched")
     q = leaf(manifest_, "show")
     q.add_argument("--library", required=True)
     q.add_argument("--status", choices=manifest.STATUSES)
@@ -238,6 +249,13 @@ def _manifest(args, open_store) -> dict:
             return manifest.show(store, args.library, args.status, args.title)
         finally:
             store.db.close()
+    if args.operation == "prune":
+        store = open_store()
+        try:
+            return manifest.prune(store, args.library, older_than_days=args.older_than_days,
+                                  dry_run=not args.yes)
+        finally:
+            store.db.close()
     if args.operation == "plan":
         return _plan(args, open_store)
     if args.operation == "swarm":
@@ -252,7 +270,8 @@ def _manifest(args, open_store) -> dict:
         aliases = _aliases(args, store)
         return manifest.build(store, roots=roots, library=args.library,
                               torrents_dir=[_abs(p) for p in args.torrents], policy=policy,
-                              max_read_bytes=budget, reverify=args.reverify, aliases=aliases)
+                              max_read_bytes=budget, reverify=args.reverify, aliases=aliases,
+                              mark_absent=not args.keep_other_roots)
     finally:
         store.db.close()
 

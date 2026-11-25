@@ -434,7 +434,8 @@ def media_ids(db, ids, library, missing) -> list[int]:
     if library is not None:
         found = [r[0] for r in db.execute(
             "SELECT DISTINCT anilist_id FROM title_identities WHERE library=? AND anilist_id IS NOT NULL "
-            "ORDER BY anilist_id", (library,))]
+            "AND title NOT IN (SELECT t.rel_path FROM library_titles t JOIN library_absent a ON a.title_id=t.id"
+            " WHERE t.library=?) ORDER BY anilist_id", (library, library))]
     else:
         found = sorted(set(ids))
     if len(found) > MAX_IDS:
