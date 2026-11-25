@@ -17,7 +17,7 @@ import urllib.parse
 
 from .anilist import valid_token
 from .models import KuraError
-from .safety import ensure_dir
+from .safety import ensure_dir, no_symlinks
 
 DEFAULT_CLIENT_ID = None        # public identifier, set in a 1-line PR once the owner registers the app
 CLIENT_ID_ENV = "KURA_ANILIST_CLIENT_ID"
@@ -148,6 +148,7 @@ def load(root: Path) -> dict:
     """The stored record. Refuses symlinks and any file or directory readable by others."""
     root = Path(root)
     target = path(root)
+    no_symlinks(root)       # every component, as on save
     try:
         if root.is_symlink() or stat.S_IMODE(root.lstat().st_mode) & 0o077:
             raise KuraError("anilist_token_insecure", "The Kura state directory must be private (0700)")

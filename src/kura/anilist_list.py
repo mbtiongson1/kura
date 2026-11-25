@@ -384,7 +384,7 @@ def list_sync(store, ani, *, user_name=None, max_age_h=12.0, refresh=False, entr
                          (user_id,)).fetchone()
     else:
         row = db.execute("SELECT list_fetched_at,favourites_fetched_at,user_id,is_viewer FROM anilist_users "
-                         "WHERE name=? COLLATE NOCASE", (user_name,)).fetchone()
+                         "WHERE name=? COLLATE NOCASE ORDER BY list_fetched_at DESC", (user_name,)).fetchone()
         if row and row[3]:      # that snapshot came from the authenticated account and may hold private entries
             raise KuraError("invalid_arguments", "That is the logged-in account; omit --user to sync it")
         user_id = row[2] if row else None
@@ -401,8 +401,9 @@ def list_sync(store, ani, *, user_name=None, max_age_h=12.0, refresh=False, entr
     error, fetched_now = None, False
     if not (fresh(fetched) and matches):
         try:
-            user, rows, media = fetch_list(req, user_id=user_id, user_name=user_name if user_id is None else None,
-                                           auth=token is not None)
+            # Public refreshes resolve the requested name afresh: a cached ID may belong to a renamed account.
+            user, rows, media = fetch_list(req, user_id=user_id if token is not None else None,
+                                           user_name=user_name, auth=token is not None)
             user_id = user["id"]
             save_snapshot(db, user=user, is_viewer=token is not None, score_format=None,
                           entries=rows, media=media, now=now)

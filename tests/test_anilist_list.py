@@ -191,6 +191,17 @@ class ListSync(Lab):
         self.sync()
         self.assertEqual(self.fake.calls[made]["token"], self.token)
 
+    def test_public_refresh_resolves_the_name_not_a_cached_id(self):
+        anilist_auth.remove(self.root)
+        self.fake.viewer = {"id": BASE_ID + 800, "name": "RenamedKura"}
+        self.sync(user_name="RenamedKura")
+        self.fake.viewer = {"id": BASE_ID + 801, "name": "RenamedKura"}      # the name now belongs to another account
+        out = self.sync(user_name="RenamedKura", refresh=True)
+        self.assertEqual(self.fake.calls[-2]["variables"].get("userName"), "RenamedKura")
+        self.assertNotIn("userId", self.fake.calls[-2]["variables"])
+        self.assertEqual(out["user"]["id"], BASE_ID + 801)
+        self.assertEqual(self.sync(user_name="RenamedKura")["user"]["id"], BASE_ID + 801)
+
     def test_partial_failure_keeps_the_old_snapshot_and_reports_stale(self):
         self.fake.per_chunk = 3
         self.sync()

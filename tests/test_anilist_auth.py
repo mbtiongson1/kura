@@ -223,6 +223,15 @@ class Login(Cli):
         self.assertEqual((code, out["error"]["code"]), (2, "unsafe_path"))
         self.assertEqual(list(real.iterdir()), [])
 
+    def test_symlinked_parent_directory_is_refused_on_load(self):
+        token, _ = self.login()
+        moved = self.home / "moved"
+        (self.home / ".local").rename(moved)
+        (self.home / ".local").symlink_to(moved)
+        for command in (("anilist", "whoami"), ("anilist", "list")):
+            code, out, _ = self.run_cli(*command)
+            self.assertEqual((code, out["error"]["code"]), (2, "unsafe_path"))
+
     def test_loose_permissions_are_refused_on_use(self):
         token, _ = self.login()
         path = self.root / "anilist-auth.json"
