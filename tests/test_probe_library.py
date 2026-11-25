@@ -362,6 +362,13 @@ class ReadOnly(Lib):
         self.assertEqual((code, out["error"]["code"]), (2, "unsafe_state_dir"))
         self.assertEqual(list(home.iterdir()), [])                            # nothing was created under the root
 
+    def test_a_root_on_another_device_than_the_inventory_is_refused_even_when_cached(self):
+        self.probe()
+        self.store.db.execute("UPDATE library_titles SET root_dev=root_dev+1")
+        self.store.db.commit()
+        out = self.probe()
+        self.assertEqual((out["cached"], out["probed"], out["failed"]), (0, 0, {"root_mismatch": 4}))
+
     def test_cached_results_still_need_a_valid_root(self):
         self.probe()
         link = self.tmp / "linked"

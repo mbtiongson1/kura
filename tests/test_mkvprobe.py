@@ -112,6 +112,27 @@ class Encoder(unittest.TestCase):
                          ("ok", 2, 2 * size))
         self.assertEqual(result["encoder"]["library"], "x264")
 
+    def test_a_forged_seekhead_cannot_aim_a_read_into_attachment_data(self):
+        size = 4096
+        att = bytearray(mkvgen.attachments([("a.ttf", "font/ttf", size)]))
+        pattern = mkvgen.eid(0x465C) + mkvgen.vint(size)
+        inside = att.index(pattern) + len(pattern) + 10           # a spot within the file data
+        forged = mkvgen.eid(0x1654AE6B) + mkvgen.vint(100)        # a fake Tracks header planted there
+        att[inside:inside + len(forged)] = forged
+        info, cluster = mkvgen.info(), mkvgen.el(0x1F43B675, mkvgen.uint(0xE7, 0))
+        target = len(mkvgen.seekhead([(0x1654AE6B, 0)])) + len(info) + inside
+        data = mkvgen.wrap(mkvgen.seekhead([(0x1654AE6B, target)]) + info + bytes(att) + cluster)
+        lo = data.index(pattern) + len(pattern)
+
+        def guarded(offset, n):
+            self.assertFalse(offset < lo + size and offset + n > lo, (offset, n))
+            return data[offset:offset + n]
+
+        result = probe(guarded, len(data))
+        self.assertIn("bad_seek", result["warnings"])
+        self.assertEqual(result["attachments"]["bytes"], size)
+        self.assertNotIn("internal_error", result["warnings"])
+
     def test_audio_block_first_in_the_cluster_is_ignored(self):
         result, _ = run(mkvgen.build(decoy_audio=True))
         self.assertEqual(result["encoder"]["settings"]["crf"], "18.0")

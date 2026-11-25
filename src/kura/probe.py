@@ -19,9 +19,15 @@ the current one; the stored result then carries an ``allowance`` key) and ``repr
 inventory: re-run ``manifest build`` after files change. Rows describing an access problem
 (unsafe, changed, io_error) are recorded but never count as hits, so they are retried.
 
+A title is only probed (or served from the cache) when its root opens safely and sits on the
+device recorded by the inventory (``root_mismatch`` otherwise).
+
 ``max_files`` bounds the files probed in one run. Cache hits and files that cannot be probed
 (changed, unsafe, io_error) do not use it up, so repeated runs walk through a selection larger
 than the cap and a stuck file cannot starve the files behind it. Files left over stay pending.
+
+``reprobe`` ignores the cache from the start of the selection each run, so it cannot continue where
+a capped run stopped: for a library larger than the caps, reprobe per title or raise the caps.
 
 Budget: ``max_read_bytes`` is a hard cap on bytes read in one run. A file gets
 ``min(per_file_bytes, what is left)`` (``per_file_bytes`` is itself capped at ``max_read_bytes``,
@@ -181,6 +187,10 @@ def probe_library(store, *, library, roots, sample="groups", titles=None, max_fi
                 root = root_fds[label]
                 if isinstance(root, KuraError):
                     fail(root.code)
+                    handled += 1
+                    continue
+                if os.fstat(root).st_dev != title["root_dev"]:
+                    fail("root_mismatch")                   # not the filesystem this title was inventoried on
                     handled += 1
                     continue
                 if not reprobe and _cached(store.db, title["id"], f, per_file_bytes):

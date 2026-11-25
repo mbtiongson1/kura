@@ -376,6 +376,7 @@ class _Probe:
         self.status = None
         self.seg0 = self.seg_end = 0
         self.seek = {}
+        self.walked = []                            # (body start, body end) of level-1 elements skipped or read
         self.seekheads = 0
         self.seen = set()
         self.info = {}
@@ -539,6 +540,7 @@ class _Probe:
     def segment(self):
         cluster = None
         for eid, body, bend, full in self.file_children(self.seg0, self.seg_end):
+            self.walked.append((body, self.seg_end if bend is None else bend))
             if eid == CLUSTER:
                 cluster = (body, bend)
                 break
@@ -580,8 +582,8 @@ class _Probe:
         if wanted in self.seen or wanted not in self.seek:
             return
         pos = self.seek[wanted]
-        if not self.seg0 <= pos < self.seg_end:
-            self.warn("bad_seek")
+        if not self.seg0 <= pos < self.seg_end or any(b <= pos < e for b, e in self.walked):
+            self.warn("bad_seek")                    # outside the segment, or inside an element already walked
             return
         for eid, body, bend, full in self.file_children(pos, self.seg_end):
             if eid != wanted or bend is None:

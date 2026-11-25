@@ -29,7 +29,8 @@ length)` callable. The CLI passes `os.pread` on a descriptor opened by `rofs`
    256 KiB; per-track `BPS`, `DURATION`, `NUMBER_OF_FRAMES`), and the first Cluster (at most
    256 KiB).
 3. Elements that live behind the first Cluster (Tags, and Info/Tracks when a muxer wrote them
-   late) are located through the SeekHead.
+   late) are located through the SeekHead. A seek target inside an element the walk already
+   passed (an attachment, say) is refused, so a forged SeekHead cannot redirect a read into one.
 4. The first Cluster is searched for the first block of the video track number (never "the
    first block"). Laced blocks are skipped with a warning.
 
@@ -90,17 +91,19 @@ Cache: a stored result is reused, at no I/O cost, when the inventory's size and 
 `unsupported_container`, `invalid`) and the probe was not cut by the per-file byte limit (a cut
 result is stored with the `allowance` it ran under and is retried only when a larger one is asked for). `unsafe`, `changed` and
 `io_error` rows record why a file was not probed and are retried every run. The cache trusts the inventory (it never opens the file), but a hit still needs the title's
-root label to be given with `--root` and the root to open safely (no symlinks). Re-run `manifest build` after files change.
+root label to be given with `--root`, the root to open safely (no symlinks) and to be on the
+device the inventory recorded (`root_mismatch` otherwise). Re-run `manifest build` after files change.
 
 Budget: `--max-files` (default 2000) bounds the files that need I/O in one run (cache hits are free, so
 repeated runs progress through a larger selection); `--max-read-mib` is a hard cap on bytes read per run; a file gets the smaller of the
 per-file allowance (2 MiB) and what is left, and a probe cut short by the run budget is
-discarded and stays `pending`. A second run continues where the first stopped.
+discarded and stays `pending`. A second run continues where the first stopped. `--reprobe` always starts from the beginning of
+the selection, so for a library larger than the caps reprobe per `--title` or raise the caps.
 
 Output: `{"library", "sample": {"strategy", "titles", "files_selected"},
 "probed", "cached", "changed", "failed": {code: n}, "bytes_read", "budget_exhausted",
 "pending"}`. `failed` codes: `unsafe` (symlink, FIFO or other non-regular file), `io_error`,
-`no_root` (a title's root label was not given with `--root`).
+`no_root` (a title's root label was not given with `--root`), `root_mismatch`.
 
 ## Read-only guarantees
 
