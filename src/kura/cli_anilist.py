@@ -121,8 +121,14 @@ def _whoami(args, open_store) -> dict:
     return {"logged_in": True, "checked": checked, **shown}
 
 
-def _logout(args) -> dict:
+def _logout(args, open_store) -> dict:
     removed = anilist_auth.remove(private_root())
+    if removed:
+        store = open_store()
+        try:
+            anilist_list.clear_viewer(store.db)     # stored snapshots stay, but none is "the" account any more
+        finally:
+            store.db.close()
     return {"removed": removed,
             "reminder": "Also revoke Kura in your AniList settings (Apps) so the token stops working."}
 
@@ -164,7 +170,7 @@ def dispatch(args, open_store):
     if args.operation == "whoami":
         return True, _whoami(args, open_store)
     if args.operation == "logout":
-        return True, _logout(args)
+        return True, _logout(args, open_store)
     if args.operation == "list":
         return True, _list(args, open_store)
     if args.operation == "media":

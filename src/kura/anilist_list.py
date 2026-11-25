@@ -264,7 +264,8 @@ def save_snapshot(db, *, user: dict, is_viewer: bool, score_format, entries, med
             "INSERT INTO anilist_users(user_id,name,is_viewer,score_format,list_fetched_at,updated_at) "
             "VALUES(?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET name=excluded.name, "
             "is_viewer=MAX(is_viewer,excluded.is_viewer), score_format=COALESCE(excluded.score_format,score_format), "
-            "list_fetched_at=excluded.list_fetched_at, updated_at=excluded.updated_at",
+            "list_fetched_at=excluded.list_fetched_at, favourites_fetched_at=NULL, "    # restored by save_favourites
+            "updated_at=excluded.updated_at",
             (user["id"], user["name"], int(is_viewer), score_format, now, now))
         db.execute("DELETE FROM anilist_list_entries WHERE user_id=?", (user["id"],))
         db.executemany(
@@ -292,8 +293,15 @@ def record_failure(db, user_id, code: str, now: float):
         _sync_state(db, f"anilist:list:{user_id}", now, "error", {"error": code}, False)
 
 
-def save_viewer(db, viewer_row: dict, now: float):
+def clear_viewer(db):
     with db:
+        db.execute("UPDATE anilist_users SET is_viewer=0")
+
+
+def save_viewer(db, viewer_row: dict, now: float):
+    """Make `viewer_row` the one logged-in account."""
+    with db:
+        db.execute("UPDATE anilist_users SET is_viewer=0 WHERE user_id!=?", (viewer_row["id"],))
         db.execute(
             "INSERT INTO anilist_users(user_id,name,is_viewer,score_format,updated_at) VALUES(?,?,1,?,?) "
             "ON CONFLICT(user_id) DO UPDATE SET name=excluded.name, is_viewer=1, "
@@ -360,8 +368,10 @@ def list_sync(store, ani, *, user_name=None, max_age_h=12.0, refresh=False, entr
         row = db.execute("SELECT list_fetched_at,favourites_fetched_at FROM anilist_users WHERE user_id=?",
                          (user_id,)).fetchone()
     else:
-        row = db.execute("SELECT list_fetched_at,favourites_fetched_at,user_id FROM anilist_users "
+        row = db.execute("SELECT list_fetched_at,favourites_fetched_at,user_id,is_viewer FROM anilist_users "
                          "WHERE name=? COLLATE NOCASE", (user_name,)).fetchone()
+        if row and row[3]:      # that snapshot came from the authenticated account and may hold private entries
+            raise KuraError("invalid_arguments", "That is the logged-in account; omit --user to sync it")
         user_id = row[2] if row else None
     fetched, fav_fetched = (row[0], row[1]) if row else (None, None)
     req = Requester(ani, max_requests=max_requests, token=token)

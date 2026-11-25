@@ -345,6 +345,15 @@ class WhoamiLogout(Cli):
         code, out, _ = self.run_cli("anilist", "logout")
         self.assertEqual(out["data"]["removed"], False)
 
+    def test_logout_clears_the_viewer_flag(self):
+        self.login()
+        self.run_cli("anilist", "list")
+        self.run_cli("anilist", "logout")
+        import sqlite3
+        db = sqlite3.connect(self.root / "state.sqlite3")
+        self.addCleanup(db.close)
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM anilist_users WHERE is_viewer=1").fetchone()[0], 0)
+
     def test_logout_refuses_a_symlink(self):
         self.login()
         path = self.root / "anilist-auth.json"

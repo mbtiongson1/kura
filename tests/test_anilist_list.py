@@ -131,6 +131,28 @@ class ListSync(Lab):
             self.sync(user_name=VIEWER["name"], refresh=True)
         self.assertEqual(cm.exception.code, "invalid_arguments")
 
+    def test_user_option_refuses_the_logged_in_account_even_when_cached(self):
+        self.sync()
+        with self.assertRaises(KuraError):
+            self.sync(user_name=VIEWER["name"])
+        self.assertEqual(len(self.fake.calls), 3)
+
+    def test_viewer_flag_follows_the_account(self):
+        self.sync()
+        anilist_list.save_viewer(self.store.db, {"id": BASE_ID + 700, "name": "NewKura", "score_format": None}, 1.0)
+        self.assertEqual(self.rows("SELECT user_id FROM anilist_users WHERE is_viewer=1"), [(BASE_ID + 700,)])
+        self.assertTrue(self.sync(user_name=VIEWER["name"], refresh=True)["user"]["id"] == VIEWER["id"])
+        anilist_list.clear_viewer(self.store.db)
+        self.assertEqual(self.rows("SELECT COUNT(*) FROM anilist_users WHERE is_viewer=1")[0][0], 0)
+
+    def test_a_list_refresh_invalidates_favourite_freshness_in_the_snapshot_transaction(self):
+        self.fake.favourites = IDS[:1]
+        self.sync()
+        user = {"id": VIEWER["id"], "name": VIEWER["name"]}
+        anilist_list.save_snapshot(self.store.db, user=user, is_viewer=True, score_format=None,
+                                   entries=[], media=[], now=5.0)
+        self.assertIsNone(self.rows("SELECT favourites_fetched_at FROM anilist_users")[0][0])
+
     def test_partial_failure_keeps_the_old_snapshot_and_reports_stale(self):
         self.fake.per_chunk = 3
         self.sync()
