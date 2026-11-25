@@ -37,6 +37,8 @@ Candidate choice
     After the fetch the descriptor's non-padding file count is compared with the local one
     and reported as ``file_count_match`` (informational: a later approval of extra local
     files can still make a smaller torrent useful).
+  * What is written is rebuilt: the verbatim info dictionary plus the vetted announce URLs, and
+    nothing else (web seeds, comments, nodes and other fields of the response are dropped).
   * A descriptor is discarded, not written, if it is private, unparsable, does not hash to
     the advertised infohash, or any announce URL could carry a credential. With a protection
     policy (optional), a protected infohash is never requested and a protected descriptor
@@ -71,6 +73,7 @@ from .manifest_store import ManifestRepo
 from .models import KuraError
 from .protect import _public_tracker, classify
 from .releases import normalize
+from .torrent import encode
 from .torrentmeta import parse, release_group
 
 INTERVAL = 2.0                  # seconds between two Nyaa requests
@@ -568,27 +571,50 @@ def _describe(item: dict, c: Candidate, outcome: str, meta=None, local_files: in
     return row
 
 
+def clean_descriptor(meta) -> bytes:
+    """A descriptor holding only the canonical info dictionary and the vetted announce URLs.
+
+    The raw response may carry other top-level fields (web seeds, comments, nodes, ...) with
+    URLs nobody vetted, so it is never written. The info bytes are kept verbatim, hence the
+    infohash is unchanged; every announce URL here already passed ``_public_tracker``.
+    """
+    urls = list(dict.fromkeys(meta.announce_urls))
+    head = b""
+    if urls:
+        head = (b"8:announce" + encode(urls[0].encode()) +
+                b"13:announce-list" + encode([[u.encode()] for u in urls]))
+    return b"d" + head + b"4:info" + meta.info_bytes + b"e"
+
+
 def _accept(data: bytes, candidate: Candidate, policy=None):
-    """``(meta, None)`` for a descriptor worth keeping, else ``(None, reason)``. Fails closed."""
+    """``(meta, cleaned bytes, None)`` for a descriptor worth keeping, else ``(None, None, reason)``."""
     try:
         meta = parse(data)
     except KuraError as e:
-        return None, e.code
+        return None, None, e.code
     except Exception:
-        return None, "unparsable"
+        return None, None, "unparsable"
     if meta.infohash != candidate.infohash:
-        return None, "hash_mismatch"
+        return None, None, "hash_mismatch"
     if meta.private:
-        return None, "private"
+        return None, None, "private"
     if not meta.announce_valid or not all(_public_tracker(u) for u in meta.announce_urls):
-        return None, "announce_not_public"      # may carry a credential: never written
+        return None, None, "announce_not_public"      # may carry a credential: never written
     if policy is not None:
         try:
             if classify(meta, policy).protected:
-                return None, "protected"
+                return None, None, "protected"
         except Exception:
-            return None, "unclassifiable"
-    return meta, None
+            return None, None, "unclassifiable"
+    try:
+        cleaned = clean_descriptor(meta)
+        again = parse(cleaned)
+    except Exception:
+        return None, None, "unsanitizable"
+    if (again.infohash != meta.infohash or again.announce_urls != tuple(dict.fromkeys(meta.announce_urls))
+            or not again.announce_valid):
+        return None, None, "unsanitizable"
+    return meta, cleaned, None
 
 
 def _search(pacer: Pacer, terms: Terms, local_bytes: int, groups, entry: str, tolerance: float,
@@ -669,12 +695,12 @@ def _process(key, row, files, *, pacer, out, core, max_candidates, tolerance, po
             if pacer.tripped:
                 break
             continue
-        meta, reason = _accept(data, c, policy)
+        meta, cleaned, reason = _accept(data, c, policy)
         if meta is None:
             result["candidates"].append(_describe(item, c, "discarded:" + reason))
             continue
         try:
-            state = out.write_descriptor(c.infohash, data)
+            state = out.write_descriptor(c.infohash, cleaned)
         except (OSError, KuraError) as e:
             code = e.code if isinstance(e, KuraError) else "io_error"
             incomplete = True

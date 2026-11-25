@@ -376,6 +376,30 @@ class EndToEnd(Fixture, unittest.TestCase):
         for secret in ("SECRETKEY", "passkey", "tracker.example", "http://", "udp://"):
             self.assertNotIn(secret, text)
 
+    def test_written_descriptor_is_rebuilt_without_unvetted_fields(self):
+        noisy = torrentgen.build(
+            FOLDER, GOOD, announce="http://tracker.example/announce",
+            announce_list=[["http://tracker.example/announce"], ["udp://other.example:6969/announce"]],
+            root_extra={b"url-list": [b"http://seed.example/SECRETKEY/"], b"httpseeds": [b"http://seed.example/SECRETKEY"],
+                        b"comment": b"visit http://x.example/?passkey=SECRETKEY", b"nodes": [[b"h.example", 1]]})
+        self.assertEqual(noisy.infohash, self.right.infohash)
+        self.feed_for(item(FOLDER, 11, noisy.infohash))
+        self.nyaa.descriptors = {"11": noisy.data}
+        self.resolve()
+        written = (self.out / (noisy.infohash + ".torrent")).read_bytes()
+        for leaked in (b"SECRETKEY", b"url-list", b"httpseeds", b"comment", b"nodes", b"created by"):
+            self.assertNotIn(leaked, written)
+        from kura.torrentmeta import parse
+        meta = parse(written)
+        self.assertEqual((meta.infohash, set(meta.announce_urls)),
+                         (noisy.infohash, {"http://tracker.example/announce", "udp://other.example:6969/announce"}))
+        self.assertTrue(meta.announce_valid)
+        manifest.build(self.lab.store, roots={"main": self.lab.lib}, library="home",
+                       torrents_dir=self.out, policy=self.lab.policy())
+        self.assertEqual(self.lab.status(FOLDER)["status"], "reacquirable")
+        bare = torrentgen.build("Kura Bare", GOOD)                 # no trackers at all still round-trips
+        self.assertEqual(parse(resolve.clean_descriptor(parse(bare.data))).infohash, bare.infohash)
+
     def test_protected_infohash_is_never_requested_and_denylisted_trackers_are_discarded(self):
         from kura.protect import load_policy
         listed = torrentgen.build(FOLDER, [("ep01.mkv", P("p", 30000)), ("ep02.mkv", P("q", 20000))],
