@@ -1,4 +1,4 @@
-"""State schema v2 migration and the manifest repository. Synthetic data only."""
+"""State schema migrations and the manifest repository. Synthetic data only."""
 import hashlib
 import json
 from pathlib import Path
@@ -72,17 +72,17 @@ class TempCase(unittest.TestCase):
 
 
 class Migration(TempCase):
-    def test_fresh_database_is_v2(self):
+    def test_fresh_database_is_current(self):
         store = Store(self.root)
-        self.assertEqual(SCHEMA_VERSION, 2)
-        self.assertEqual(store.db.execute("SELECT version FROM meta").fetchone()[0], 2)
+        self.assertEqual(SCHEMA_VERSION, 3)
+        self.assertEqual(store.db.execute("SELECT version FROM meta").fetchone()[0], SCHEMA_VERSION)
         self.assertTrue(NEW_TABLES <= tables(self.db_path))
         self.assertEqual(oct(self.db_path.stat().st_mode & 0o777), "0o600")
 
     def test_v1_migrates_with_data_intact(self):
         self.build_v1()
         store = Store(self.root)
-        self.assertEqual(version(self.db_path), 2)
+        self.assertEqual(version(self.db_path), SCHEMA_VERSION)
         self.assertTrue(NEW_TABLES <= tables(self.db_path))
         self.assertEqual(store.prefs().min_seeders, 7)
         self.assertEqual(store.jobs(), [{"state": "done"}])
@@ -97,11 +97,11 @@ class Migration(TempCase):
         repo = ManifestRepo(store.db)
         repo.save_inventory("lib", 1, [title("A")], 1.0)
         store = Store(self.root)
-        self.assertEqual(version(self.db_path), 2)
+        self.assertEqual(version(self.db_path), SCHEMA_VERSION)
         self.assertEqual(len(ManifestRepo(store.db).titles("lib")), 1)
 
     def test_newer_or_invalid_version_refused(self):
-        for bad in (3, 0):
+        for bad in (SCHEMA_VERSION + 1, 0):
             with self.subTest(version=bad):
                 self.build_v1() if not self.root.exists() else None
                 db = sqlite3.connect(self.db_path)
@@ -125,7 +125,7 @@ class Migration(TempCase):
         self.assertFalse(NEW_TABLES & tables(self.db_path))
         # A later healthy open still migrates the same file.
         Store(self.root)
-        self.assertEqual(version(self.db_path), 2)
+        self.assertEqual(version(self.db_path), SCHEMA_VERSION)
 
     def test_migrations_cover_every_version(self):
         self.assertEqual(sorted(MIGRATIONS), list(range(2, SCHEMA_VERSION + 1)))
@@ -155,8 +155,8 @@ class Migration(TempCase):
                 for t in threads:
                     t.join(30)
                 self.assertEqual(errors, [])
-                self.assertEqual(results, [2] * 4)
-                self.assertEqual(version(self.db_path), 2)
+                self.assertEqual(results, [SCHEMA_VERSION] * 4)
+                self.assertEqual(version(self.db_path), SCHEMA_VERSION)
 
 
 def title(rel="Kura Sample Series", files=None, **extra):

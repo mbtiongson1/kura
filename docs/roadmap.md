@@ -27,6 +27,23 @@ re-downloadable torrent backs them (the owner always performs the purge):
   after a waiting period and a fresh swarm check), swarm health scraping, and an explicit
   owner approval for files no torrent lists.
 
+## Library quality (planned)
+Builds on the handover pipeline to judge whether the library holds the best available release of
+each title. Foundation landed first: state schema v3 (cache tables for the quality data), a
+cross-process request limiter shared by every networked service, and a CLI command registry so
+later modules add commands without touching the core parser.
+
+Build order, each step read-only toward the library:
+1. Audit: per-title identity (AniList), the owner's list, community best-release data, and local
+   file probing, combined into one offline report.
+2. Release cards and a `best` view per title.
+3. Wanted list: titles the audit shows as missing or weak.
+4. Upgrade proposals: owner-approved candidates only.
+
+Later, not in this wave:
+- BEP 9 magnet metadata fallback (needs peer connections; descriptor fetch over HTTP stays the default).
+- Header peek from peers (needs its own ADR and is opt-in).
+
 ## Reconciled tracks
 
 | Kura issue (legacy) | Track | Remaining work |

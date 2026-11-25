@@ -16,6 +16,7 @@ from .inventory import scan
 from .models import KuraError
 from .pieceverify import default_mapping, verify_tree
 from .protect import classify, load_policy, magnet
+from .ratelimit import SharedLimiter
 from .torrentmeta import parse
 
 MAX_FILES_SHOWN = 500
@@ -198,6 +199,13 @@ def _swarm(args, open_store) -> dict:
         store.db.close()
 
 
+def _aliases(args, store):
+    """AniList resolver sharing its pacing with every other Kura process, or None."""
+    if args.no_anilist:
+        return None
+    return AniList(limiter=SharedLimiter(store.root, "anilist", interval=2.0))
+
+
 def _resolve(args, open_store) -> dict:
     """Search Nyaa for candidate descriptors of unmatched titles. Needs network; writes only
     inside --torrents-out (plus the AniList alias cache); never touches the library."""
@@ -207,9 +215,9 @@ def _resolve(args, open_store) -> dict:
                           _abs(args.protected) if args.protected else None)
               if args.tracker_denylist or args.protected else None)
     roots = list(_roots(args.root).values()) if args.root else []
-    aliases = None if args.no_anilist else AniList()
     store = open_store()
     try:
+        aliases = _aliases(args, store)
         return resolve.resolve(store, library=args.library, torrents_out=_abs(args.torrents_out),
                                titles=args.title, max_titles=args.max_titles,
                                max_candidates=args.max_candidates, refresh=args.refresh,
@@ -235,9 +243,9 @@ def _manifest(args, open_store) -> dict:
     roots = _roots(args.root)
     policy = load_policy(_abs(args.tracker_denylist), _abs(args.protected))
     budget = _budget(args.max_read_gib)
-    aliases = None if args.no_anilist else AniList()
     store = open_store()
     try:
+        aliases = _aliases(args, store)
         return manifest.build(store, roots=roots, library=args.library,
                               torrents_dir=[_abs(p) for p in args.torrents], policy=policy,
                               max_read_bytes=budget, reverify=args.reverify, aliases=aliases)

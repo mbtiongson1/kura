@@ -15,6 +15,7 @@ import urllib.request
 
 from .models import KuraError
 from .provider import NoRedirect
+from .ratelimit import SharedLimiter
 from .releases import normalize
 
 ENDPOINT = "https://graphql.anilist.co/"
@@ -188,20 +189,34 @@ class AniList:
     lookup never exceeds ``max_wait`` seconds: past that the resolver raises
     ``alias_unavailable`` immediately (and keeps doing so, without any request, until the
     advertised window passes) so a large library can never hammer the service or stall.
+
+    With a ``limiter`` the pacing, penalties and advertised limits live in the shared
+    database, so concurrent Kura processes stay inside one budget; without one (the
+    default) pacing is per process and in memory.
     """
 
     def __init__(self, *, per_minute: int = 30, max_wait: float = 30.0, max_retries: int = 2,
-                 transport=None, sleep=time.sleep, clock=time.monotonic, wall=time.time):
+                 transport=None, sleep=time.sleep, clock=time.monotonic, wall=time.time,
+                 limiter: SharedLimiter | None = None):
         if per_minute < 1 or max_wait < 0 or max_retries < 0:
             raise KuraError("invalid_argument", "Invalid AniList pacing parameters")
         self.per_minute, self.max_wait, self.max_retries = per_minute, max_wait, max_retries
         self.transport, self.sleep, self.clock, self.wall = transport or fetch, sleep, clock, wall
+        self.limiter = limiter
         self.interval = 60.0 / per_minute
         self.next_ok = 0.0      # earliest monotonic time for the next request
         self.last_start = None  # when the previous request was released
 
     def _pace(self, budget: float) -> float:
         """Sleep until the next request is allowed; refuse if that exceeds `budget` seconds."""
+        if self.limiter is not None:
+            try:
+                return self.limiter.acquire(max(budget, 0.0))
+            except KuraError as e:
+                if e.code == "rate_limited":
+                    raise KuraError("alias_unavailable", "AniList rate limit window is still open",
+                                    status=429, rate_limited=True) from e
+                raise KuraError("alias_unavailable", "AniList rate-limit state is unavailable; retry later") from e
         wait = max(self.next_ok - self.clock(), 0.0)
         if wait > budget:
             raise KuraError("alias_unavailable", "AniList rate limit window is still open",
@@ -212,16 +227,37 @@ class AniList:
         self.next_ok = self.last_start + self.interval
         return wait
 
+    def _shared(self, call, *args, **kwargs):
+        """A limiter write that must not fail silently: no shared state, no further requests."""
+        try:
+            return call(*args, **kwargs)
+        except KuraError as e:
+            raise KuraError("alias_unavailable", "AniList rate-limit state is unavailable; retry later") from e
+
     def _penalize(self, headers: dict):
         delay = _number(headers.get("Retry-After"))
         if delay is None:
             reset = _number(headers.get("X-RateLimit-Reset"))
             delay = reset - self.wall() if reset is not None else 60.0
         delay = min(max(delay, 1.0), 3600.0)
+        if self.limiter is not None:
+            self._shared(self.limiter.penalize, self.wall() + delay)
+            return
         self.next_ok = max(self.next_ok, self.clock() + delay)
 
     def _observe(self, headers: dict):
         limit = _number(headers.get("X-RateLimit-Limit"))
+        if self.limiter is not None:
+            remaining = _number(headers.get("X-RateLimit-Remaining"))
+            reset = _number(headers.get("X-RateLimit-Reset"))
+            usable = limit if limit and limit > 0 else None
+            if usable is not None or remaining is not None or reset is not None:
+                self._shared(self.limiter.observe, limit=usable, remaining=remaining, reset=reset,
+                             interval=60.0 / min(usable, 90) if usable is not None else None)
+            if remaining is not None and remaining <= 1:
+                delay = reset - self.wall() if reset is not None else 60.0
+                self._shared(self.limiter.penalize, self.wall() + min(max(delay, 0.0), 3600.0))
+            return
         if limit and limit > 0:
             self.interval = 60.0 / min(limit, 90)   # an advertised limit binds in both directions
             if self.last_start is not None:
@@ -232,6 +268,16 @@ class AniList:
             delay = reset - self.wall() if reset is not None else 60.0
             self.next_ok = max(self.next_ok, self.clock() + min(max(delay, 0.0), 3600.0))
 
+    def _send(self, title: str):
+        try:
+            return self.transport(title)
+        finally:
+            if self.limiter is not None:
+                try:
+                    self.limiter.done()     # spacing counts from the end of the request too
+                except KuraError:
+                    pass                    # acquire already reserved a slot; never mask the outcome
+
     def resolve(self, title: str):
         if not normalize(title) or len(title) > MAX_TITLE or any(ord(c) < 32 for c in title):
             raise KuraError("invalid_query", "Title must be 1..200 printable characters")
@@ -239,7 +285,7 @@ class AniList:
         while True:
             spent += self._pace(self.max_wait - spent)   # max_wait bounds the whole lookup
             try:
-                data, headers = self.transport(title)
+                data, headers = self._send(title)
             except KuraError as e:
                 if e.details.get("status") != 429:
                     raise
