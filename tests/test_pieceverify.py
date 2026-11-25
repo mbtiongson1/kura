@@ -299,6 +299,89 @@ class Changes(Base):
         self.assertEqual(r.pieces_ok + r.pieces_failed + r.pieces_skipped, r.pieces_total)
 
 
+class ChangesExtra(Base):
+    def test_neighbour_sharing_piece_with_changed_file_not_verified(self):
+        _, meta = self.make(UNEVEN)  # no padding: piece 1 spans ep01 tail, ep02, ep03 head
+        target = self.root / "Kura Sample Series" / "ep01.mkv"
+        data, calls = target.read_bytes(), []
+
+        def stop():
+            calls.append(1)
+            if len(calls) == 5:
+                tmp = target.with_name("swap")
+                tmp.write_bytes(data)
+                os.replace(tmp, target)
+            return False
+        r = verify_tree(meta, self.root, should_stop=stop, chunk_size=1000)
+        s = self.statuses(r)
+        self.assertEqual(s["ep01.mkv"], "changed")
+        self.assertNotEqual(s["ep02.mkv"], "verified")
+        self.assertNotEqual(r.verdict, "complete")
+
+    def test_empty_file_changed_after_precheck(self):
+        files = [("a.mkv", torrentgen.payload("a", 20000)), ("empty.txt", b"")]
+        _, meta = self.make(files)
+        empty = self.root / "Kura Sample Series" / "empty.txt"
+        calls = []
+
+        def stop():
+            calls.append(1)
+            if len(calls) == 5:
+                empty.write_bytes(b"late")
+            return False
+        r = verify_tree(meta, self.root, should_stop=stop, chunk_size=1000)
+        self.assertEqual(self.statuses(r)["empty.txt"], "changed")
+
+    def test_file_changed_after_release_is_caught_at_end(self):
+        _, meta = self.make(UNEVEN, pad=True)
+        top = self.root / "Kura Sample Series"
+        calls = []
+
+        def stop():
+            calls.append(1)
+            if len(calls) == 40:  # ep01 is long released; ep03 still being read
+                (top / "ep01.mkv").write_bytes((top / "ep01.mkv").read_bytes() + b"x")
+            return False
+        r = verify_tree(meta, self.root, should_stop=stop, chunk_size=1000)
+        self.assertGreaterEqual(len(calls), 40)
+        self.assertEqual(self.statuses(r)["ep01.mkv"], "changed")
+
+    def test_partial_read_before_short_read_is_budgeted(self):
+        _, meta = self.make(UNEVEN, pad=True)
+        target = self.root / "Kura Sample Series" / "ep01.mkv"
+        calls, total = [], []
+        real = os.read
+
+        def spy(fd, n):
+            data = real(fd, n)
+            total.append(len(data))
+            return data
+
+        def stop():
+            calls.append(1)
+            if len(calls) == 5:
+                os.truncate(target, 2500)
+            return False
+        with patch("os.read", spy):
+            r = verify_tree(meta, self.root, should_stop=stop, chunk_size=1000,
+                            max_read_bytes=30000)
+        self.assertEqual(r.bytes_read, sum(total))
+        self.assertLessEqual(r.bytes_read, 30000)
+
+    def test_stop_honoured_inside_pad_segment(self):
+        files = [("a.mkv", torrentgen.payload("a", 20000)), ("b.mkv", torrentgen.payload("b", 5000))]
+        _, meta = self.make(files, pad=True)
+        calls = []
+
+        def stop():
+            calls.append(1)
+            return len(calls) > 9  # 2 prechecks, 4+1 chunk reads, then inside the pad
+        r = verify_tree(meta, self.root, should_stop=stop, chunk_size=4096)
+        self.assertEqual(r.verdict, "interrupted")
+        self.assertEqual(r.bytes_read, 20000)
+        self.assertEqual(r.pieces_ok, 1)
+
+
 class Limits(Base):
     def test_budget_exact_boundary_still_complete(self):
         _, meta = self.make(UNEVEN)

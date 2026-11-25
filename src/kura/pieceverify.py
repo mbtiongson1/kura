@@ -111,6 +111,7 @@ class _Run:
         self.ok = [0] * n
         self.failed = [0] * n
         self.boundary = [0] * n
+        self.shared: list[tuple[int, ...]] = []      # files that shared a passing piece
         self.bytes_read = 0
         self.stop_reason: str | None = None          # "interrupted" | "budget_exhausted"
         self.cur: tuple[int, int] | None = None      # (file index, fd)
@@ -163,19 +164,25 @@ class _Run:
             changed = True
         finally:
             os.close(fd)
-        if not changed:
-            try:
-                again = rofs.open_file_ro(self.root_fd, tuple(self.mapping[index]))
-            except KuraError:
-                changed = True
-            else:
-                try:
-                    changed = not _same(self.evidence[index], os.fstat(again))
-                except OSError:
-                    changed = True
-                finally:
-                    os.close(again)
         if changed:
+            self._mark_changed(index, "file changed while it was being read")
+        else:
+            self.recheck(index)
+
+    def recheck(self, index):
+        """Re-open the path through rofs and require the same inode, size and mtime."""
+        try:
+            fd = rofs.open_file_ro(self.root_fd, tuple(self.mapping[index]))
+        except KuraError:
+            self._mark_changed(index, "file disappeared or became unsafe after reading")
+            return
+        try:
+            same = _same(self.evidence[index], os.fstat(fd))
+        except OSError:
+            same = False
+        finally:
+            os.close(fd)
+        if not same:
             self._mark_changed(index, "file changed while it was being read")
 
     def _mark_changed(self, index, why):
@@ -232,31 +239,40 @@ class _Run:
                     self.stop_reason = "budget_exhausted"
                     return "stop"
                 n = min(n, self.budget_left)
+            got = 0
             try:
-                data = b"".join(rofs.read_exact(fd, n, n))
+                for part in rofs.read_exact(fd, n, n):
+                    got += len(part)
+                    hasher.update(part)
             except KuraError as exc:
+                self._account(got)
                 if exc.code == "short_read":
                     self._mark_changed(index, "file ended early while reading")
-                else:
-                    if self.status[index] is None:
-                        self.status[index] = "unverified"
-                        self.detail[index] = exc.code
-                # position unknown after a failed read
-                return "bad"
-            self.pos += n
-            self.bytes_read += n
-            if self.budget_left is not None:
-                self.budget_left -= n
-            hasher.update(data)
+                elif self.status[index] is None:
+                    self.status[index] = "unverified"
+                    self.detail[index] = exc.code
+                return "bad"          # position unknown after a failed read
+            self._account(got)
             remaining -= n
         return "ok"
 
-    def _feed_zeros(self, hasher, length):
+    def _account(self, got):
+        self.pos += got
+        self.bytes_read += got
+        if self.budget_left is not None:
+            self.budget_left -= got
+
+    def _feed_zeros(self, hasher, length) -> bool:
+        """Hash `length` zero bytes in bounded chunks; False if asked to stop."""
         view = memoryview(self.zeros)
         while length:
+            if self.should_stop():
+                self.stop_reason = "interrupted"
+                return False
             n = min(len(view), length)
             hasher.update(view[:n])
             length -= n
+        return True
 
     # -- main loop --------------------------------------------------------------
     def hash_pieces(self):
@@ -284,7 +300,9 @@ class _Run:
             outcome = "ok"
             for f, off, length in segs:
                 if f.pad:
-                    self._feed_zeros(hasher, length)
+                    outcome = "ok" if self._feed_zeros(hasher, length) else "stop"
+                    if outcome == "stop":
+                        break
                     continue
                 outcome = self._read_segment(f.index, off, length, hasher)
                 if outcome != "ok":
@@ -298,6 +316,8 @@ class _Run:
                 self.pieces_ok += 1
                 for f in real:
                     self.ok[f.index] += 1
+                if len(real) > 1:
+                    self.shared.append(tuple(f.index for f in real))
             else:
                 self.pieces_failed += 1
                 for f in real:
@@ -308,14 +328,36 @@ class _Run:
             self.boundary[f.index] += 1
 
     # -- results ----------------------------------------------------------------
+    def _needed(self, f) -> int:
+        pl = self.meta.piece_length
+        return 0 if f.length == 0 else (f.offset + f.length - 1) // pl - f.offset // pl + 1
+
+    def finish(self):
+        """Final change check of every file that would be reported verified.
+
+        A file that shared a passing piece with a changed file is not trusted either:
+        that piece's hash covered bytes that moved underneath the read.
+        """
+        self.release()
+        for f in self.meta.files:
+            if (self.status[f.index] is None and not self.failed[f.index]
+                    and self.ok[f.index] == self._needed(f)):
+                self.recheck(f.index)
+        tainted = set()
+        for group in self.shared:
+            if any(self.status[i] == "changed" for i in group):
+                tainted.update(i for i in group if self.status[i] is None)
+        for i in tainted:
+            self.status[i] = "unverified_boundary"
+            self.detail[i] = "shared a piece with a file that changed during verification"
+
     def verdicts(self) -> tuple[FileVerdict, ...]:
         out = []
-        pl = self.meta.piece_length
         for f in self.meta.files:
             i = f.index
             status, detail = self.status[i], self.detail[i]
             if status is None:   # prechecked fine; decided by what the pieces said
-                needed = 0 if f.length == 0 else (f.offset + f.length - 1) // pl - f.offset // pl + 1
+                needed = self._needed(f)
                 if self.failed[i]:
                     status = "piece_failed"
                 elif self.ok[i] == needed:
@@ -353,12 +395,10 @@ def verify_tree(meta: TorrentMeta, root: Path, mapping: dict[int, tuple[str, ...
     try:
         run = _Run(meta, root_fd, mapping, max_read_bytes, should_stop, chunk_size)
         run.pieces_ok = run.pieces_failed = 0
-        try:
-            run.precheck()
-            if run.stop_reason is None:
-                run.hash_pieces()
-        finally:
-            run.release()
+        run.precheck()
+        if run.stop_reason is None:
+            run.hash_pieces()
+        run.finish()
     finally:
         os.close(root_fd)
     files = run.verdicts()
