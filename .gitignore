@@ -7,6 +7,7 @@
 *credentials*
 *token*
 anilist-auth*
+.anilist-auth*
 # Python / tooling
 __pycache__/
 *.py[cod]
