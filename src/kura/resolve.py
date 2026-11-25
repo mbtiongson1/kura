@@ -686,6 +686,10 @@ def rebuild_known(repo: ManifestRepo, c: Candidate, policy=None):
         return "protected", None, None
     if not row["info"]:
         return "unknown", None, None            # kept without its info dictionary (huge): fetch it
+    if policy is not None and protection.get("policy_sha256") != policy.sha256:
+        # Classified under another policy, and the stored magnet drops non-public trackers:
+        # the original tracker set cannot be re-evaluated, so download and classify it afresh.
+        return "unknown", None, None
     urls = []
     for key, value in urllib.parse.parse_qsl(urllib.parse.urlsplit(row["magnet"] or "").query):
         if key == "tr" and _public_tracker(value) and value not in urls:
@@ -772,6 +776,7 @@ def _process(key, row, files, *, pacer, out, core, max_candidates, tolerance, po
         if known in ("protected", "unreadable"):
             result["candidates"].append(_describe(item, c, "known_protected" if known == "protected"
                                                   else "known_unreadable"))
+            incomplete = incomplete or known == "unreadable"       # a database hiccup: retry next run
             continue
         if known == "rebuilt":
             try:

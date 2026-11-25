@@ -382,7 +382,7 @@ class KnownDescriptors(Fixture, unittest.TestCase):
     def test_public_known_torrent_is_rebuilt_without_a_request(self):
         known = self.seed("Kura Known Release")
         self.feed_for(item(FOLDER, 31, known.infohash))
-        result = self.resolve()
+        result = self.resolve(policy=self.lab.policy())
         self.assertEqual(self.nyaa.fetched, [])
         self.assertEqual(len(self.nyaa.calls), 1)                       # the search only
         candidate = result["titles"][0]["candidates"][0]
@@ -443,6 +443,18 @@ class KnownDescriptors(Fixture, unittest.TestCase):
             result = self.resolve()
         self.assertEqual(self.nyaa.fetched, [])
         self.assertEqual(result["titles"][0]["candidates"][0]["outcome"], "known_unreadable")
+        self.assertTrue(result["titles"][0]["incomplete"])
+        self.assertFalse((self.out / ".kura-resolve.json").exists())     # not recorded: retried next run
+        self.assertEqual(self.names(), [".kura-resolve.lock"])
+
+    def test_row_classified_under_another_policy_is_downloaded_and_reclassified(self):
+        known = self.seed("Kura Known Reclassified")
+        self.lab.deny.write_text("blocked.example\ntracker.example\n")      # tightened after indexing
+        self.feed_for(item(FOLDER, 31, known.infohash))
+        self.nyaa.descriptors = {"31": known.data}
+        result = self.resolve(policy=self.lab.policy())
+        self.assertEqual(len(self.nyaa.fetched), 1)
+        self.assertEqual(result["titles"][0]["candidates"][0]["outcome"], "discarded:protected")
         self.assertEqual(self.names(), [".kura-resolve.json", ".kura-resolve.lock"])
 
     def test_unknown_infohash_is_fetched_as_before(self):
