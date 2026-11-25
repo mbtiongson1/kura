@@ -269,6 +269,40 @@ class Scale(unittest.TestCase):
         self.assertLess(elapsed, 5.0)
 
 
+class RepeatedSignatures(unittest.TestCase):
+    def test_many_identical_signatures_inside_one_torrent_pair_by_path(self):
+        n = 300
+        files = [(f"d{i:03d}/ep.mkv", P(f"r{i}", 1000)) for i in range(n)]
+        built = torrentgen.build("Kura Wide", files)
+        lab = Lab(self)
+        for rel, data in files:
+            write(lab.lib, f"Kura Local/x/{rel}", data)
+        started = time.monotonic()
+        matches, _ = match(scan(lab.lib, "main"), [parse(built.data)])
+        self.assertLess(time.monotonic() - started, 5.0)
+        self.assertEqual(len(matches[0].mapping), n)
+        self.assertEqual(matches[0].mapping[7], ("Kura Local", "x", "d007", "ep.mkv"))
+
+    def test_non_distinctive_signature_is_ignored(self):
+        lab = Lab(self)
+        for t in range(match_module._ContentIndex.MAX_BUCKET + 5):
+            write(lab.lib, f"T{t:04d}/cover.jpg", P("cover", 500))
+        built = torrentgen.build("Kura Cover", [("cover.jpg", P("cover", 500))])
+        self.assertEqual(match(scan(lab.lib, "main"), [parse(built.data)])[0], [])
+
+    def test_shared_signatures_across_titles_and_torrents_stay_fast(self):
+        titles, per, torrents = 200, 20, 500        # every signature sits in every title
+        inv = match_module_inventory([
+            match_module_title(f"T{t:04d}", tuple(match_module_file(f"T{t:04d}/ep{j:02d}.mkv", 1000 + j)
+                                                   for j in range(per))) for t in range(titles)])
+        metas = [synthetic_meta(f"R{k}", [(f"ep{j:02d}.mkv", bytes(1000 + j)) for j in range(per)])
+                 for k in range(torrents)]
+        started = time.monotonic()
+        matches, unmatched = match(inv, metas)
+        self.assertLess(time.monotonic() - started, 10.0)
+        self.assertEqual((len(matches), {u["reason"] for u in unmatched}), (0, {"ambiguous"}))
+
+
 def match_module_file(rel, size):
     from kura.inventory import FileEntry
     return FileEntry(rel, size, 1, 1, hash(rel) & 0xFFFFFF)

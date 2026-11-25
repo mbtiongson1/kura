@@ -93,15 +93,39 @@ class _Index:
         return found
 
 
-def _suffix(a: tuple[str, ...], b: tuple[str, ...]) -> int:
-    n = 0
-    while n < len(a) and n < len(b) and a[-1 - n] == b[-1 - n]:
-        n += 1
-    return n
+def _pair(tfiles: list, locals_: list[tuple[str, ...]]) -> dict[int, tuple[str, ...]]:
+    """Pair torrent files and title files that share a (basename, size) signature.
+
+    One-to-one needs no guessing. Otherwise each torrent file takes the title file that
+    shares its longest trailing path (indexed once, so cost is linear in the files); a tie
+    at that length pairs nothing.
+    """
+    if len(tfiles) == 1 and len(locals_) == 1:
+        return {tfiles[0].index: locals_[0]}
+    index: dict[tuple[str, ...], list[tuple[str, ...]]] = {}
+    for parts in locals_:
+        for j in range(1, len(parts) + 1):
+            index.setdefault(parts[-j:], []).append(parts)
+    depth = max(len(parts) for parts in locals_)
+    out = {}
+    for f in tfiles:
+        for j in range(min(len(f.path), depth), 0, -1):
+            found = index.get(f.path[-j:])
+            if found:
+                if len(found) == 1:
+                    out[f.index] = found[0]
+                break
+    return out
 
 
 class _ContentIndex:
-    """Size indexes over every inventory file, built in one pass."""
+    """Size indexes over every inventory file, built in one pass.
+
+    A signature shared by more than MAX_BUCKET files is not distinctive (it names nothing
+    in particular) and is dropped, which also bounds the work any one torrent can cause.
+    """
+
+    MAX_BUCKET = 256
 
     def __init__(self, inventories: list[Inventory]):
         # (basename, size) -> [(title key, root-relative parts)]
@@ -116,6 +140,9 @@ class _ContentIndex:
                     self.by_name_size.setdefault((parts[-1], entry.size), []).append(item)
                     if entry.size >= SIZE_ONLY_MIN:
                         self.big_by_size.setdefault(entry.size, []).append(item)
+        for table in (self.by_name_size, self.big_by_size):
+            for sig in [s for s, items in table.items() if len(items) > self.MAX_BUCKET]:
+                del table[sig]
 
     def best(self, meta: TorrentMeta):
         """``("match", title key, mapping)``, ``("ambiguous",)`` or ``None`` for one torrent."""
@@ -123,26 +150,29 @@ class _ContentIndex:
         total = sum(f.length for f in files)
         if total <= 0:
             return None
-        named: dict[tuple[str, str], dict[int, list[tuple[str, ...]]]] = {}
-        sized: dict[tuple[str, str], dict[int, list[tuple[str, ...]]]] = {}
+        by_index = {f.index: f for f in files}
+        tsig: dict[tuple[str, int], list] = {}
+        big: dict[int, list] = {}
         for f in files:
-            for key, parts in self.by_name_size.get((f.path[-1], f.length), ()):
-                named.setdefault(key, {}).setdefault(f.index, []).append(parts)
-        big = {}
-        for f in files:
+            tsig.setdefault((f.path[-1], f.length), []).append(f)
             if f.length >= SIZE_ONLY_MIN:
                 big.setdefault(f.length, []).append(f)
+        named: dict[tuple[str, str], dict[tuple[str, int], list[tuple[str, ...]]]] = {}
+        for sig in tsig:
+            for key, parts in self.by_name_size.get(sig, ()):
+                named.setdefault(key, {}).setdefault(sig, []).append(parts)
+        sized: dict[tuple[str, str], dict[int, list[tuple[str, ...]]]] = {}
         for size in big:
             for key, parts in self.big_by_size.get(size, ()):
                 sized.setdefault(key, {}).setdefault(size, []).append(parts)
-        by_index = {f.index: f for f in files}
         need = total * MIN_COVERAGE[0]
         results: list[tuple[int, tuple[str, str], dict[int, tuple[str, ...]]]] = []
         for key in {*named, *sized}:
-            reachable = {*named.get(key, ()), *(f.index for s in sized.get(key, ()) for f in big[s])}
+            reachable = {f.index for sig in named.get(key, ()) for f in tsig[sig]}
+            reachable.update(f.index for size in sized.get(key, ()) for f in big[size])
             if sum(by_index[i].length for i in reachable) * MIN_COVERAGE[1] < need:
                 continue                       # cannot reach the coverage threshold
-            mapping = self._map_title(files, named.get(key, {}), sized.get(key, {}), big)
+            mapping = self._map_title(tsig, named.get(key, {}), sized.get(key, {}), big)
             matched = sum(by_index[i].length for i in mapping)
             if matched * MIN_COVERAGE[1] >= need:
                 results.append((matched, key, mapping))
@@ -154,17 +184,10 @@ class _ContentIndex:
         return ("match", results[0][1], results[0][2])
 
     @staticmethod
-    def _map_title(files, named, sized, big) -> dict[int, tuple[str, ...]]:
-        by_index = {f.index: f for f in files}
+    def _map_title(tsig, named, sized, big) -> dict[int, tuple[str, ...]]:
         chosen: dict[int, tuple[str, ...]] = {}
-        for index, locals_ in named.items():
-            if len(locals_) == 1:
-                chosen[index] = locals_[0]
-                continue
-            want = by_index[index].path
-            scores = sorted(((_suffix(parts, want), parts) for parts in locals_), reverse=True)
-            if scores[0][0] > scores[1][0]:
-                chosen[index] = scores[0][1]       # one candidate shares the most path suffix
+        for sig, locals_ in named.items():
+            chosen.update(_pair(tsig[sig], locals_))
         claims: dict[tuple[str, ...], list[int]] = {}
         for index, parts in chosen.items():
             claims.setdefault(parts, []).append(index)
@@ -174,7 +197,7 @@ class _ContentIndex:
                 mapping[indexes[0]] = parts
         used = set(claims)                         # contested files stay off limits too
         for size, locals_ in sized.items():
-            free = [f for f in big[size] if f.index not in mapping]
+            free = [f for f in big[size] if f.index not in mapping and f.index not in chosen]
             if len(locals_) == 1 and len(free) == 1 and locals_[0] not in used:
                 mapping[free[0].index] = locals_[0]
         return mapping
