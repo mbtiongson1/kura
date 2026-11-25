@@ -133,16 +133,45 @@ class Encoder(unittest.TestCase):
         self.assertEqual(result["attachments"]["bytes"], size)
         self.assertNotIn("internal_error", result["warnings"])
 
-    def test_unknown_size_cluster_read_stops_at_the_next_seekhead_element(self):
+    def test_unknown_size_cluster_never_reads_the_elements_after_it(self):
         size = 8192
-        data = mkvgen.build(unknown_cluster=True, attach=[("a.ttf", "font/ttf", size)], tag_values={1001: {"BPS": "9"}})
-        tags_at = data.rindex(mkvgen.eid(0x1254C367))
-        src = Source(data)
-        result = probe(src, len(data))
-        cluster_at = data.rindex(mkvgen.eid(0x1F43B675))
-        reads = [(o, n) for o, n in src.reads if cluster_at < o < tags_at + 10 and n > 64]
-        self.assertTrue(all(o + n <= tags_at for o, n in reads), (reads, tags_at))
-        self.assertEqual(result["video"]["bitrate_source"], "tags")
+        att = mkvgen.attachments([("a.ttf", "font/ttf", size)])
+        data = mkvgen.build(unknown_segment=True, unknown_cluster=True, with_seekhead=False) + att
+        lo = len(data) - size
+        reads = []
+
+        def guarded(offset, n):
+            reads.append((offset, n))
+            self.assertFalse(offset < len(data) and offset + n > lo, (offset, n, lo))
+            return data[offset:offset + n]
+
+        result = probe(guarded, len(data))
+        self.assertEqual(result["encoder"]["library"], "x264")
+        self.assertEqual(result["attachments"], {"count": 0, "fonts": 0, "bytes": 0, "names": []})
+        self.assertTrue(reads)
+
+    def test_other_tracks_block_bodies_are_not_read(self):
+        big = 50_000
+        blocks = (mkvgen.simple_block(2, bytes(big)) + mkvgen.simple_block(1, mkvgen.frame(
+            [mkvgen.sei_nal("avc", [mkvgen.encoder_message(mkvgen.X264_TEXT)]), mkvgen.slice_nal("avc")])))
+        tracks = mkvgen.el(0x1654AE6B, mkvgen.track_entry(1, 1, "V_MPEG4/ISO/AVC", private=mkvgen.avcc(), video={})
+                           + mkvgen.track_entry(2, 2, "A_AAC", audio={}))
+        data = mkvgen.wrap(mkvgen.info() + tracks + mkvgen.el(0x1F43B675, mkvgen.uint(0xE7, 0) + blocks))
+        result, src = run(data)
+        self.assertEqual(result["encoder"]["library"], "x264")
+        self.assertLess(result["bytes_read"], big // 4)
+        self.assertEqual(result["warnings"], [])
+
+    def test_large_keyframe_is_read_as_a_prefix_only(self):
+        sei = mkvgen.sei_nal("avc", [mkvgen.encoder_message(mkvgen.X264_TEXT)])
+        frame = mkvgen.frame([sei, mkvgen.slice_nal("avc", 600_000)])
+        tracks = mkvgen.el(0x1654AE6B, mkvgen.track_entry(1, 1, "V_MPEG4/ISO/AVC", private=mkvgen.avcc(), video={}))
+        data = mkvgen.wrap(mkvgen.info() + tracks + mkvgen.el(0x1F43B675, mkvgen.uint(0xE7, 0) + mkvgen.simple_block(1, frame)))
+        result, src = run(data)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["encoder"]["library"], "x264")
+        self.assertIn("frame_prefix_only", result["warnings"])
+        self.assertLessEqual(src.largest, 256 << 10)
 
     def test_audio_block_first_in_the_cluster_is_ignored(self):
         result, _ = run(mkvgen.build(decoy_audio=True))

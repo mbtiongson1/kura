@@ -26,13 +26,15 @@ length)` callable. The CLI passes `os.pread` on a descriptor opened by `rofs`
 2. Bodies are read only for: Info; Tracks (at most 1 MiB); Chapters (presence and atom count,
    at most 256 KiB); Attachments (child headers only: name, mime type and the size of the data;
    the data is never read; at most 500 files); SeekHead (at most 64 KiB); Tags (at most
-   256 KiB; per-track `BPS`, `DURATION`, `NUMBER_OF_FRAMES`), and the first Cluster (at most
-   256 KiB).
+   256 KiB; per-track `BPS`, `DURATION`, `NUMBER_OF_FRAMES`), and the first video block of the
+   first Cluster (at most 256 KiB of its frame).
 3. Elements that live behind the first Cluster (Tags, and Info/Tracks when a muxer wrote them
    late) are located through the SeekHead. A seek target inside an element the walk already
    passed (an attachment, say) is refused, so a forged SeekHead cannot redirect a read into one.
-4. The first Cluster is searched for the first block of the video track number (never "the
-   first block"). Laced blocks are skipped with a warning.
+4. The first Cluster is walked block header by block header (so another track's block bodies
+   are never read) for the first block of the video track number (never "the first block").
+   Laced blocks are skipped with a warning. An unknown-size Cluster ends at the next level-1
+   element.
 
 Encoder settings come from the x264/x265 SEI message (type 5, user data unregistered) found in
 the `hvcC` NAL arrays (`where: "codec_private"`) or the first video frame
@@ -70,7 +72,7 @@ Status meaning: `ok` complete; `partial` truncated file, budget or limit reached
 
 Warnings: `truncated`, `budget_exhausted`, `element_limit`, `depth_limit`, `invalid_element`,
 `unknown_size_element`, `bad_seek`, `no_tracks`, `no_video_block`, `no_encoder_settings`,
-`laced_block_skipped`, `content_encoded_video`, `multiple_video_tracks`, `cluster_truncated`,
+`laced_block_skipped`, `content_encoded_video`, `multiple_video_tracks`, `frame_prefix_only`,
 `attachments_truncated`, `tracks_truncated`, `chapters_truncated`, `tags_truncated`.
 
 ## Library runs
@@ -110,8 +112,8 @@ Output: `{"library", "sample": {"strategy", "titles", "files_selected"},
 A state directory equal to, inside or above a library root is refused (`unsafe_state_dir`), so the
 database and lock file can never be created under a library.
 
-The one read that is not bounded by a known element is the capped (256 KiB) read of an
-unknown-size first Cluster; it is trimmed at the next element the SeekHead names.
+Every read is either an element header, a capped body of a wanted element, or the frame prefix
+of the first video block, so attachment data is never read.
 
 Library files are reached only through `rofs.open_root` and `rofs.open_file_ro` and read with
 `os.pread`; no write, create, rename or delete happens under a root, and `mkvprobe` imports no

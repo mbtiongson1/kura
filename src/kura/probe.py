@@ -248,8 +248,9 @@ def _probe_file(root_fd, f, allowance, full):
 
     try:
         st = os.fstat(fd)
-        if st.st_size != f["size"] or st.st_mtime_ns != f["mtime_ns"]:
-            return "changed", None, 0
+        if ((st.st_size, st.st_mtime_ns, st.st_dev, st.st_ino)
+                != (f["size"], f["mtime_ns"], f["dev"], f["ino"])):
+            return "changed", None, 0           # not the file (or the version) the inventory saw
         try:
             result = mkvprobe.probe(read, st.st_size, max_bytes=allowance)
         except OSError:

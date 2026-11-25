@@ -3,13 +3,14 @@
 No I/O of its own: every byte arrives through the ``read(offset, length)`` callable the
 caller supplies (``probe.py`` and the CLI give it ``os.pread`` on a descriptor that came
 from ``rofs``). The probe never needs the whole file. It walks the Segment's level-1
-element headers (at most 12 bytes per header, requested incrementally), skips bodies, and reads a body only when it
-holds something wanted, each under its own cap:
+element headers (at most 12 bytes per header, requested incrementally), skips bodies, and
+reads a body only when it holds something wanted, each under its own cap:
 
   Info, Tracks (<= 1 MiB), Chapters (<= 256 KiB, presence and atom count), Attachments
   (child headers only; the file data is never read), Tags (<= 256 KiB, per-track BPS,
   DURATION, NUMBER_OF_FRAMES), SeekHead (<= 64 KiB, to find what lies behind the first
-  Cluster), and the first Cluster (<= 256 KiB, the first block of the video track).
+  Cluster), and the first video block of the first Cluster (<= 256 KiB; block headers are walked,
+  the bodies of other tracks' blocks are not read).
 
 Hostile input cannot make this module allocate from a declared size (every read is
 ``min(cap, bytes remaining)``), recurse past ``MAX_DEPTH``, visit more than
@@ -448,28 +449,23 @@ class _Probe:
             yield eid, body, body + size, True
             pos = body + size
 
-    def children(self, buf, start, end, strict=True):
-        """Same shape over an in-memory buffer. Offsets are into `buf`.
-
-        A header or element that does not fit inside its parent is damage and marks the result
-        partial; `strict=False` is for a buffer that was cut at a read cap (the first Cluster),
-        where running out of bytes is expected."""
+    def children(self, buf, start, end):
+        """Same shape over an in-memory buffer. Offsets are into `buf`. A header or element
+        that does not fit inside its parent is damage and marks the result partial."""
         pos, end = start, min(end, len(buf))
         while pos < end:
             self.count()
             try:
                 eid, size, hl = _header(buf, pos, end)
             except _Short:
-                if strict:
-                    self.truncated()
+                self.truncated()
                 return
             except _Bad:
                 self.warn("invalid_element", partial=True)
                 return
             body = pos + hl
             if size is None or size > end - body:
-                if strict:
-                    self.truncated()
+                self.truncated()
                 yield eid, body, end, False
                 return
             yield eid, body, body + size, True
@@ -764,27 +760,25 @@ class _Probe:
             self.warn("multiple_video_tracks")
         return video[0] if video else None
 
-    def blocks(self, buf):
-        """Yield the raw payload of each (Simple)Block of a cluster buffer, in file order."""
-        for eid, b, e, full in self.children(buf, 0, len(buf), strict=False):
+    def block_spans(self, body, end):
+        """Yield ``(start, end)`` of each (Simple)Block of a cluster, in file order, by walking
+        element headers only. An unknown-size Cluster ends at the next level-1 element."""
+        for eid, b, e, full in self.file_children(body, end):
+            if eid in LEVEL1 or e is None:
+                return
             if eid == SIMPLEBLOCK:
-                yield buf[b:e]
+                yield b, e
             elif eid == BLOCKGROUP:
-                for cid, cb, ce, cfull in self.children(buf, b, e, strict=False):
+                for cid, cb, ce, cfull in self.file_children(b, e):
+                    if ce is None:
+                        break
                     if cid == BLOCK:
-                        yield buf[cb:ce]
-            elif eid in LEVEL1:
-                return                           # an unknown-size Cluster ends at the next one
+                        yield cb, ce
 
     def first_cluster(self, body, bend):
         video = self.video_track()
         if video is None:
             return
-        end = self.seg_end if bend is None else bend
-        if bend is None:        # unknown size: stop at the next element the SeekHead names
-            end = min([end] + [p for p in self.seek.values() if p > body])
-        capped = end - body > CLUSTER_CAP
-        buf = self.rd.read(body, min(end - body, CLUSTER_CAP))
         if video["encoded"]:
             self.warn("content_encoded_video")
             return
@@ -803,15 +797,21 @@ class _Probe:
                 if found:
                     self.set_encoder(found, "codec_private")
                     break
+        # Only the leading bytes of each block are read to learn its track; the body of the
+        # first usable video block is read up to CLUSTER_CAP (SEI precedes the slice data).
         frame = None
-        for block in self.blocks(buf):
-            track = _vint(block, 0)
-            if track is None or track[0] != video["number"] or len(block) < track[1] + 3:
+        for start, stop in self.block_spans(body, self.seg_end if bend is None else bend):
+            lead = self.rd.read(start, min(stop - start, 12))
+            track = _vint(lead, 0)
+            if track is None or track[0] != video["number"] or len(lead) < track[1] + 3:
                 continue
-            if block[track[1] + 2] & 0x06:
+            if lead[track[1] + 2] & 0x06:
                 self.warn("laced_block_skipped")
                 continue
-            frame = block[track[1] + 3:]
+            first = start + track[1] + 3
+            frame = self.rd.read(first, min(stop - first, CLUSTER_CAP))
+            if stop - first > CLUSTER_CAP:
+                self.warn("frame_prefix_only")           # normal for a large keyframe, not damage
             break
         if self.encoder is None and frame is not None:
             for nal in _frame_nals(frame, length_size):
@@ -820,10 +820,7 @@ class _Probe:
                     self.set_encoder(found, "first_frame")
                     break
         if frame is None:
-            if capped:
-                self.warn("cluster_truncated", partial=True)
-            else:
-                self.warn("no_video_block")
+            self.warn("no_video_block")
         if self.encoder is None:
             self.warn("no_encoder_settings")
 
