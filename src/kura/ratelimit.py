@@ -22,6 +22,7 @@ from .models import KuraError
 from .safety import regular_file
 
 SERVICE_MAX = 32
+MAX_REQUEUES = 16
 
 
 class SharedLimiter:
@@ -110,41 +111,35 @@ class SharedLimiter:
         """Reserve the next request start and sleep until it. Returns seconds waited.
 
         Raises ``rate_limited`` (with ``retry_after``) without reserving anything when the
-        wait would exceed `budget` seconds. After waking it re-reads the shared penalty, so a
-        429 recorded by another process during the sleep still holds this request back (or
-        refuses it when the extra wait no longer fits the budget; the slot is then spent).
+        wait would exceed `budget` seconds. After waking it re-reads the shared penalty: a
+        429 recorded by another process during the sleep invalidates the reservation, and
+        the request is queued again behind every other reservation (so sleepers released by
+        one penalty do not all fire at its deadline), still inside the caller's budget.
         """
         if not budget >= 0:
             raise KuraError("invalid_argument", "Invalid rate-limit budget")
+        waited = 0.0
+        for _ in range(MAX_REQUEUES):
+            remaining = budget - waited
 
-        def reserve(db, now):
-            row = self._row(db, now)
-            start = max(now, row["next_ok"], row["penalty_until"])
-            wait = start - now
-            if wait > budget:
-                raise KuraError("rate_limited", "Rate limit window is still open",
-                                retry_after=round(wait, 3), service=self.service)
-            row["next_ok"] = start + row["interval"]
-            self._store(db, now, row)
-            return wait
-
-        waited = self._transaction(reserve)
-        if waited > 0:
-            self.sleep(waited)
-        # A penalty (429, exhausted window) recorded by another process while we slept
-        # outranks our reservation: wait it out too, still inside the caller's budget.
-        while True:
-            def recheck(db, now):
-                remaining = self._row(db, now)["penalty_until"] - now
-                if remaining > budget - waited:
+            def reserve(db, now):
+                row = self._row(db, now)
+                start = max(now, row["next_ok"], row["penalty_until"])
+                wait = start - now
+                if wait > remaining:
                     raise KuraError("rate_limited", "Rate limit window is still open",
-                                    retry_after=round(remaining, 3), service=self.service)
-                return max(remaining, 0.0)
-            extra = self._transaction(recheck)
-            if extra <= 0:
+                                    retry_after=round(wait, 3), service=self.service)
+                row["next_ok"] = start + row["interval"]
+                self._store(db, now, row)
+                return wait
+
+            wait = self._transaction(reserve)
+            if wait > 0:
+                self.sleep(wait)
+                waited += wait
+            if not self._transaction(lambda db, now: self._row(db, now)["penalty_until"] > now):
                 return waited
-            self.sleep(extra)
-            waited += extra
+        raise KuraError("rate_limited", "Rate limit window keeps moving", service=self.service)
 
     def done(self):
         """Request finished: the next one may start no sooner than one interval from now."""

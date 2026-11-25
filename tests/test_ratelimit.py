@@ -108,6 +108,24 @@ class Penalty(Base):
         self.assertEqual(lim.acquire(60), 22.0)
         self.assertEqual(sleeps, [2.0, 20.0])
 
+    def test_requeued_request_keeps_spacing_for_the_next_process(self):
+        self.limiter().acquire(10)
+        other = self.limiter()
+        sleeps = []
+
+        def sleeper(seconds):
+            sleeps.append(seconds)
+            self.wall.now += seconds
+            if len(sleeps) == 1:
+                other.acquire(60)                       # another process queues behind us ...
+                other.penalize(self.wall.now + 20)      # ... then a 429 lands for everyone
+
+        lim = SharedLimiter(self.root, "anilist", interval=2.0, wall=self.wall, sleep=sleeper)
+        lim.acquire(120)
+        before = self.wall.now
+        self.assertEqual(self.limiter().acquire(60), 2.0)   # one interval after our (delayed) start
+        self.assertEqual(self.wall.now, before + 2.0)
+
     def test_penalty_during_the_sleep_beyond_budget_refuses(self):
         self.limiter().acquire(10)
         other = self.limiter()
