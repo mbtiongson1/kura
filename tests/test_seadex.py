@@ -114,6 +114,22 @@ class Sync(Case):
                          [(FAKE_TRACKER,)])
         self.assertNotIn("<redacted>", json.dumps(self.rows("SELECT * FROM seadex_torrents")))
 
+    def test_tracker_must_match_exactly_before_sanitizing(self):
+        self.fake.torrents = {t["id"]: t for t in [torrent(14, tracker="Ny\u200baa"), torrent(15, tracker=" Nyaa"),
+                                                   torrent(16, tracker="NYAA")]}
+        self.sync()
+        got = dict(self.rows("SELECT id, public FROM seadex_torrents"))
+        self.assertEqual((got[rid(14)], got[rid(15)], got[rid(16)]), (0, 0, 1))
+        self.assertEqual(self.rows("SELECT infohash FROM seadex_torrents WHERE id=?", rid(14)), [(None,)])
+
+    def test_cursor_orders_by_time_not_by_string(self):
+        self.assertEqual(seadex.canonical_stamp("2025-01-01 12:00:00Z"), "2025-01-01 12:00:00.000Z")
+        self.assertEqual(seadex.canonical_stamp("2025-01-01 12:00:00.5Z"), "2025-01-01 12:00:00.500Z")
+        rows = {"a": {"updated": "2025-01-01 12:00:00Z"}, "b": {"updated": "2025-01-01 12:00:00.500Z"}}
+        self.assertEqual(seadex._newest(rows, None), "2025-01-01 12:00:00.500Z")
+        self.assertEqual(seadex._newest(rows, "2025-01-01 12:00:01Z"), "2025-01-01 12:00:01.000Z")
+        self.assertEqual(seadex.filter_updated("2025-01-01 12:00:00Z"), 'updated>="2025-01-01 12:00:00.000Z"')
+
     def test_malformed_items_are_skipped_and_counted(self):
         bad_entries = [entry(30, True), entry(31, 0), entry(32, AL, id="BAD ID"), entry(33, AL, updated="x"),
                        entry(34, AL, incomplete="no"), {**entry(35, AL), "trs": "oops"}, "text", None,
@@ -449,6 +465,20 @@ class Files(Case):
         self.sync()                                                   # incremental picks up the change
         got = dict(self.rows("SELECT id, files_fetched_at IS NOT NULL FROM seadex_torrents"))
         self.assertEqual((got[rid(11)], got[rid(12)]), (0, 1))
+
+    def test_files_for_a_replaced_record_are_not_attached(self):
+        self.identities(AL)
+
+        def transport(url):
+            if "fields=id%2Cfiles" in url:          # a concurrent sync changes record 11 mid-request
+                other = sqlite3.connect(self.store.root / "state.sqlite3")
+                other.execute("UPDATE seadex_torrents SET updated='2030-01-01 00:00:00.000Z' WHERE id=?", (rid(11),))
+                other.commit()
+                other.close()
+            return self.fake.transport(url)
+        out = self.sync(transport=transport, files_library="main")
+        self.assertEqual((out["files_fetched"], out["files_pending"]), (1, 1))
+        self.assertIsNone(self.rows("SELECT files FROM seadex_torrents WHERE id=?", rid(11))[0][0])
 
     def test_files_errors_keep_the_committed_listing(self):
         self.identities(AL)

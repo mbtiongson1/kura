@@ -100,10 +100,17 @@ def infohash(value) -> str:
     return value.lower()
 
 
+def canonical_stamp(value) -> str:
+    """Validated timestamp with a fixed three-digit minimum fraction, so string order is time order."""
+    value = timestamp(value)
+    base, _, rest = value[:-1].partition(".")
+    return f"{base}.{rest.ljust(3, '0')}Z"
+
+
 def filter_updated(since) -> str:
     """Records at or after `since`: the boundary record is fetched again (upserts are idempotent),
     so a record sharing the cursor's timestamp is never missed."""
-    return f'updated>="{timestamp(since)}"'
+    return f'updated>="{canonical_stamp(since)}"'
 
 
 def filter_ids(ids) -> str:
@@ -258,7 +265,8 @@ def parse_torrent(item) -> dict | None:
             break
     digest, url = item.get("infoHash"), item.get("url")
     view = NYAA_VIEW.fullmatch(url) if isinstance(url, str) else None
-    public = (tracker.lower() == "nyaa" and isinstance(digest, str) and
+    raw_tracker = item.get("tracker")       # the exact value: sanitizing must never create a match
+    public = (raw_tracker.lower() == "nyaa" and isinstance(digest, str) and
               bool(INFOHASH.fullmatch(digest)) and view is not None)
     return {"id": rid, "infohash": digest.lower() if public else None, "release_group": group or None,
             "tracker": tracker, "public": int(public), "nyaa_id": int(view.group(1)) if public else None,
@@ -472,8 +480,8 @@ def _parse_all(items, parser, skipped):
 
 
 def _newest(rows, previous):
-    stamps = [r["updated"] for r in rows.values()]
-    return max(stamps + ([previous] if previous else []), default=None)
+    stamps = [canonical_stamp(r["updated"]) for r in rows.values()]
+    return max(stamps + ([canonical_stamp(previous)] if previous else []), default=None)
 
 
 def _count(db, sql):
@@ -540,22 +548,22 @@ def library_ids(store, library: str) -> list[int]:
     return list(dict.fromkeys(ids))
 
 
-def _pending_torrents(store, ids) -> list[str]:
-    """Public torrents of the entries for `ids` whose file list is not stored, in id order."""
-    out = []
+def _pending_torrents(store, ids) -> dict[str, str]:
+    """Public torrents (id -> `updated` seen) of the entries for `ids` without stored file lists."""
+    out = {}
     for i in ids:
-        for (tid,) in store.db.execute(
-                "SELECT DISTINCT t.id FROM seadex_entries e JOIN seadex_entry_torrents x ON x.entry_id=e.id "
+        for tid, updated in store.db.execute(
+                "SELECT DISTINCT t.id, t.updated FROM seadex_entries e JOIN seadex_entry_torrents x ON x.entry_id=e.id "
                 "JOIN seadex_torrents t ON t.id=x.torrent_id WHERE e.anilist_id=? AND t.public=1 "
                 "AND t.files_fetched_at IS NULL ORDER BY t.id", (i,)):
-            if tid not in out:
-                out.append(tid)
+            out.setdefault(tid, updated)
     return out
 
 
 def _files(store, client, library: str, now: float, skipped) -> tuple[int, int]:
     """Fetch file lists in batches until done or the request budget ends. -> (fetched, pending)."""
-    pending = _pending_torrents(store, library_ids(store, library))
+    versions = _pending_torrents(store, library_ids(store, library))
+    pending = list(versions)
     fetched = 0
     for start in range(0, len(pending), FILES_BATCH):
         if client.exhausted():
@@ -571,13 +579,14 @@ def _files(store, client, library: str, now: float, skipped) -> tuple[int, int]:
                 skipped[0] += 1
                 continue
             rows.append((json.dumps(parsed["files"]), parsed["total_bytes"], parsed["video_files"],
-                         parsed["median_video_bytes"], now, rid))
+                         parsed["median_video_bytes"], now, rid, versions[rid]))
 
         def write(db):
-            db.executemany("UPDATE seadex_torrents SET files=?, total_bytes=?, video_files=?, "
-                           "median_video_bytes=?, files_fetched_at=? WHERE id=?", rows)
-        _write(store, write)
-        fetched += len(rows)
+            # Only the record version that was selected: a concurrent sync may have replaced it.
+            return db.executemany(
+                "UPDATE seadex_torrents SET files=?, total_bytes=?, video_files=?, median_video_bytes=?, "
+                "files_fetched_at=? WHERE id=? AND updated=? AND public=1", rows).rowcount
+        fetched += _write(store, write)
     return fetched, len(_pending_torrents(store, library_ids(store, library)))
 
 
