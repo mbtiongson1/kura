@@ -90,7 +90,7 @@ Cache: a stored result is reused, at no I/O cost, when the inventory's size and 
 `unsupported_container`, `invalid`) and the probe was not cut by the per-file byte limit (a cut
 result is stored with the `allowance` it ran under and is retried only when a larger one is asked for). `unsafe`, `changed` and
 `io_error` rows record why a file was not probed and are retried every run. The cache trusts the inventory (it never opens the file), but a hit still needs the title's
-root label to be given with `--root`. Re-run `manifest build` after files change.
+root label to be given with `--root` and the root to open safely (no symlinks). Re-run `manifest build` after files change.
 
 Budget: `--max-files` (default 2000) bounds the files that need I/O in one run (cache hits are free, so
 repeated runs progress through a larger selection); `--max-read-mib` is a hard cap on bytes read per run; a file gets the smaller of the
@@ -103,6 +103,9 @@ Output: `{"library", "sample": {"strategy", "titles", "files_selected"},
 `no_root` (a title's root label was not given with `--root`).
 
 ## Read-only guarantees
+
+A state directory equal to, inside or above a library root is refused (`unsafe_state_dir`), so the
+database and lock file can never be created under a library.
 
 Library files are reached only through `rofs.open_root` and `rofs.open_file_ro` and read with
 `os.pread`; no write, create, rename or delete happens under a root, and `mkvprobe` imports no

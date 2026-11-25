@@ -90,8 +90,7 @@ class Sampling(Lib):
 
     def test_second_run_reads_nothing_and_opens_nothing(self):
         first = self.probe()
-        with patch.object(rofs, "open_file_ro", side_effect=AssertionError("opened a file")), \
-             patch.object(rofs, "open_root", side_effect=AssertionError("opened a root")):
+        with patch.object(rofs, "open_file_ro", side_effect=AssertionError("opened a file")):
             second = self.probe()
         self.assertEqual((second["probed"], second["cached"], second["bytes_read"]), (0, first["probed"], 0))
         self.assertEqual(second["pending"], 0)
@@ -349,6 +348,21 @@ class ReadOnly(Lib):
         self.assertTrue(all(str(p).endswith("operation.lock") for p in lock_opens), lock_opens)
         self.assertEqual({p: p.stat().st_mtime_ns for p in self.lib.rglob("*")}, before)
         self.assertEqual(sorted(p.name for p in self.lib.iterdir()), ["Kura Loose Movie.mkv", "Kura Sample Series"])
+
+    def test_state_directory_inside_or_above_a_root_is_refused(self):
+        for root in (self.tmp, self.tmp / "state", self.tmp / "state" / "deeper"):
+            with self.subTest(root=str(root)), self.assertRaises(KuraError) as caught:
+                self.probe(roots={"main": root})
+            self.assertEqual(caught.exception.code, "unsafe_state_dir")
+
+    def test_cached_results_still_need_a_valid_root(self):
+        self.probe()
+        link = self.tmp / "linked"
+        link.symlink_to(self.lib)
+        again = self.probe(roots={"main": link})
+        self.assertEqual((again["cached"], again["failed"]), (0, {"unsafe_path": 4}))
+        gone = self.probe(roots={"main": self.tmp / "missing"})
+        self.assertEqual((gone["cached"], gone["failed"]), (0, {"not_found": 4}))
 
     def test_reads_use_pread_on_the_rofs_descriptor(self):
         with patch("os.read", side_effect=AssertionError("sequential read")):

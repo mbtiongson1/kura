@@ -78,6 +78,16 @@ def check_args(library, sample, titles, max_files, max_read_bytes, per_file_byte
         raise KuraError("invalid_arguments", f"per_file_bytes must be 1..{MAX_PER_FILE}")
 
 
+def check_state_dir(state_root, roots):
+    """Refuse a state directory equal to, inside or above a library root: probing must never
+    put its database or lock file where the library lives."""
+    state = os.path.realpath(os.path.abspath(state_root))
+    for root in roots.values():
+        base = os.path.realpath(os.path.abspath(root))
+        if state == base or state.startswith(base + os.sep) or base.startswith(state + os.sep):
+            raise KuraError("unsafe_state_dir", "The state directory overlaps a library root")
+
+
 def _select(repo, library, titles, sample):
     """Deterministic ``[(title, file)]`` in (title key, file path) order, plus the title count."""
     rows = repo.titles(library)
@@ -139,6 +149,7 @@ def probe_library(store, *, library, roots, sample="groups", titles=None, max_fi
     a title key). Returns the counts document of ``kura probe library``.
     """
     check_args(library, sample, titles, max_files, max_read_bytes, per_file_bytes)
+    check_state_dir(store.root, roots)
     repo = ManifestRepo(store.db)
     per_file_bytes = min(per_file_bytes, max_read_bytes)       # a run budget below the allowance is the allowance
     with store.lock():
@@ -156,19 +167,9 @@ def probe_library(store, *, library, roots, sample="groups", titles=None, max_fi
             for title, f in selected:
                 if should_stop is not None and should_stop():
                     break
-                if worked >= max_files:
-                    break
-                remaining = max_read_bytes - stats["bytes_read"]
-                if remaining <= 0:
-                    exhausted = True
-                    break
                 label = title["rel_path"].partition("/")[0]
-                if label not in roots:                      # checked first: a hit needs its root named too
+                if label not in roots:                      # a hit needs its root named and openable too
                     fail("no_root")
-                    handled += 1
-                    continue
-                if not reprobe and _cached(store.db, title["id"], f, per_file_bytes):
-                    stats["cached"] += 1
                     handled += 1
                     continue
                 if label not in root_fds:
@@ -181,6 +182,16 @@ def probe_library(store, *, library, roots, sample="groups", titles=None, max_fi
                     fail(root.code)
                     handled += 1
                     continue
+                if not reprobe and _cached(store.db, title["id"], f, per_file_bytes):
+                    stats["cached"] += 1
+                    handled += 1
+                    continue
+                if worked >= max_files:
+                    break
+                remaining = max_read_bytes - stats["bytes_read"]
+                if remaining <= 0:
+                    exhausted = True
+                    break
                 outcome = _probe_file(root, f, min(per_file_bytes, remaining), per_file_bytes)
                 if outcome[0] == "budget":
                     stats["bytes_read"] += outcome[1]
