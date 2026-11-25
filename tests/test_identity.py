@@ -308,6 +308,17 @@ class AliasFallback(Base):
                          ("unresolved", [A], "v2:2/2:Kura Gamma Season 2@2 | Kura Gamma@2"))
         self.sync(aliases=resolver, max_lookups=5, titles=["main/Kura Gamma S02"])
         self.assertEqual(len(resolver.queries), 2)                          # finished, remembered
+        out = identity.retain_check(self.store, "home", parse_ids(f"{A}\n"))
+        self.assertEqual(out["possible"], [{"title": "main/Kura Gamma S02", "candidates": [A]}])
+
+    def test_the_resumed_plan_is_seeded_with_the_candidates_of_the_finished_steps(self):
+        resolver = Resolver({"Kura Gamma": []})
+        lookup = identity._Lookup(resolver)
+        steps = identity.plan_steps("Kura Gamma", 2, None)
+        record, _, _ = identity._alias(lookup, steps, 1, 5, prior=[A])
+        self.assertEqual((record["status"], record["candidates"], resolver.queries), ("unresolved", [A], ["Kura Gamma"]))
+        record, _, _ = identity._alias(identity._Lookup(resolver), steps, 1, 5)
+        self.assertEqual(record["candidates"], [])
 
     def test_the_remembered_plan_must_match_exactly(self):
         steps = identity.plan_steps("Foo", 2, None)
@@ -620,6 +631,27 @@ class FileNames(Tree):
         with patch.object(identity, "askable", return_value=True):
             record, stop, exhausted = identity._alias(lookup, steps, 0, 1)
         self.assertEqual((lookup.made, exhausted), (1, False))
+
+    def test_a_folder_name_without_letters_still_gets_its_file_name_query(self):
+        for sub in ("!!!", "?!?"):
+            (self.lab.lib / sub).mkdir()
+            (self.lab.lib / sub / "[ASW] Show Six - 01 [1080p].mkv").write_bytes(b"x" * 100)
+        self.lab.build()
+        self.store.db.execute("DELETE FROM anilist_list_entries")
+        self.store.db.commit()
+        self.assertEqual(identity.folder_terms("main/!!!")[0], "")
+        resolver = Resolver({"Show Six": (999000011, ["Show Six"])})
+        out = self.sync(aliases=resolver, titles=["main/!!!"])
+        self.assertEqual((resolver.queries, out["lookups"]["made"]), (["Show Six"], 1))
+        self.assertEqual((self.row("!!!")["anilist_id"], self.row("!!!")["query"]), (999000011, "Show Six"))
+        # a season-marked nameless folder does not ask for "Season 2" on its own
+        (self.lab.lib / "!!! S2").mkdir()
+        (self.lab.lib / "!!! S2" / "notes.mkv").write_bytes(b"x" * 100)
+        self.lab.build()
+        before = list(resolver.queries)
+        self.sync(aliases=resolver, titles=["main/!!! S2"])
+        self.assertEqual(resolver.queries, before)
+        self.assertEqual(self.row("!!! S2")["query"], "v2:2/2:" + " Season 2@2 | @2")
 
     def test_offline_keeps_the_remembered_progress(self):
         resolver = Resolver({})

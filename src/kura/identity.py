@@ -467,13 +467,14 @@ def askable(query: str) -> bool:
     return bool(normalize(query)) and len(query) <= MAX_TITLE and not any(ord(c) < 32 for c in query)
 
 
-def _alias(lookup, steps, start: int, budget: int):
+def _alias(lookup, steps, start: int, budget: int, prior=()):
     """Alias fallback for one title from step ``start``: ``(record, stop, out_of_budget)``.
 
     Each step's page is matched here with the same rules as the offline pass, against the name
     and season of that step. A record is None only when nothing new was learned; when the budget
-    ends part-way, the record keeps the finished steps (``_key``) so the next run resumes."""
-    total, rejected = len(steps), set()
+    ends part-way, the record keeps the finished steps (``_key``) so the next run resumes, and
+    ``prior`` (the candidates that row recorded) seeds what the steps run so far rejected."""
+    total, rejected = len(steps), set(prior)
 
     def record(status, query, found=None, candidates=None):
         base = found or {"status": status, "anilist_id": None, "matched": None,
@@ -482,7 +483,7 @@ def _alias(lookup, steps, start: int, budget: int):
 
     for i in range(start, total):
         query, name, season = steps[i]
-        if not askable(query):          # AniList would refuse it: this step is done, others go on
+        if not askable(query) or not norm_words(name):     # unaskable, or no name to match: skip this step only
             continue
         if lookup.made >= budget:
             return (None if i == start else record("unresolved", _key(steps, i))), False, True
@@ -662,9 +663,8 @@ def sync(store, *, library: str, titles: list[str] | None = None, aliases=None,
                 if stop:
                     pending += 1
                     continue
-                if not normalize(steps[0][1]):
-                    continue
-                record, stop, exhausted = _alias(counter, steps, start, max_lookups)
+                prior = existing[key]["candidates"] if start and key in existing else ()
+                record, stop, exhausted = _alias(counter, steps, start, max_lookups, prior)
                 if exhausted:               # nothing is lost: finished steps are in the record
                     stop = True
                     pending += 1
