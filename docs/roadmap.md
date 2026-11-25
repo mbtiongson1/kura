@@ -12,6 +12,19 @@ The old application remains unchanged. Native issue transfer mapping:
 - Local preferences/overrides, safe scoped storage, idempotency, interruption and intentional offline resume.
 - Verified files/piece hashes/SHA-256, 54 tests and real authorized native Termux transfer evidence.
 
+## Library handover (read-only, in progress)
+Offline pipeline toward proposing which library titles can be cleared because a healthy,
+re-downloadable torrent backs them (the owner always performs the purge):
+- Landed: descriptor parsing and protection classifier, read-only library inventory,
+  state schema v2 with the manifest repository, piece-hash verification of local trees.
+- Landed with the manifest CLI: exact-name matching, `kura library inventory`,
+  `kura torrent inspect|verify`, `kura manifest build|show`, per-title status
+  (`reacquirable`, `partial`, `unverified`, `unmatched`, `protected`, `blocked`, `stale`),
+  evidence-based verification caching and rate-limit-aware AniList identity.
+- Next: quarantine plan (same-volume rename proposals, tree hashes, undo list, purge only
+  after a waiting period and a fresh swarm check), swarm health scraping, and an explicit
+  owner approval for files no torrent lists.
+
 ## Reconciled tracks
 
 | Kura issue (legacy) | Track | Remaining work |

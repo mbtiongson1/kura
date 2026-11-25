@@ -23,6 +23,12 @@ Python is an MVP decision for portability, not a requirement for future clients.
   candidate spellings. It is discovery-only: it widens which titles Nyaa is queried for,
   never preferences, release choice or approval. Matching is exact or whole-word subset;
   equal-best candidates are refused. Results are cached with a TTL in local state.
+- **Library handover** (read-only): `inventory`/`rofs` read a library as metadata only,
+  `torrentmeta`/`protect` parse descriptors and classify protection, `match` links torrents
+  to titles, `pieceverify` hashes local files against the piece list, and `manifest`
+  records and classifies the result (`manifest_store` is its repository). `cli_handover`
+  is the thin command layer; its inventory/inspect/verify commands never open state.
+  None of it writes to a library or descriptor directory.
 - **Downloader adapter**: local aria2c argument-array subprocess, no shell or RPC.
   Validated torrent metadata supplies exact expected paths, size and piece hashes.
 - **Local repository**: versioned preferences and acquisition/audit records in SQLite;
@@ -92,6 +98,13 @@ Compare local-only and hybrid deployments with actual infrastructure before enab
   deduplication, manual correction and season-aware identity resolution.
 
 ## Safe lifecycle, archive and reacquisition
+Handover pipeline (implemented as read-only proposal data): a title is *reacquirable*
+only when it is on the server (all file bytes verified against torrent piece hashes, no
+unlisted extra files) and its torrent is public, unprotected and re-downloadable. This is
+the "photos cleared once safely in the cloud" model: Kura proposes, the owner purges.
+Statuses are recomputed from stored evidence (size, mtime, device, inode per file), so a
+changed file turns a title `stale`. Private or unparsable material is protected, never
+eligible. Quarantine planning and swarm-health checks build on this in later stages.
 Target lifecycle: discovered -> proposed -> acquiring -> staged -> ready -> watched ->
 archive_candidate -> quarantined -> reclaimed -> reacquirable.
 MVP stops at verified acquisition. Future organization uses approved roots, collision
