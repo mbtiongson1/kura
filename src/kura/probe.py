@@ -19,11 +19,13 @@ the current one; the stored result then carries an ``allowance`` key) and ``repr
 inventory: re-run ``manifest build`` after files change. Rows describing an access problem
 (unsafe, changed, io_error) are recorded but never count as hits, so they are retried.
 
-``max_files`` bounds the files that need I/O in one run (cache hits are free), so repeated runs
-walk through a selection larger than the cap. Files left over stay pending.
+``max_files`` bounds the files probed in one run. Cache hits and files that cannot be probed
+(changed, unsafe, io_error) do not use it up, so repeated runs walk through a selection larger
+than the cap and a stuck file cannot starve the files behind it. Files left over stay pending.
 
 Budget: ``max_read_bytes`` is a hard cap on bytes read in one run. A file gets
-``min(per_file_bytes, what is left)``; if the smaller allowance cuts a probe short, that result
+``min(per_file_bytes, what is left)`` (``per_file_bytes`` is itself capped at ``max_read_bytes``,
+so every run can finish at least one file); if the smaller allowance cuts a probe short, that result
 is discarded (not cached) and the file stays pending for the next run.
 """
 import json
@@ -138,11 +140,12 @@ def probe_library(store, *, library, roots, sample="groups", titles=None, max_fi
     """
     check_args(library, sample, titles, max_files, max_read_bytes, per_file_bytes)
     repo = ManifestRepo(store.db)
+    per_file_bytes = min(per_file_bytes, max_read_bytes)       # a run budget below the allowance is the allowance
     with store.lock():
         selected, title_count = _select(repo, library, titles, sample)
         stats = {"probed": 0, "cached": 0, "changed": 0, "bytes_read": 0}
         failed: dict[str, int] = {}
-        handled = worked = 0            # worked: files that needed I/O this run (bounded by max_files)
+        handled = worked = 0            # worked: files actually probed this run (bounded by max_files)
         exhausted = False
         root_fds: dict[str, int | KuraError] = {}
 
@@ -178,7 +181,6 @@ def probe_library(store, *, library, roots, sample="groups", titles=None, max_fi
                     fail(root.code)
                     handled += 1
                     continue
-                worked += 1
                 outcome = _probe_file(root, f, min(per_file_bytes, remaining), per_file_bytes)
                 if outcome[0] == "budget":
                     stats["bytes_read"] += outcome[1]
@@ -194,6 +196,7 @@ def probe_library(store, *, library, roots, sample="groups", titles=None, max_fi
                     stats["changed"] += 1
                 elif status in CONTENT_STATUSES:
                     stats["probed"] += 1
+                    worked += 1
                 else:
                     fail(status)
         finally:

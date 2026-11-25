@@ -213,10 +213,28 @@ class Budget(Lib):
         self.assertEqual(len(self.rows()), 4)
         self.assertEqual(len(files), 4)
 
-    def test_budget_smaller_than_any_probe_reads_at_most_that(self):
+    def test_budget_smaller_than_any_probe_reads_at_most_that_and_is_retried_later(self):
         out = self.probe(max_read_bytes=10)
         self.assertLessEqual(out["bytes_read"], 10)
-        self.assertEqual((out["probed"], out["pending"], out["budget_exhausted"]), (0, 4, True))
+        self.assertEqual(out["pending"], 0)                                    # the budget is the per-file allowance
+        self.assertEqual({s for s, _ in self.rows().values()}, {"partial"})
+        again = self.probe()
+        self.assertEqual((again["cached"], again["probed"]), (0, 4))           # a larger allowance retries them
+        self.assertEqual({s for s, _ in self.rows().values()}, {"ok"})
+
+    def test_a_small_run_budget_is_the_per_file_allowance_so_runs_progress(self):
+        self.write("Kura Big Show/Kura Big Show - 01 [1080p].mkv",
+                   mkvgen.build(attach=[("big.ttf", "font/ttf", 3 * (1 << 20))]))
+        self.inventory()
+        for _ in range(3):
+            out = self.probe(titles=["main/Kura Big Show"], max_read_bytes=300)
+        self.assertEqual((out["cached"], out["pending"]), (1, 0))
+
+    def test_unreachable_files_do_not_use_up_max_files(self):
+        for path in sorted(self.show.glob("*.mkv"))[:2]:
+            path.write_bytes(path.read_bytes() + b"changed")
+        out = self.probe(sample="all", max_files=1, titles=["main/Kura Sample Series"])
+        self.assertEqual((out["changed"], out["probed"], out["pending"]), (2, 1, 1))
 
     def test_per_file_cap_applies(self):
         self.write("Kura Big Show/Kura Big Show - 01 [1080p].mkv",
