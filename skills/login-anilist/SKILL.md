@@ -52,6 +52,8 @@ like a password.
 | `anilist_not_logged_in` | no login in this state directory | run this skill |
 | `anilist_token_expired` | the token is past its expiry | run this skill again |
 | `anilist_auth_invalid` | AniList rejected the token (revoked or wrong account) | run this skill again |
+| `anilist_token_invalid` | the stored token file holds something that is not a token | run this skill again |
+| `anilist_token_insecure` | the token file or its directory has loose permissions or is a symlink | the user fixes the permissions (file 0600, directory 0700) or logs in again; never print the file |
 | `anilist_login_needs_tty` | `kura anilist login` was run without a terminal | the user runs it in their own terminal window |
 | `anilist_rate_limited` | AniList's rate limit | wait the `retry_after` seconds; do not loop |
 

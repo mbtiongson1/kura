@@ -19,7 +19,7 @@ import json
 import math
 
 from . import anilist_auth, anilist_list
-from .anilist import MAX_TITLE, QUERY as SEARCH_QUERY, choose, parse_response
+from .anilist import MAX_TITLE, QUERY as SEARCH_QUERY, parse_response
 from .identity import list_snapshot
 from .models import KuraError
 from .releases import normalize
@@ -40,10 +40,12 @@ def _bad(message: str, **details):
     return KuraError("invalid_arguments", message, **details)
 
 
-def check_args(*, anilist_id=None, title=None, progress=None, status=None, score=None):
+def check_args(*, anilist_id=None, title=None, progress=None, status=None, score=None, search=False):
     """Validate before any state or network is touched."""
     if (anilist_id is None) == (title is None):
         raise _bad("Give exactly one of --id or --title")
+    if search and title is None:
+        raise _bad("--search needs --title")
     if anilist_id is not None and not anilist_list.valid_id(anilist_id):
         raise _bad("--id must be a positive AniList media ID")
     if title is not None and (not normalize(title) or len(title) > MAX_TITLE
@@ -107,20 +109,23 @@ def _pick(rows: list[dict], title: str, where: str, *, exact: bool):
             return None, None
         (anilist_id, matched), = hits.items()
         return anilist_id, {"via": where, "matched": matched}
-    found, status = choose(rows, title)
-    if status == "ambiguous":
+    anilist_id, record = _pick(rows, title, where, exact=True)
+    if anilist_id is not None:
+        return anilist_id, record
+    candidates = _candidates(rows, title)        # entries holding every word of the title
+    if len({c["anilist_id"] for c in candidates}) > 1:
         raise KuraError("anilist_title_ambiguous", "Several AniList entries match that title; use --id",
-                        where=where, candidates=_candidates(rows, title))
-    if found is None:
+                        where=where, candidates=candidates)
+    if not candidates:
         return None, None
-    return found.anilist_id, {"via": where, "matched": found.matched}
+    return candidates[0]["anilist_id"], {"via": where, "matched": candidates[0]["title"]}
 
 
 def resolve_target(db, req, title: str, *, search: bool):
     """Resolve a title to one AniList ID, never by guessing.
 
-    The viewer's own list accepts an exact title or a unique entry containing every word of it
-    (``anilist.choose``); every stored media row and the opt-in online search accept only an exact
+    The viewer's own list accepts an exact title, or else the one entry containing every word of
+    it (two such entries refuse; there is no ranking); every stored media row and the opt-in online search accept only an exact
     title (any of romaji, English, native or a synonym). Anything else refuses with candidates.
     """
     anilist_id, record = _pick(list_snapshot(db), title, "list", exact=False)
@@ -195,7 +200,8 @@ def plan(current, media: dict, *, progress=None, status=None, score=None, allow_
             warnings.append("anilist_progress_ahead_of_airing")
     target = status
     if target is None and progress is not None and progress > 0:
-        if episodes and progress == episodes and media.get("status") == "FINISHED":
+        if (episodes and progress == episodes and media.get("status") == "FINISHED"
+                and have["status"] != "REPEATING"):     # a rewatch is the owner's to close (repeat count)
             target = "COMPLETED"
         elif have["status"] is None or have["status"] in ACTIVATE:
             target = "CURRENT"
@@ -206,8 +212,8 @@ def plan(current, media: dict, *, progress=None, status=None, score=None, allow_
         send["status"] = target
     if score is not None and (have["score"] or 0) != score:
         send["scoreRaw"] = round(score * 10)
-    if current is None and not send:
-        send["status"] = target or "PLANNING"   # an explicit no-op on a new entry still adds it
+    if current is None:
+        send["status"] = target or "PLANNING"   # a new entry always gets an explicit status
     return send, warnings
 
 
@@ -242,10 +248,11 @@ def _title(media: dict):
 def update(store, ani, *, anilist_id=None, title=None, search=False, progress=None, status=None, score=None,
            allow_decrease=False, dry_run=False) -> dict:
     """Plan and (unless ``dry_run``) save one change to the viewer's AniList entry."""
-    check_args(anilist_id=anilist_id, title=title, progress=progress, status=status, score=score)
+    check_args(anilist_id=anilist_id, title=title, progress=progress, status=status, score=score, search=search)
     now = ani.wall()
     record = anilist_auth.load(store.root)
-    if anilist_auth.expiry_state(record["expires_at"], now)[0] <= 0:
+    left, token_warnings = anilist_auth.expiry_state(record["expires_at"], now)
+    if left <= 0:
         raise KuraError("anilist_token_expired", "The stored token has expired; log in again")
     req = anilist_list.Requester(ani, max_requests=3, token=record["token"])
     resolved = None
@@ -254,6 +261,7 @@ def update(store, ani, *, anilist_id=None, title=None, search=False, progress=No
     media, current = read_current(req, anilist_id)
     send, warnings = plan(current, media, progress=progress, status=status, score=score,
                           allow_decrease=allow_decrease)
+    warnings = [w for w in token_warnings if w != "anilist_token_expired"] + warnings
     viewer = record.get("viewer") if isinstance(record.get("viewer"), dict) else {}
     out = {"anilist_id": anilist_id, "title": _title(media), "episodes": media.get("episodes"),
            "resolved": resolved, "before": None if current is None else

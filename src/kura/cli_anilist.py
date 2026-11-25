@@ -181,7 +181,7 @@ def _limits(args, open_store) -> dict:
 
 def _update(args, open_store) -> dict:
     anilist_update.check_args(anilist_id=args.id, title=args.title, progress=args.progress,
-                              status=args.status, score=args.score)
+                              status=args.status, score=args.score, search=args.search)
     store = open_store()
     try:
         return anilist_update.update(store, _ani(store), anilist_id=args.id, title=args.title, search=args.search,

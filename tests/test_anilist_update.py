@@ -62,6 +62,20 @@ class Update(Lab):
         self.fake.list_entries[IDS[0]] = {"status": "CURRENT", "progress": 11, "score": 0, "repeat": 0}
         self.assertEqual(self.update(anilist_id=IDS[0], progress=12)["change"], {"progress": 12})
 
+    def test_a_rewatch_reaching_the_end_is_left_to_the_owner(self):
+        self.fake.list_entries[IDS[0]] = {"status": "REPEATING", "progress": 11, "score": 0, "repeat": 1}
+        self.assertEqual(self.update(anilist_id=IDS[0], progress=12)["change"], {"progress": 12})
+
+    def test_a_new_entry_always_gets_an_explicit_status(self):
+        self.update(anilist_id=IDS[1], score=7.0)
+        self.update(anilist_id=IDS[2], progress=0)
+        self.assertEqual(self.fake.saves, [{"mediaId": IDS[1], "status": "PLANNING", "scoreRaw": 70},
+                                           {"mediaId": IDS[2], "progress": 0, "status": "PLANNING"}])
+
+    def test_a_token_expiring_soon_is_reported(self):
+        self.login(days=10)
+        self.assertIn("anilist_token_expires_soon", self.update(anilist_id=IDS[0], progress=1, dry_run=True)["warnings"])
+
     def test_explicit_status_wins(self):
         self.fake.list_entries[IDS[0]] = {"status": "CURRENT", "progress": 11, "score": 0, "repeat": 0}
         out = self.update(anilist_id=IDS[0], progress=12, status="PAUSED")
@@ -157,7 +171,8 @@ class Update(Lab):
                    {"anilist_id": 0, "progress": 1}, {"anilist_id": IDS[0], "progress": -1},
                    {"anilist_id": IDS[0], "score": 11}, {"anilist_id": IDS[0], "score": 8.55},
                    {"anilist_id": IDS[0], "score": float("nan")}, {"anilist_id": IDS[0], "status": "WATCHING"},
-                   {"title": "bad\nname", "progress": 1}, {"title": "x" * 201, "progress": 1}):
+                   {"title": "bad\nname", "progress": 1}, {"title": "x" * 201, "progress": 1},
+                   {"anilist_id": IDS[0], "progress": 1, "search": True}):
             with self.subTest(kw=kw):
                 self.refused("invalid_arguments", **kw)
         self.assertEqual(self.fake.calls, [])

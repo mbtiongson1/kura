@@ -38,7 +38,7 @@ also revoke the app in your AniList settings.
 | `anilist list [--user NAME] [--max-age-h 12] [--refresh] [--entries] [--max-requests 10]` | 0 if cached | `--user` is anonymous (no Authorization header) |
 | `anilist media (--id N ... \| --library NAME [--missing]) [--max-requests 10]` | 1 per 50 IDs | public metadata, halves a batch AniList rejects (minimum 5) |
 | `anilist limits` | exactly 1 | reports `X-RateLimit-*` and the shared limiter state |
-| `anilist update (--id N \| --title T [--search]) [--progress N] [--status S] [--score X] [--allow-decrease] [--dry-run]` | 2, 1 with `--dry-run`, +1 with `--search` | the only write; see below |
+| `anilist update (--id N \| --title T [--search]) [--progress N] [--status S] [--score X] [--allow-decrease] [--dry-run]` | 1 read, plus 1 save when something changes (none with `--dry-run`), plus 1 with `--search` | the only write; see below |
 
 `list` fetches `MediaListCollection` in chunks of 500 (at most 20), then the favourites
 (25 per page, at most 20 pages). Entries that appear in several lists are stored once; an entry
@@ -53,7 +53,8 @@ error code. Authentication errors, unknown or private users and bad arguments ra
 `kura anilist update --title "Some Show" --progress 8` after watching episode 8.
 
 1. **Target.** `--id N` is exact. `--title` is matched against the stored snapshot, never guessed:
-   on your own list an exact title or the one entry that contains every word of it; then an
+   on your own list an exact title, or else the one entry that contains every word of it (two
+   such entries refuse: there is no ranking); then an
    exact title (romaji, English, native or a synonym) on any stored media row; then, only with
    `--search`, an exact title in one public AniList search (sent without the token). A tie
    refuses with `anilist_title_ambiguous`, a miss with `anilist_title_unknown`; both list the
@@ -64,15 +65,19 @@ error code. Authentication errors, unknown or private users and bad arguments ra
    (`anilist_progress_out_of_range`); a progress past the last aired episode only warns
    (`anilist_progress_ahead_of_airing`). Without `--status`, setting progress on a new, planned,
    paused or dropped entry makes it `CURRENT`, and reaching the last episode of a finished show
-   makes it `COMPLETED`. `--score` is 0 to 10 with one decimal (0 clears it) and is sent as
+   makes it `COMPLETED` (except a `REPEATING` rewatch, which the owner closes). A new entry
+   always gets an explicit status (`PLANNING` when nothing else applies). Lowering progress with
+   `--allow-decrease` leaves the status as it is. `--score` is 0 to 10 with one decimal (0 clears it) and is sent as
    AniList's 100-point raw score.
 4. **Write.** One `SaveMediaListEntry` mutation that declares and sends only the changing fields.
    When nothing changes there is no write (`written: false`). `--dry-run` stops after the plan.
 5. **Snapshot.** The saved entry replaces your row in the local snapshot, so `list --entries` and
    the audit see it at once; the next `list --refresh` replaces the whole snapshot as usual.
 
-The output shows `before`, `change`, `after`, `resolved`, `requests` and `warnings`, never the
-token. Updates share the rate budget with every other AniList request.
+The output shows `before`, `change`, `after`, `resolved`, `requests` and `warnings` (including
+`anilist_token_expires_soon`), never the token. Updates share the rate budget with every other
+AniList request. If the save times out (`anilist_unavailable`) it may still have landed: run the
+same command with `--dry-run` to see the entry as AniList has it; repeating a save is harmless.
 
 ## Rate limits
 
