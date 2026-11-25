@@ -362,12 +362,29 @@ class Owner(Base):
         seed(self.store.db, [(A, "Kura Alpha", None, [])])
         original = identity._store
 
-        def racing(db, library, records, now):
+        def racing(db, library, records, seen, now):
             identity.pin(self.store, library, "main/Kura Alpha", E)
-            original(db, library, records, now)
+            original(db, library, records, seen, now)
         with patch.object(identity, "_store", racing):
             self.sync(aliases=None)
         self.assertEqual((self.row("Kura Alpha")["status"], self.row("Kura Alpha")["anilist_id"]), ("pinned", E))
+
+    def test_a_slow_sync_cannot_undo_a_newer_result(self):
+        seed(self.store.db, [(A, "Kura Alpha", None, [])])
+        self.sync(aliases=None, titles=["main/Kura Alpha"])
+        slow = Resolver({"Kura Beta": (B, ["Kura Beta"])})
+        real = slow.transport
+
+        def interleaved(query):
+            # while the slow sync waits on the network, another process records a newer answer
+            self.store.db.execute("UPDATE title_identities SET status='unavailable', source='alias',"
+                                  " updated_at=updated_at+5 WHERE title='main/Kura Beta'")
+            self.store.db.commit()
+            return real(query)
+        slow.transport = interleaved
+        out = self.sync(aliases=slow, titles=["main/Kura Alpha", "main/Kura Beta"], refresh=True)
+        self.assertEqual(self.row("Kura Beta")["status"], "unavailable")     # the newer row stays
+        self.assertEqual(out["lookups"]["made"], 1)
 
     def test_pin_validation_and_clear(self):
         for kwargs in ({}, {"anilist_id": A, "not_anime": True}, {"anilist_id": 0}, {"anilist_id": 10**9},

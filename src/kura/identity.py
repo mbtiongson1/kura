@@ -211,12 +211,28 @@ def load(db, library: str) -> dict[str, dict]:
     return out
 
 
-def _store(db, library: str, records: dict[str, dict], now: float):
-    """Upsert records; an owner row is never replaced (checked again inside the transaction)."""
+def _fingerprints(db, library: str) -> dict[str, tuple]:
+    """What a row looked like when it was read: the guard for ``_store``."""
+    return {t: (i, st, so, u) for t, i, st, so, u in db.execute(
+        "SELECT title, anilist_id, status, source, updated_at FROM title_identities WHERE library=?",
+        (library,))}
+
+
+def _store(db, library: str, records: dict[str, dict], seen: dict[str, tuple], now: float):
+    """Upsert records that were computed from the rows described by ``seen``.
+
+    A row that changed since it was read (another sync, a pin) is left alone, so a slow sync can
+    never undo a newer result; an owner row is never replaced either way.
+    """
     if not records:
         return
     with _tx(db):
         for title, r in sorted(records.items()):
+            now_row = db.execute(
+                "SELECT anilist_id, status, source, updated_at FROM title_identities WHERE library=? AND title=?",
+                (library, title)).fetchone()
+            if (tuple(now_row) if now_row else None) != seen.get(title):
+                continue
             db.execute(
                 "INSERT INTO title_identities(library, title, anilist_id, status, source, query, matched,"
                 " candidates, updated_at) VALUES (?,?,?,?,?,?,?,?,?)"
@@ -360,6 +376,7 @@ def sync(store, *, library: str, titles: list[str] | None = None, aliases=None,
     moment = now()
     existing = load(store.db, library)
     before = dict(existing)
+    seen = _fingerprints(store.db, library)
     snapshot = list_snapshot(store.db)
     offline, need = {}, []
     for key in wanted:
@@ -378,8 +395,8 @@ def sync(store, *, library: str, titles: list[str] | None = None, aliases=None,
         record = _carry(_record(found, "list", base), current)
         if not _same(current, record):
             offline[key] = record
-    _store(store.db, library, offline, moment)
-    existing.update(offline)
+    _store(store.db, library, offline, seen, moment)
+    existing, seen = load(store.db, library), _fingerprints(store.db, library)
     counter = _Lookup(aliases) if aliases is not None else None
     pending = 0
     if counter is not None:
@@ -400,8 +417,7 @@ def sync(store, *, library: str, titles: list[str] | None = None, aliases=None,
                 if not _same(existing.get(key), record):
                     found_now[key] = record
         finally:
-            _store(store.db, library, found_now, now())
-            existing.update(found_now)
+            _store(store.db, library, found_now, seen, now())
     rows = load(store.db, library)
     counts, by_source = _counts(rows, wanted)
     return {"library": library, "titles": len(wanted),
