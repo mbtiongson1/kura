@@ -7,7 +7,7 @@ Kura's private state. Neither command prints; both return data for the v1 envelo
 import os
 from pathlib import Path
 
-from . import mkvprobe, probe, rofs
+from . import probe, rofs
 from .models import KuraError
 from .safety import private_root
 
@@ -70,7 +70,7 @@ def _file(args):
             except OSError as exc:
                 raise KuraError("io_error", f"Read failed: {exc.strerror}") from exc
 
-        return mkvprobe.probe(read, size, max_bytes=args.max_read_kib * 1024)
+        return probe.probe_container(read, size, max_bytes=args.max_read_kib * 1024)
     finally:
         os.close(fd)
 

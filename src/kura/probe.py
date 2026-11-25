@@ -1,4 +1,4 @@
-"""Library probing: run ``mkvprobe`` over the video files recorded by ``manifest build``.
+"""Library probing: run ``mkvprobe`` / ``mp4probe`` over the video files recorded by ``manifest build``.
 
 Offline and media-only. Files come from the ``library_files`` rows of an earlier inventory;
 every one is opened through ``rofs`` (O_RDONLY|O_NOFOLLOW, one root descriptor per root) and
@@ -39,7 +39,7 @@ import os
 import re
 import time
 
-from . import mkvprobe, rofs
+from . import mkvprobe, mp4probe, rofs
 from .manifest_store import ManifestRepo, canonical
 from .models import KuraError
 
@@ -47,6 +47,8 @@ VIDEO_EXT = (".mkv", ".mka", ".webm", ".mp4", ".m4v", ".mov", ".avi", ".ts", ".m
 MAX_CLUSTERS = 4
 MAX_FILES = 100_000
 MAX_PER_FILE = 16 << 20
+SNIFF_BYTES = 16
+EBML_MAGIC = b"\x1a\x45\xdf\xa3"
 CONTENT_STATUSES = ("ok", "partial", "unsupported_container", "invalid")
 SAMPLES = ("groups", "all")
 
@@ -55,6 +57,49 @@ _GROUP_TRAIL = re.compile(r"-([A-Za-z][A-Za-z0-9]*)$")
 _RES = re.compile(r"(?<![0-9a-z])((?:480|576|720|1080|2160|4320)[pi]|4k|\d{3,4}x\d{3,4})(?![0-9a-z])", re.I)
 _CODEC = re.compile(r"(?<![0-9a-z])(x264|x265|h\.?264|h\.?265|hevc|avc|av1|vp9|10[ -]?bits?|8[ -]?bits?|"
                     r"hi10p?|flac|aac|ac-?3|e-?ac-?3|dts|opus)(?![0-9a-z])", re.I)
+
+
+class _Sniffed:
+    """The file reader shared by the sniff and the parser: one counter for every byte received.
+
+    The first bytes are fetched once; a read inside them is answered from that copy, and one that
+    runs past them asks the file only for the part beyond. So no byte is requested twice and
+    ``received`` is exactly what the file was asked for.
+    """
+
+    def __init__(self, read, head):
+        self._read, self.head, self.received = read, head, len(head)
+
+    def __call__(self, offset, length):
+        end, have = offset + length, len(self.head)
+        if offset < 0 or length <= 0 or offset >= have:
+            data = bytes(self._read(offset, length))
+            self.received += len(data)
+            return data
+        if end <= have:
+            return self.head[offset:end]
+        tail = bytes(self._read(have, end - have))
+        self.received += len(tail)
+        return self.head[offset:] + tail
+
+
+def probe_container(read, size, *, max_bytes=2 << 20):
+    """Probe one file with the parser its first bytes call for.
+
+    ``1A 45 DF A3`` is Matroska/WebM; an ISO BMFF box type (``ftyp``, ``moov``, ``mdat``,
+    ``free``, ``skip``, ``wide``) at offset 4 is MP4. Anything else goes to ``mkvprobe``, which
+    reports it ``unsupported_container`` (or ``invalid`` when too short). The extension is never
+    consulted. The sniff is charged to `max_bytes` (the parser gets what is left), and the
+    document's ``bytes_read`` is the total actually received from the file, sniff included.
+    """
+    n = min(SNIFF_BYTES, size) if isinstance(size, int) and size > 0 else 0
+    if not isinstance(max_bytes, int) or n == 0 or max_bytes < n:
+        return mkvprobe.probe(read, size, max_bytes=max_bytes)
+    shared = _Sniffed(read, bytes(read(0, n))[:n])
+    parser = mp4probe if shared.head[:4] != EBML_MAGIC and shared.head[4:8] in mp4probe.SNIFF_BOXES else mkvprobe
+    result = parser.probe(shared, size, max_bytes=max_bytes - n)
+    result["bytes_read"] = shared.received
+    return result
 
 
 def signature(name: str) -> tuple:
@@ -260,7 +305,7 @@ def _probe_file(root_fd, f, allowance, full, check_only=False):
         if check_only:
             return ("cached",)
         try:
-            result = mkvprobe.probe(read, st.st_size, max_bytes=allowance)
+            result = probe_container(read, st.st_size, max_bytes=allowance)
         except OSError:
             return "io_error", None, used            # what was read before the failure still counts
         after = os.fstat(fd)

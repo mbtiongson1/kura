@@ -34,7 +34,7 @@ cross-process request limiter shared by every networked service, and a CLI comma
 later modules add commands without touching the core parser.
 
 Landed: the foundation, the Nyaa request pacing, the AniList login and list sync, the SeaDex
-mirror, title identity with retain lists, the Matroska header probe, and the audit
+mirror, title identity with retain lists, the Matroska and MP4 header probe, and the audit
 (`kura audit`, [audit.md](audit.md)).
 
 Build order, each step read-only toward the library:
