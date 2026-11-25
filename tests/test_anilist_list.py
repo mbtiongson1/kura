@@ -182,7 +182,9 @@ class ListSync(Lab):
         for broken in ({k: v for k, v in base.items() if k != "lists"},
                        {k: v for k, v in base.items() if k != "hasNextChunk"},
                        {**base, "hasNextChunk": "false"},
-                       {**base, "lists": [{"isCustomList": False}]}):
+                       {**base, "lists": [{"isCustomList": False}]},
+                       {**base, "lists": [None]},
+                       {**base, "lists": [{"isCustomList": False, "entries": [None]}]}):
             self.fake.queue = [({"data": {"MediaListCollection": broken}}, {})]
             out = self.sync(refresh=True)
             self.assertEqual((out["stale"], out["error"]), (True, "anilist_invalid_response"))
@@ -202,6 +204,29 @@ class ListSync(Lab):
         out = self.sync(refresh=True)
         self.assertEqual(out["warnings"], ["anilist_favourites_failed"])
         self.assertEqual(out["favourites"], 2)
+
+    def test_null_favourite_node_keeps_old_favourites(self):
+        self.fake.favourites = IDS[:2]
+        self.sync()
+        original = self.fake.respond
+        self.fake.respond = lambda q, v: ({"User": {"favourites": {"anime": {
+            "pageInfo": {"hasNextPage": False}, "nodes": [None]}}}} if "User(id" in q else original(q, v))
+        out = self.sync(refresh=True)
+        self.assertEqual((out["warnings"], out["favourites"]), (["anilist_favourites_failed"], 2))
+
+    def test_failed_favourites_are_retried_on_the_next_cached_call(self):
+        self.fake.favourites = IDS[:2]
+        original = self.fake.respond
+        self.fake.respond = lambda q, v: (_ for _ in ()).throw(http_error(500)) if "User(id" in q else original(q, v)
+        out = self.sync()
+        self.assertEqual((out["warnings"], out["favourites"]), (["anilist_favourites_failed"], 0))
+        self.fake.respond = original
+        made = len(self.fake.calls)
+        out = self.sync()                                   # list is fresh; only favourites are fetched
+        self.assertEqual(len(self.fake.calls) - made, 1)
+        self.assertEqual((out["favourites"], out["warnings"], out["from_cache"]), (2, [], True))
+        self.assertEqual(len(self.fake.calls) - made, 1)
+        self.assertEqual(self.sync()["requests"]["made"], 0)
 
     def test_a_429_inside_a_200_body_is_persisted_for_other_processes(self):
         self.fake.queue = [({"data": None, "errors": [{"message": "Too Many Requests.", "status": 429}]},

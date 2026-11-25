@@ -189,9 +189,10 @@ def fetch_list(req: Requester, *, user_id: int | None, user_name: str | None, au
             raise KuraError("anilist_invalid_response", "AniList returned an incomplete list")
         # Status lists first. An entry the owner hid from them is only in a custom list, and the same
         # entry (same mediaId, same status) can appear in several lists, so keep the first of each.
-        for group in sorted((g for g in lists if isinstance(g, dict)), key=lambda g: g.get("isCustomList") is True):
-            if not isinstance(group.get("entries"), list):
-                raise KuraError("anilist_invalid_response", "AniList returned an incomplete list")
+        if not all(isinstance(g, dict) and isinstance(g.get("entries"), list) and
+                   all(isinstance(i, dict) for i in g["entries"]) for g in lists):
+            raise KuraError("anilist_invalid_response", "AniList returned an incomplete list")
+        for group in sorted(lists, key=lambda g: g.get("isCustomList") is True):
             for item in group["entries"]:
                 parsed = parse_entry(item)
                 if parsed is None or parsed[0]["anilist_id"] in entries:
@@ -218,9 +219,9 @@ def fetch_favourites(req: Requester, user_id: int) -> list[int]:
         nodes, info = anime.get("nodes"), anime.get("pageInfo")
         if not isinstance(nodes, list) or not isinstance(info, dict) or not isinstance(info.get("hasNextPage"), bool):
             raise KuraError("anilist_invalid_response", "AniList returned incomplete favourites")
-        for node in nodes:
-            if isinstance(node, dict) and valid_id(node.get("id")) and node["id"] not in ids:
-                ids.append(node["id"])
+        if not all(isinstance(n, dict) and valid_id(n.get("id")) for n in nodes):
+            raise KuraError("anilist_invalid_response", "AniList returned incomplete favourites")
+        ids.extend(n["id"] for n in nodes if n["id"] not in ids)
         if not info["hasNextPage"]:
             return ids
     raise KuraError("anilist_list_too_large", "More favourites pages than Kura will fetch")
@@ -354,40 +355,41 @@ def list_sync(store, ani, *, user_name=None, max_age_h=12.0, refresh=False, entr
         if days <= 0:
             raise KuraError("anilist_token_expired", "The AniList token has expired; run kura anilist login")
         token, user_id = record["token"], record["viewer"]["id"]
-        row = db.execute("SELECT list_fetched_at FROM anilist_users WHERE user_id=?", (user_id,)).fetchone()
+        row = db.execute("SELECT list_fetched_at,favourites_fetched_at FROM anilist_users WHERE user_id=?",
+                         (user_id,)).fetchone()
     else:
-        row = db.execute("SELECT user_id,list_fetched_at FROM anilist_users WHERE name=? COLLATE NOCASE",
-                         (user_name,)).fetchone()
-        user_id = row[0] if row else None
-        row = row[1:] if row else None
-    fetched = row[0] if row else None
+        row = db.execute("SELECT list_fetched_at,favourites_fetched_at,user_id FROM anilist_users "
+                         "WHERE name=? COLLATE NOCASE", (user_name,)).fetchone()
+        user_id = row[2] if row else None
+    fetched, fav_fetched = (row[0], row[1]) if row else (None, None)
     req = Requester(ani, max_requests=max_requests, token=token)
-    base = {"requests": req.info(), "warnings": warnings}
-    if fetched is not None and not refresh and now - fetched < max_age_h * 3600:
-        return {**read_snapshot(db, user_id, with_entries=entries), "from_cache": True, "stale": False,
-                "error": None, **base, "rate_limit": _limiter_state(ani)}
-    error = None
-    try:
-        user, rows, media = fetch_list(req, user_id=user_id, user_name=user_name if user_id is None else None,
-                                       auth=token is not None)
-        user_id = user["id"]
-        save_snapshot(db, user=user, is_viewer=token is not None, score_format=None,
-                      entries=rows, media=media, now=now)
-    except KuraError as e:
-        e.details.setdefault("requests", req.info())
-        if e.code not in TRANSIENT or fetched is None:
-            raise
-        record_failure(db, user_id, e.code, now)
-        error = e.code
-    if error is None:
+
+    def fresh(stamp):
+        return stamp is not None and not refresh and now - stamp < max_age_h * 3600
+
+    error, fetched_now = None, False
+    if not fresh(fetched):
         try:
-            ids = fetch_favourites(req, user_id)
-            save_favourites(db, user_id, ids, now)
+            user, rows, media = fetch_list(req, user_id=user_id, user_name=user_name if user_id is None else None,
+                                           auth=token is not None)
+            user_id = user["id"]
+            save_snapshot(db, user=user, is_viewer=token is not None, score_format=None,
+                          entries=rows, media=media, now=now)
+            fav_fetched, fetched_now = None, True
+        except KuraError as e:
+            e.details.setdefault("requests", req.info())
+            if e.code not in TRANSIENT or fetched is None:
+                raise
+            record_failure(db, user_id, e.code, now)
+            error = e.code
+    if error is None and not fresh(fav_fetched):
+        try:        # favourites have their own freshness: a failed fetch is retried by the next call
+            save_favourites(db, user_id, fetch_favourites(req, user_id), now)
         except KuraError:
             warnings.append("anilist_favourites_failed")
     data = read_snapshot(db, user_id, with_entries=entries)
-    return {**data, "from_cache": error is not None, "stale": error is not None, "error": error,
-            "requests": req.info(), "warnings": warnings, "rate_limit": _limiter_state(ani)}
+    return {**data, "from_cache": not fetched_now, "stale": error is not None,
+            "error": error, "requests": req.info(), "warnings": warnings, "rate_limit": _limiter_state(ani)}
 
 
 def media_ids(db, ids, library, missing) -> list[int]:
