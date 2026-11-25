@@ -183,6 +183,7 @@ def load(root: Path) -> dict:
 
 def remove(root: Path) -> bool:
     """Delete the token file. Returns whether one existed. Refuses a symlink."""
+    no_symlinks(Path(root))
     target = path(root)
     try:
         mode = target.lstat().st_mode

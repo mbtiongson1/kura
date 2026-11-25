@@ -228,7 +228,7 @@ class Login(Cli):
         moved = self.home / "moved"
         (self.home / ".local").rename(moved)
         (self.home / ".local").symlink_to(moved)
-        for command in (("anilist", "whoami"), ("anilist", "list")):
+        for command in (("anilist", "whoami"), ("anilist", "list"), ("anilist", "logout")):
             code, out, _ = self.run_cli(*command)
             self.assertEqual((code, out["error"]["code"]), (2, "unsafe_path"))
 
