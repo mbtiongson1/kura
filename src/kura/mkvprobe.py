@@ -27,7 +27,7 @@ import math
 import re
 import struct
 
-PROBE_VERSION = 1
+PROBE_VERSION = 2
 SCHEMA = "kura.probe/1"
 
 MAX_ELEMENTS = 20_000
@@ -161,6 +161,18 @@ def _text(data, limit=TEXT_MAX):
 def _digits(value):
     """A positive integer from ASCII digits only (never int() on arbitrary text), else None."""
     return int(value) if value and re.fullmatch(r"[0-9]{1,15}", value) and int(value) > 0 else None
+
+
+def _product(app):
+    """The muxer's name without its version: 'mkvmerge v81.0 (...)' -> 'mkvmerge', 'Lavf59.2' -> 'lavf'."""
+    m = re.match(r"[a-z][a-z_]*", (app or "").strip().lower())
+    return m[0] if m else None
+
+
+def _clock(value):
+    """Seconds from a Matroska 'HH:MM:SS.fffffffff' tag string, else None."""
+    m = re.fullmatch(r"([0-9]+):([0-9]{1,2}):([0-9]{1,2}(?:\.[0-9]+)?)", value or "", re.ASCII)
+    return round(int(m[1]) * 3600 + int(m[2]) * 60 + float(m[3]), 3) if m else None
 
 
 def _unescape(data):
@@ -837,6 +849,52 @@ class _Probe:
 
     # -- output --------------------------------------------------------------------------
 
+    # -- bitrate -------------------------------------------------------------------------
+
+    def tag_stale(self, tags, total_kbps):
+        """True when a track's statistics tags cannot describe this file (copied from a source)."""
+        bps = _digits(tags.get("BPS"))
+        if bps and total_kbps is not None and bps / 1000 > total_kbps * 1.02:
+            return True                      # more than the whole file can carry: the primary test
+        app = _product(tags.get("_STATISTICS_WRITING_APP"))
+        if app:
+            ours = {_product(self.info.get("writing_app")), _product(self.info.get("muxing_app"))} - {None}
+            if ours and app not in ours:
+                return True                  # written by another muxer than the one that wrote this file
+        seg = self.info.get("duration_s")
+        tag = _clock(tags.get("DURATION"))
+        if seg and tag is not None and abs(tag - seg) > seg * 0.02:
+            return True
+        return False
+
+    def video_bitrate(self, tags, duration):
+        """(kbps, source) for the video track; a stale BPS tag is replaced by a size-based estimate."""
+        total = None
+        if duration and duration > 0 and self.size > 0:
+            total = self.size * 8 / duration / 1000
+        # The size test needs the real file and a segment duration (a DURATION tag may itself be copied).
+        verifiable = total is not None and not self.rd.short and self.info.get("duration_s") is not None
+        bps = _digits(tags.get("BPS"))
+        if bps and not verifiable:
+            self.warn("bitrate_unverified")        # cannot be checked against the file: kept, flagged
+            return round(bps / 1000), "tags"
+        if bps and not self.tag_stale(tags, total):
+            return round(bps / 1000), "tags"
+        if total is None:
+            return None, None
+        audio = 0.0
+        if bps:                                    # a stale tag: the estimate also sheds the audio
+            self.warn("stale_statistics_tags")
+            for t in self.tracks:
+                if t.get("type") != 2:
+                    continue
+                at = self.tags.get(t.get("uid"), {}) if t.get("uid") is not None else {}
+                abps = _digits(at.get("BPS"))
+                if abps and not self.tag_stale(at, total):
+                    audio += abps / 1000
+        estimate = total - audio if 0 < total - audio else total
+        return round(estimate), "size_over_duration"
+
     def video_doc(self, video, duration):
         codec_id = video.get("codec_id")
         codec = _codec_name(codec_id)
@@ -857,22 +915,16 @@ class _Probe:
             fps = round(1e9 / dd, 3)
         elif duration and _digits(tags.get("NUMBER_OF_FRAMES")):
             fps = round(_digits(tags["NUMBER_OF_FRAMES"]) / duration, 3)
-        bitrate = source = None
-        bps = _digits(tags.get("BPS"))
-        if bps:
-            bitrate, source = round(bps / 1000), "tags"
-        elif duration and duration > 0 and self.size > 0:
-            bitrate, source = round(self.size * 8 / duration / 1000), "size_over_duration"
+        bitrate, source = self.video_bitrate(tags, duration)
         return {"track": video["number"], "codec_id": codec_id, "codec": codec, "profile": profile,
                 "bit_depth": bits, "width": video.get("width"), "height": video.get("height"),
                 "fps": fps, "bitrate_kbps": bitrate, "bitrate_source": source}
 
     def tag_duration(self):
         for t in self.tracks:
-            value = self.tags.get(t.get("uid"), {}).get("DURATION")
-            m = re.fullmatch(r"([0-9]+):([0-9]{1,2}):([0-9]{1,2}(?:\.[0-9]+)?)", value or "", re.ASCII)
-            if m:
-                return round(int(m[1]) * 3600 + int(m[2]) * 60 + float(m[3]), 3)
+            seconds = _clock(self.tags.get(t.get("uid"), {}).get("DURATION"))
+            if seconds is not None:
+                return seconds
         return None
 
     def result(self):
@@ -905,10 +957,11 @@ class _Probe:
                 subs.append({"track": t["number"], "format": _sub_format(t.get("codec_id")),
                              "lang": lang, "name": t.get("name"),
                              "default": t.get("default", True), "forced": t.get("forced", False)})
+        video_doc = self.video_doc(video, duration) if video else None     # may add warnings
         return {"schema": SCHEMA, "status": self.status, "container": self.container,
                 "bytes_read": self.rd.used, "duration_s": duration,
                 "muxing_app": self.info.get("muxing_app"), "writing_app": self.info.get("writing_app"),
-                "video": self.video_doc(video, duration) if video else None,
+                "video": video_doc,
                 "encoder": self.encoder, "audio": audio, "subtitles": subs,
                 "attachments": self.attach, "chapters": self.chapters,
                 "warnings": list(self.warnings)}
