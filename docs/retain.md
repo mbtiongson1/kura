@@ -71,7 +71,8 @@ budget ends part-way, the finished queries are kept and the next run resumes at 
 not yet asked, so even `--max-lookups 1` gets there. A recent row is trusted only while the plan
 is exactly the same (same queries, order and seasons): new files, a different file-name query or a
 changed season marker look the title up again without `--refresh`, and a row in any other format
-(written by an earlier version) is looked up again. A resolved row's `query` is the query that
+(written by an earlier version) is looked up again. A query AniList would refuse (over 200 characters) is skipped without being charged; the
+other steps still run. A resolved row's `query` is the query that
 matched.
 
 Root entries that are not titles. A loose file that is not a video (poster or logo images,

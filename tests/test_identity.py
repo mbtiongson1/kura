@@ -598,6 +598,29 @@ class FileNames(Tree):
         self.assertEqual((resolver.queries[3:], out["pending"]), (["Show Six"], 0))
         self.assertEqual(self.row("Misc Folder")["anilist_id"], 999000011)
 
+    def test_an_unaskable_folder_query_does_not_block_the_file_name_query(self):
+        resolver = Resolver({"Show Six": (999000011, ["Show Six"])})
+        self.store.db.execute("DELETE FROM anilist_list_entries")
+        self.store.db.commit()
+        with patch.object(identity, "MAX_TITLE", 10):           # "Misc Folder" is now over the limit
+            out = self.sync(aliases=resolver, max_lookups=1, titles=["main/Misc Folder"])
+        self.assertEqual((resolver.queries, out["lookups"]["made"], out["pending"]), (["Show Six"], 1, 0))
+        row = self.row("Misc Folder")
+        self.assertEqual((row["status"], row["anilist_id"], row["query"]), ("resolved", 999000011, "Show Six"))
+
+    def test_an_overlong_query_is_skipped_for_free_and_the_plan_completes(self):
+        resolver = Resolver({"Show Six": []})
+        lookup = identity._Lookup(resolver)
+        steps = [("Kura " * 60, "Kura", None), ("Show Six", "Show Six", None)]
+        record, stop, exhausted = identity._alias(lookup, steps, 0, 1)      # a budget of 1 is enough
+        self.assertEqual((resolver.queries, lookup.made, stop, exhausted), (["Show Six"], 1, False, False))
+        self.assertEqual((record["status"], record["query"]), ("unresolved", identity._key(steps, 2)))
+        # even the resolver's own refusal costs nothing
+        lookup = identity._Lookup(resolver)
+        with patch.object(identity, "askable", return_value=True):
+            record, stop, exhausted = identity._alias(lookup, steps, 0, 1)
+        self.assertEqual((lookup.made, exhausted), (1, False))
+
     def test_offline_keeps_the_remembered_progress(self):
         resolver = Resolver({})
         self.sync(aliases=resolver, max_lookups=1, titles=["main/Misc Folder"])
@@ -765,6 +788,25 @@ class NonMedia(Tree):
         self.assertNotIn(key, rows)
         self.assertEqual(rows["main/sync.ffs_db"]["status"], "not_anime")        # owner rows stay
         self.assertEqual((out["titles"], out["non_media"]), (1, 2))
+
+    def test_the_non_media_cleanup_never_deletes_a_row_that_changed_or_an_owner_row(self):
+        for title, source in (("main/fonts", "list"), ("main/sync.ffs_db", "alias"), ("main/.DS_Store", "owner")):
+            self.store.db.execute("INSERT INTO title_identities(library, title, status, source, candidates, updated_at)"
+                                  " VALUES ('home', ?, 'unresolved', ?, '[]', 1.0)", (title, source))
+        self.store.db.commit()
+        original = identity._drop
+
+        def racing(db, library, titles, seen):
+            # another sync records a newer answer between the read and the delete
+            db.execute("UPDATE title_identities SET status='unavailable', updated_at=9.0 WHERE title='main/fonts'")
+            db.commit()
+            original(db, library, titles, seen)
+        with patch.object(identity, "_drop", racing):
+            self.sync(aliases=None)
+        rows = identity.load(self.store.db, "home")
+        self.assertEqual((rows["main/fonts"]["status"], rows["main/fonts"]["updated_at"]), ("unavailable", 9.0))
+        self.assertNotIn("main/sync.ffs_db", rows)                 # unchanged since read: dropped
+        self.assertIn("main/.DS_Store", rows)                      # owner rows stay
 
     def test_they_stay_unidentified_for_a_retain_plan(self):
         self.sync(aliases=None)

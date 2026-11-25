@@ -51,7 +51,7 @@ import re
 import time
 import unicodedata
 
-from .anilist import clean, parse_response
+from .anilist import MAX_TITLE, clean, parse_response
 from .core import ALIAS_FAILURE_TTL, ALIAS_TTL
 from .manifest_store import ManifestRepo
 from .models import KuraError
@@ -327,6 +327,19 @@ def _store(db, library: str, records: dict[str, dict], seen: dict[str, tuple], n
                  r.get("matched"), json.dumps(sorted(r["candidates"])), now))
 
 
+def _drop(db, library: str, titles: list[str], seen: dict[str, tuple]):
+    """Delete the non-owner rows of ``titles`` that are still as they were read (``seen``): a row
+    that changed since, or an owner row, is left alone, like in ``_store``."""
+    with _tx(db):
+        for title in titles:
+            row = db.execute(
+                "SELECT anilist_id, status, source, updated_at FROM title_identities WHERE library=? AND title=?",
+                (library, title)).fetchone()
+            if row is not None and tuple(row) == seen.get(title) and row[2] != "owner":
+                db.execute("DELETE FROM title_identities WHERE library=? AND title=? AND source<>'owner'",
+                           (library, title))
+
+
 def _record(found: dict, source: str, query: str | None) -> dict:
     return {**found, "source": source, "query": query[:200] if query else None}
 
@@ -374,7 +387,12 @@ class _Lookup:
     def page(self, query: str) -> list[dict]:
         self.made += 1
         self.rows = None
-        self.resolver.resolve(query)
+        try:
+            self.resolver.resolve(query)
+        except KuraError as e:
+            if e.code == "invalid_query":       # refused before any request: not a lookup
+                self.made -= 1
+            raise
         if self.rows is None:
             raise KuraError("alias_invalid", "AniList returned no usable page")
         return self.rows
@@ -444,6 +462,11 @@ def _memory(row: dict | None, moment: float, steps) -> int | None:
 _FAILURES = ("alias_unavailable", "alias_invalid", "unsafe_url")
 
 
+def askable(query: str) -> bool:
+    """False for a query AniList's resolver refuses (empty, over-long or with control characters)."""
+    return bool(normalize(query)) and len(query) <= MAX_TITLE and not any(ord(c) < 32 for c in query)
+
+
 def _alias(lookup, steps, start: int, budget: int):
     """Alias fallback for one title from step ``start``: ``(record, stop, out_of_budget)``.
 
@@ -459,13 +482,15 @@ def _alias(lookup, steps, start: int, budget: int):
 
     for i in range(start, total):
         query, name, season = steps[i]
+        if not askable(query):          # AniList would refuse it: this step is done, others go on
+            continue
         if lookup.made >= budget:
             return (None if i == start else record("unresolved", _key(steps, i))), False, True
         try:
             rows = lookup.page(query)
         except KuraError as e:
-            if e.code == "invalid_query":       # cannot be asked: nothing more to try for this title
-                return record("unresolved", _key(steps, total)), False, False
+            if e.code == "invalid_query":       # not charged; skip this step only
+                continue
             if e.code not in _FAILURES:
                 raise
             return record("unavailable", _key(steps, i)), True, False
@@ -596,9 +621,7 @@ def sync(store, *, library: str, titles: list[str] | None = None, aliases=None,
     snapshot = list_snapshot(store.db)
     offline, need = {}, []
     if skipped:             # an old row of a non-owner source for such an entry is noise
-        with _tx(store.db):
-            store.db.executemany("DELETE FROM title_identities WHERE library=? AND title=? AND source<>'owner'",
-                                 [(library, k) for k in skipped])
+        _drop(store.db, library, skipped, seen)
         existing, seen = load(store.db, library), _fingerprints(store.db, library)
         before = dict(existing)
     for key in wanted:
