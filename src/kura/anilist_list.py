@@ -274,7 +274,8 @@ def save_snapshot(db, *, user: dict, is_viewer: bool, score_format, entries, med
             [(user["id"], e["anilist_id"], e["status"], e["score"], e["progress"], e["repeat"],
               e["updated_at"], now) for e in entries])
         upsert_media(db, media, now)
-        _sync_state(db, f"anilist:list:{user['id']}", now, "ok", {"entries": len(entries)}, True)
+        _sync_state(db, f"anilist:list:{user['id']}", now, "ok",
+                    {"entries": len(entries), "authenticated": is_viewer}, True)
 
 
 def save_favourites(db, user_id: int, ids: list[int], now: float):
@@ -291,6 +292,16 @@ def record_failure(db, user_id, code: str, now: float):
         return
     with db:
         _sync_state(db, f"anilist:list:{user_id}", now, "error", {"error": code}, False)
+
+
+def snapshot_authenticated(db, user_id) -> bool | None:
+    """Whether the stored list was fetched with the token (it may then hold private entries)."""
+    row = db.execute("SELECT detail FROM sync_state WHERE source=?", (f"anilist:list:{user_id}",)).fetchone()
+    try:
+        value = json.loads(row[0]).get("authenticated") if row else None
+    except (ValueError, AttributeError, TypeError):
+        return None
+    return value if isinstance(value, bool) else None
 
 
 def clear_viewer(db):
@@ -379,8 +390,12 @@ def list_sync(store, ani, *, user_name=None, max_age_h=12.0, refresh=False, entr
     def fresh(stamp):
         return stamp is not None and not refresh and now - stamp < max_age_h * 3600
 
+    # A snapshot is only served to the kind of request that produced it: an authenticated one may
+    # hold private entries and must never answer a public --user lookup, and vice versa.
+    matches = user_id is not None and snapshot_authenticated(db, user_id) is (token is not None)
+
     error, fetched_now = None, False
-    if not fresh(fetched):
+    if not (fresh(fetched) and matches):
         try:
             user, rows, media = fetch_list(req, user_id=user_id, user_name=user_name if user_id is None else None,
                                            auth=token is not None)

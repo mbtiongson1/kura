@@ -9,6 +9,7 @@ import stat
 import tempfile
 import time
 import unittest
+import unittest.mock
 from unittest.mock import patch
 
 from anilistfake import CLIENT_ID, VIEWER, FakeAniList, http_error, make_token
@@ -144,6 +145,19 @@ class Login(Cli):
         self.assertEqual((code, out["success"]), (0, True))
         self.assertIn(f"client_id={CLIENT_ID}", err)
         self.assertEqual(json.loads((self.root / "anilist-auth.json").read_text())["token"], token)
+
+    def test_a_terminal_that_cannot_hide_input_aborts_instead_of_echoing(self):
+        import getpass
+        import warnings
+
+        def echoing(prompt="", stream=None):
+            warnings.warn("echo", getpass.GetPassWarning)
+            return "echoed-" + "x" * 30
+        with patch("kura.cli_anilist.getpass.getpass", echoing):
+            code, out, _ = self.run_cli("anilist", "login", tty=True)
+        self.assertEqual((code, out["error"]["code"]), (2, "anilist_login_needs_tty"))
+        self.assertFalse((self.root / "anilist-auth.json").exists())
+        self.assertEqual(self.fake.calls, [])
 
     def test_login_without_a_terminal_or_with_stdin_on_a_terminal_is_refused(self):
         code, out, _ = self.run_cli("anilist", "login")
@@ -308,6 +322,28 @@ class Transport(unittest.TestCase):
             with self.assertRaises(KuraError) as cm:
                 anilist.graphql_fetch("{Viewer{id}}", {}, None, 10)
         self.assertEqual(cm.exception.code, "anilist_response_too_large")
+
+
+class Pinned(unittest.TestCase):
+    def test_connection_goes_to_the_validated_address_with_hostname_verification(self):
+        import kura.anilist as anilist
+        sock, wrapped = object(), object()
+        context = unittest.mock.Mock()
+        context.wrap_socket.return_value = wrapped
+        with patch.object(anilist.socket, "create_connection", return_value=sock) as connect:
+            conn = anilist._PinnedHTTPS("graphql.anilist.co", address="203.0.113.7", timeout=30, context=context)
+            conn.connect()
+        connect.assert_called_once_with(("203.0.113.7", 443), 30)
+        context.wrap_socket.assert_called_once_with(sock, server_hostname="graphql.anilist.co")
+        self.assertIs(conn.sock, wrapped)
+
+    def test_fetch_uses_the_address_it_validated(self):
+        import kura.anilist as anilist
+        with patch.object(anilist, "_check_public_dns", return_value="203.0.113.7"), \
+                patch.object(anilist, "_pinned_opener") as pinned:
+            pinned.return_value.open.return_value = Transport.Response(b"{}")
+            anilist.graphql_fetch("{Viewer{id}}", {}, make_token(time.time() + DAY * 90))
+        pinned.assert_called_once_with("203.0.113.7")
 
 
 class WhoamiLogout(Cli):

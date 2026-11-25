@@ -135,7 +135,7 @@ class ListSync(Lab):
         self.sync()
         with self.assertRaises(KuraError):
             self.sync(user_name=VIEWER["name"])
-        self.assertEqual(len(self.fake.calls), 3)
+        self.assertEqual(len(self.fake.calls), 2)
 
     def test_viewer_flag_follows_the_account(self):
         self.sync()
@@ -152,6 +152,26 @@ class ListSync(Lab):
         anilist_list.save_snapshot(self.store.db, user=user, is_viewer=True, score_format=None,
                                    entries=[], media=[], now=5.0)
         self.assertIsNone(self.rows("SELECT favourites_fetched_at FROM anilist_users")[0][0])
+
+    def test_authenticated_snapshot_never_answers_a_public_lookup_after_logout(self):
+        self.sync()
+        anilist_auth.remove(self.root)
+        anilist_list.clear_viewer(self.store.db)
+        made = len(self.fake.calls)
+        out = self.sync(user_name=VIEWER["name"], entries=True)         # fresh cache, but private provenance
+        self.assertGreater(len(self.fake.calls), made)
+        self.assertIsNone(self.fake.calls[made]["token"])
+        self.assertFalse(out["from_cache"])
+        self.assertEqual(anilist_list.snapshot_authenticated(self.store.db, VIEWER["id"]), False)
+        self.assertTrue(self.sync(user_name=VIEWER["name"])["from_cache"])   # now a public snapshot
+
+    def test_public_snapshot_does_not_answer_an_authenticated_list(self):
+        anilist_auth.remove(self.root)
+        self.sync(user_name=VIEWER["name"])
+        self.login()
+        made = len(self.fake.calls)
+        self.sync()
+        self.assertEqual(self.fake.calls[made]["token"], self.token)
 
     def test_partial_failure_keeps_the_old_snapshot_and_reports_stale(self):
         self.fake.per_chunk = 3

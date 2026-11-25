@@ -7,6 +7,7 @@ into a hidden prompt or piped on stdin, stored in a private file, and never prin
 import getpass
 import sys
 import time
+import warnings
 
 from . import anilist_auth, anilist_list
 from .anilist import AniList
@@ -57,7 +58,14 @@ def _read_hidden() -> str:
         raise KuraError("anilist_login_needs_tty",
                         "No terminal: pipe the token with `kura anilist login --token-stdin`")
     print("Open this URL, approve Kura, then paste the token shown on the page:", file=sys.stderr)
-    return anilist_auth.clean_token(getpass.getpass("AniList token (hidden): ", stream=sys.stderr))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", getpass.GetPassWarning)      # never fall back to echoed input
+        try:
+            typed = getpass.getpass("AniList token (hidden): ", stream=sys.stderr)
+        except getpass.GetPassWarning:
+            raise KuraError("anilist_login_needs_tty",
+                            "This terminal cannot hide input: pipe the token with --token-stdin") from None
+    return anilist_auth.clean_token(typed)
 
 
 def _login(args, open_store) -> dict:
