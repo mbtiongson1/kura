@@ -314,6 +314,15 @@ class Transport(unittest.TestCase):
         self.assertEqual(error.details["Retry-After"], "7")
         self.assertNotIn(token, json.dumps(error.details) + error.message)
 
+    def test_an_error_message_that_echoes_the_token_is_dropped(self):
+        import urllib.error
+        token = make_token(time.time() + DAY * 90)
+        body = io.BytesIO(json.dumps({"errors": [{"message": "bad " + token}]}).encode())
+        failure = urllib.error.HTTPError("https://graphql.anilist.co/", 400, "Bad Request", {}, body)
+        error, _ = self.fetch(failure, token)
+        self.assertEqual((error.details["status"], error.details["reason"]), (400, None))
+        self.assertNotIn(token, json.dumps(error.details) + error.message)
+
     def test_oversized_response_is_refused(self):
         import kura.anilist as anilist
         opener = self.Opener(self.Response(b"x" * 20))

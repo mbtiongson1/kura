@@ -175,9 +175,8 @@ def fetch(title: str) -> tuple[bytes, dict]:
     """One bounded request. Returns (body, rate-limit headers). HTTP 429 carries Retry-After."""
     validate_endpoint(ENDPOINT)
     try:
-        _check_public_dns()
+        opener = _pinned_opener(_check_public_dns())
         body = json.dumps({"query": QUERY, "variables": {"search": title}}).encode()
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
         request_ = urllib.request.Request(ENDPOINT, data=body, method="POST", headers={
             "Content-Type": "application/json", "Accept": "application/json",
             "User-Agent": "Kura/0.1 (+https://github.com/mbtiongson1/kura)"})
@@ -244,8 +243,11 @@ def graphql_fetch(query: str, variables: dict, token: str | None = None,
             raise KuraError("anilist_response_too_large", "AniList response exceeds the size limit")
         return data, received
     except urllib.error.HTTPError as e:
+        reason = _error_message(e)
+        if reason is not None and token is not None and token in reason:
+            reason = None       # never repeat server text that echoes the credential
         raise KuraError("anilist_http", "AniList rejected the request", status=e.code,
-                        reason=_error_message(e), **_headers(e.headers)) from e
+                        reason=reason, **_headers(e.headers)) from e
     except (OSError, urllib.error.URLError) as e:
         raise KuraError("anilist_unavailable", "AniList request failed; retry later") from e
 
