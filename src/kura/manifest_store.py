@@ -22,8 +22,8 @@ from .torrent import decode, encode
 
 # SQL condition on ``title_identities.title`` (two ``library`` parameters): the identity belongs to
 # a title that is present in the manifest. A library with no manifest rows at all keeps every
-# identity, so identities recorded before any build still count. Absent, vanished-and-pruned
-# and deleted titles do not.
+# identity, so identities recorded before any build still count (``prune`` clears them when it
+# empties a library). Absent and pruned titles do not count.
 PRESENT_IDENTITY_SQL = (
     "(NOT EXISTS (SELECT 1 FROM library_titles WHERE library=?) OR title IN ("
     "SELECT t.rel_path FROM library_titles t LEFT JOIN library_absent a ON a.title_id=t.id"
@@ -217,8 +217,8 @@ class ManifestRepo:
     def prunable(self, library: str, cutoff: float | None = None) -> list[dict]:
         """Titles `prune_titles` may delete: absent-marked ones whose mark is at or before
         `cutoff` (None: all of them), and, only when a cutoff is given, titles a scan found
-        vanished (``absent_from_scan``) last seen at or before it: a root that was down for one
-        build must not cost the history of everything in it. Keys: id, rel_path, state
+        vanished (``absent_from_scan``) last seen at or before it: a root that was down for
+        one build must not cost the history of everything in it. Keys: id, rel_path, state
         ('absent'|'vanished')."""
         out = []
         for r in self.db.execute(
@@ -235,11 +235,14 @@ class ManifestRepo:
                 out.append({"id": r[0], "rel_path": r[1], "state": state})
         return out
 
-    def prune_titles(self, library: str, titles: list[dict], dry_run: bool = True) -> dict[str, int]:
+    def prune_titles(self, library: str, titles: list[dict], dry_run: bool = True,
+                     empties_library: bool = False) -> dict[str, int]:
         """Delete these titles (dicts with id and rel_path, all of `library`) with their files,
         links, verifications, probe results, absent marks and recorded identities, from Kura's
-        own state only. Owner decisions (``identity pin``) are never deleted. Returns the row counts (what was deleted, or with `dry_run` what would
-        be). Torrent rows are shared and never deleted. A dry run only reads."""
+        own state only. Returns the row counts (what was deleted, or with `dry_run` what would
+        be). Torrent rows are shared and never deleted. A dry run only reads. Owner decisions
+        (``identity pin``) are kept, unless `empties_library` says no title of the library
+        remains afterwards: then nothing is left to pin and every identity row goes."""
         ids = list(dict.fromkeys(t["id"] for t in titles))
         keys = list(dict.fromkeys(t["rel_path"] for t in titles))
         plan = (("titles", "library_titles", "id", ids, ""),
@@ -248,7 +251,7 @@ class ManifestRepo:
                 ("verifications", "verifications", "title_id", ids, ""),
                 ("probe_results", "probe_results", "title_id", ids, ""),
                 ("marks", "library_absent", "title_id", ids, ""),
-                ("identities", "title_identities", "title", keys, " AND library=? AND source<>'owner'"))
+                ("identities", "title_identities", "title", keys, " AND library=?" if empties_library else " AND library=? AND source<>'owner'"))
         counts = {name: 0 for name, *_ in plan}
 
         def run(db):

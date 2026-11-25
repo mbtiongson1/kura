@@ -211,7 +211,7 @@ only some roots on purpose, pass `--keep-other-roots`. A title that vanishes fro
 rows (torrent rows are shared and stay; a title linked to a protected or private torrent is kept and
 counted (and sampled) as `kept_protected`, and stays until that torrent is unprotected or unlinked, because its links are the evidence that protects that torrent elsewhere). It never touches media or `.torrent` files. Without
 `--yes` it only prints the counts (`--dry-run` is the default; the two flags are mutually
-exclusive). Identities of pruned titles are deleted too, except owner pins (`identity pin`). `--older-than-days N` keeps titles absent (or last seen) for less than N days; vanished titles are only
+exclusive). Identities of pruned titles are deleted too, except owner pins (`identity pin`), which stay unless the prune empties the library. `--older-than-days N` keeps titles absent (or last seen) for less than N days; vanished titles are only
 deleted when it is given (a root that was down for one build must not cost their history).
 
 ### Quarantine plan (a proposal only)

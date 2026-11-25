@@ -353,6 +353,20 @@ class Prune(Base):
         self.assertEqual(anilist_list.media_ids(self.db, [], "home", False), [])
         self.assertEqual(seadex.library_ids(self.lab.store, "home"), [])
 
+    def test_a_pin_in_a_fully_pruned_library_never_reaches_media_or_seadex_ids(self):
+        from kura import anilist_list
+        from kura.sources import seadex
+        self.build("anime")
+        self.db.execute("INSERT OR REPLACE INTO library_absent SELECT id, 1.0 FROM library_titles")
+        self.db.execute("INSERT INTO title_identities(library, title, anilist_id, status, source, updated_at)"
+                        " VALUES ('home', 'disk1/Kura Sample Series', 999000002, 'pinned', 'owner', 1.0)")
+        self.db.commit()
+        manifest.prune(self.lab.store, "home", dry_run=False)
+        self.assertEqual(self.counts()["library_titles"], 0)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM title_identities").fetchone()[0], 0)   # nothing left to pin
+        self.assertEqual(anilist_list.media_ids(self.db, [], "home", False), [])
+        self.assertEqual(seadex.library_ids(self.lab.store, "home"), [])
+
     def test_titles_linked_to_a_protected_torrent_are_kept(self):
         victim = next(t for t in self.repo.titles("home", include_absent=True) if t["rel_path"].startswith("disk1/"))
         infohash = self.repo.links(victim["id"])[0]["infohash"]
@@ -366,13 +380,12 @@ class Prune(Base):
         self.assertEqual(len(self.repo.titles("home", include_absent=True)), 3)
 
     def test_unreadable_protection_evidence_keeps_the_title(self):
-        for title in self.repo.titles("home", include_absent=True):
-            if title["rel_path"].startswith("disk"):
-                self.db.execute("UPDATE manifest_torrents SET protection='{not json'")
-                break
+        self.db.execute("UPDATE manifest_torrents SET protection='{not json'")
         self.db.commit()
         out = manifest.prune(self.lab.store, "home", dry_run=False)
         self.assertEqual((out["kept_protected"], out["deleted"]["titles"]), (2, 0))
+        self.assertEqual(sorted(out["kept_protected_sample"]), ["disk1/Kura Sample Series", "disk2/Kura Extra Show"])
+        self.assertEqual(len(self.repo.titles("home", include_absent=True)), 4)
 
     def test_owner_pins_survive_a_prune(self):
         self.db.execute("INSERT INTO title_identities(library, title, anilist_id, status, source, updated_at)"
