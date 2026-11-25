@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import torrentgen
 import kura.cli as cli
-from kura import quarantine
+from kura import manifest, quarantine
 from kura.manifest_store import ManifestRepo
 from kura.models import KuraError
 from kura.protect import load_policy
@@ -36,12 +36,14 @@ class Base(unittest.TestCase):
     def add(self, name, files=None, *, old=True, **kw):
         built = self.lab.add(name, files or GOOD, **kw)
         if old:
-            age(self.lab.lib / name)
+            age((kw.get("where") or self.lab.lib) / name)
         return built
 
     def plan(self, **kw):
+        """The plan document plus plan_id and stored, flattened for convenience."""
         kw.setdefault("skip_swarm", True)
-        return quarantine.plan(self.lab.store, library="home", **kw)
+        result = quarantine.plan(self.lab.store, library="home", **kw)
+        return {**result["plan"], "plan_id": result["plan_id"], "stored": result["stored"]}
 
     def refused(self, doc):
         return {r["title"]: r for r in doc["refused"]}
@@ -96,6 +98,14 @@ class Eligibility(Base):
         self.assertEqual(quarantine.plan_hash_of(stored["plan"]), doc["plan_hash"])
         tampered = {**stored["plan"], "moves": []}
         self.assertNotEqual(quarantine.plan_hash_of(tampered), doc["plan_hash"])
+
+    def test_returned_document_is_the_hashed_and_stored_one(self):
+        result = quarantine.plan(self.lab.store, library="home", skip_swarm=True)
+        document = result["plan"]
+        self.assertEqual(set(result), {"plan", "plan_id", "stored"})
+        self.assertEqual(quarantine.plan_hash_of(document), document["plan_hash"])
+        self.assertEqual(self.repo.plan(document["plan_hash"])["plan"], document)
+        self.assertEqual(json.loads(json.dumps(document)), document)
 
     def test_hash_is_deterministic_and_replanning_is_idempotent(self):
         t = int(time.time()) + 7
@@ -191,6 +201,37 @@ class Refusals(Base):
         self.lab.build()
         refused = self.refused(self.plan())["main/Kura Gone"]
         self.assertEqual((refused["status"], refused["reasons"]), ("stale", ["absent_from_latest_scan"]))
+
+    def test_title_assessed_under_an_older_policy_is_refused(self):
+        other = self.lab.tmp / "second"
+        other.mkdir()
+        self.add("Kura Old Policy", where=other)
+        self.add("Kura New Policy")
+        both = {"main": self.lab.lib, "second": other}
+        kw = dict(roots=both, library="home", torrents_dir=self.lab.torrents)
+        manifest.build(self.lab.store, policy=self.lab.policy(), **kw)
+        self.assertEqual(len(self.plan()["moves"]), 2)
+        self.lab.deny.write_text("# hosts\nblocked.example\nnewly-listed.example\n")
+        self.lab.build()                                  # only root "main" is rebuilt
+        doc = self.plan()
+        self.assertEqual([m["from"] for m in doc["moves"]], ["Kura New Policy"])
+        # The manifest already demands re-classification under the new policy ...
+        self.assertEqual(self.refused(doc)["second/Kura Old Policy"]["reasons"], ["not_reclassified"])
+        # ... and the plan itself re-checks the hash even if title and torrent agree on an old one.
+        title = next(t for t in self.repo.titles("home") if t["rel_path"] == "second/Kura Old Policy")
+        infohash = self.repo.links(title["id"])[0]["infohash"]
+        row, old = self.repo.torrent(infohash), "0" * 64
+        self.repo.upsert_torrent({**row, "protection": {**row["protection"], "policy_sha256": old}})
+        identity = title["identity"]
+        identity["assessment"]["policy_sha256"] = old
+        self.lab.store.db.execute("UPDATE library_titles SET identity=? WHERE id=?",
+                                  (json.dumps(identity), title["id"]))
+        self.lab.store.db.commit()
+        self.assertEqual(self.lab.status("Kura New Policy")["status"], "reacquirable")
+        doc = self.plan()
+        self.assertEqual(self.refused(doc)["second/Kura Old Policy"]["reasons"], ["policy_changed"])
+        manifest.build(self.lab.store, policy=self.lab.policy(), **kw)
+        self.assertEqual(len(self.plan()["moves"]), 2)
 
     def test_policy_incomplete_refuses(self):
         self.add("Kura Good")
@@ -403,20 +444,21 @@ class CommandLine(Base):
         code, out = self.cli("manifest", "plan", "--library", "home", "--skip-swarm")
         self.assertEqual((code, out["success"], out["phase"]), (0, True, "manifest"))
         data = out["data"]
-        self.assertEqual([m["from"] for m in data["moves"]], ["Kura Good"])
+        self.assertEqual(quarantine.plan_hash_of(data["plan"]), data["plan"]["plan_hash"])
+        self.assertEqual([m["from"] for m in data["plan"]["moves"]], ["Kura Good"])
         self.assertTrue(data["stored"])
-        self.assertIn("swarm_unchecked", data["preconditions"])
+        self.assertIn("swarm_unchecked", data["plan"]["preconditions"])
         self.assertEqual(snapshot(self.lab.lib), before)
 
     def test_swarm_is_required_unless_skipped(self):
         code, out = self.cli("manifest", "plan", "--library", "home")
-        self.assertEqual((code, out["data"]["moves"], out["data"]["stored"]), (0, [], False))
-        self.assertIn("swarm_unchecked", out["data"]["refused"][0]["reasons"])
+        self.assertEqual((code, out["data"]["plan"]["moves"], out["data"]["stored"]), (0, [], False))
+        self.assertIn("swarm_unchecked", out["data"]["plan"]["refused"][0]["reasons"])
 
     def test_options_and_errors(self):
         code, out = self.cli("manifest", "plan", "--library", "home", "--skip-swarm",
                              "--title", "main/Kura Fresh", "--min-quiet-days", "0")
-        self.assertEqual([m["from"] for m in out["data"]["moves"]], ["Kura Fresh"])
+        self.assertEqual([m["from"] for m in out["data"]["plan"]["moves"]], ["Kura Fresh"])
         for extra, expected in ((["--quarantine-dir", "elsewhere"], "invalid_arguments"),
                                 (["--min-seeders", "0"], "invalid_arguments"),
                                 (["--library", "never-built"], "not_found")):

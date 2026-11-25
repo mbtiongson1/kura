@@ -10,7 +10,8 @@ every precondition recorded in the plan first. Kura never executes, undoes or pu
 A title is proposed only when all of the following hold, otherwise it is *refused* with
 fixed reason tokens:
   * its manifest status is ``reacquirable`` (see ``manifest.title_status``)
-  * the policy lists were complete and no ``path:`` protection covers it
+  * the policy lists were complete, no ``path:`` protection covers it and it was assessed
+    under the same policy as the newest build (``policy_changed`` otherwise)
   * the inventory behind it is fresh (``max_inventory_age_h``) and its file evidence is
     complete, on one device and consistent with the stored file rows
   * nothing inside it changed for ``min_quiet_days``
@@ -18,6 +19,9 @@ fixed reason tokens:
     status ``ok`` and at least ``min_seeders`` seeders, or the caller passed ``skip_swarm``,
     which is recorded in the plan (``swarm_unchecked``) and on every move
   * its root label and title name are plain single path components
+
+``plan`` returns ``{"plan", "plan_id", "stored"}``; ``plan`` is exactly the document that
+``plan_hash`` covers and that is stored.
 
 Plan document (``plan_version`` 1). Paths are relative to a root label, never absolute:
   moves   {root, from, to, tree_sha256, file_count, total_bytes, infohashes, verified_at,
@@ -136,7 +140,11 @@ def plan(store, *, library: str, titles: list[str] | None = None,
          max_inventory_age_h: float = 24, min_quiet_days: float = 14,
          quarantine_days: float = 30, max_swarm_age_h: float = 24,
          now: Callable[[], float] = time.time) -> dict:
-    """Propose moves for the eligible titles. Moves nothing; stores the plan when non-empty."""
+    """Propose moves for the eligible titles. Moves nothing; stores the plan when non-empty.
+
+    Returns ``{"plan": <the exact hashed document>, "plan_id", "stored"}``; metadata sits
+    outside ``plan`` so ``plan_hash_of(result["plan"]) == result["plan"]["plan_hash"]``.
+    """
     check_args(library, titles, quarantine_dir, min_seeders, max_inventory_age_h,
                 min_quiet_days, quarantine_days, max_swarm_age_h)
     moment = now()
@@ -153,7 +161,7 @@ def plan(store, *, library: str, titles: list[str] | None = None,
             if row is None or info is None:
                 refused.append({"title": key, "status": "unknown", "reasons": ["not_in_manifest"]})
                 continue
-            reasons = _refusals(repo, row, info, moment=moment, min_seeders=min_seeders,
+            reasons = _refusals(repo, row, info, moment=moment, policy=manifest["policy_sha256"], min_seeders=min_seeders,
                                 skip_swarm=skip_swarm, max_inventory_age_h=max_inventory_age_h,
                                 min_quiet_days=min_quiet_days, max_swarm_age_h=max_swarm_age_h)
             if isinstance(reasons, list):
@@ -169,10 +177,10 @@ def plan(store, *, library: str, titles: list[str] | None = None,
         stored = False
         if moves:
             stored = repo.save_plan(document["plan_hash"], canonical(document), created_at)
-    return {**document, "plan_id": document["plan_hash"][:16], "stored": stored}
+    return {"plan": document, "plan_id": document["plan_hash"][:16], "stored": stored}
 
 
-def _refusals(repo, row, info, *, moment, min_seeders, skip_swarm, max_inventory_age_h,
+def _refusals(repo, row, info, *, moment, policy, min_seeders, skip_swarm, max_inventory_age_h,
               min_quiet_days, max_swarm_age_h):
     """A list of refusal reasons, or the move dict (without ``to``) when eligible."""
     if info["status"] != "reacquirable":
@@ -184,6 +192,8 @@ def _refusals(repo, row, info, *, moment, min_seeders, skip_swarm, max_inventory
     assessment = (row.get("identity") or {}).get("assessment") or {}
     if assessment.get("policy_complete") is not True:
         reasons.append("policy_incomplete")
+    if assessment.get("policy_sha256") != policy:
+        reasons.append("policy_changed")    # assessed under another policy than the plan claims
     if assessment.get("path_protected") is not False:
         reasons.append("path_protected")
     seen_at = row.get("seen_at")

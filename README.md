@@ -186,14 +186,14 @@ kura manifest plan --library home [--title media/Some\ Title ...] [--min-seeders
   [--skip-swarm] [--max-inventory-age-h 24] [--min-quiet-days 14]
 ```
 `manifest plan` writes a JSON **proposal**, stores it in the state database under its
-`plan_hash` and prints it. **Kura never moves, renames, deletes or purges anything**: the
+`plan_hash` and prints it (as `plan`, next to `plan_id` and `stored`). **Kura never moves, renames, deletes or purges anything**: the
 command does not even open the library. The owner's own infrastructure may execute the
 plan later, after the owner approved that exact `plan_hash`, and must first check every
 entry of `preconditions` (same device for source and destination, `tree_sha256` equal to a
 fresh re-inventory, destination absent, a rename that never replaces, swarm checked again
 right before the move). A title is proposed only if it is `reacquirable`, its policy lists
 were complete, its inventory is at most 24 hours old, nothing inside it changed for 14
-days, and every linked torrent has a recent stored swarm check with at least 3 seeders.
+days, it was assessed under the same policy as the newest build, and every linked torrent has a recent stored swarm check with at least 3 seeders.
 Swarm data has no collector yet, so until it exists the plan needs `--skip-swarm`, which is
 recorded as `swarm_unchecked` in the plan and on every move. Every other title appears in
 `refused` with fixed reason tokens. Each move goes to `.kura-quarantine/<batch_id>/<title>`
