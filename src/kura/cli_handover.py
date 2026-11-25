@@ -52,7 +52,9 @@ def register(sub, parser_class):
     q = leaf(manifest_, "build")
     q.add_argument("--library", required=True)
     q.add_argument("--root", action="append", required=True, metavar="LABEL=PATH")
-    q.add_argument("--torrents", required=True, help="Directory of .torrent files (read-only)")
+    q.add_argument("--torrents", action="append", required=True, metavar="DIR",
+                   help="Directory of .torrent files (read-only); repeatable, duplicates by "
+                        "infohash are merged")
     q.add_argument("--tracker-denylist", required=True)
     q.add_argument("--protected", required=True)
     q.add_argument("--max-read-gib", type=float)
@@ -237,7 +239,7 @@ def _manifest(args, open_store) -> dict:
     store = open_store()
     try:
         return manifest.build(store, roots=roots, library=args.library,
-                              torrents_dir=_abs(args.torrents), policy=policy,
+                              torrents_dir=[_abs(p) for p in args.torrents], policy=policy,
                               max_read_bytes=budget, reverify=args.reverify, aliases=aliases)
     finally:
         store.db.close()

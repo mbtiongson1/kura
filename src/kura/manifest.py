@@ -369,7 +369,20 @@ def _identity(anilist: dict | None, assessment: dict) -> dict:
     return {"anilist": anilist, "assessment": assessment}
 
 
-def build(store, *, roots: dict[str, Path], library: str, torrents_dir: Path,
+MAX_TORRENT_DIRS = 16
+
+
+def _torrent_dirs(torrents_dir) -> list[Path]:
+    """One directory or a sequence of them, absolute, in order, without repeats."""
+    given = [torrents_dir] if isinstance(torrents_dir, (str, os.PathLike)) else list(torrents_dir)
+    if not given:
+        raise KuraError("invalid_argument", "At least one torrent directory is required")
+    if len(given) > MAX_TORRENT_DIRS:
+        raise KuraError("invalid_argument", "Too many torrent directories", limit=MAX_TORRENT_DIRS)
+    return list(dict.fromkeys(Path(os.path.abspath(d)) for d in given))
+
+
+def build(store, *, roots: dict[str, Path], library: str, torrents_dir,
           policy: ProtectionPolicy, max_read_bytes: int | None = None, reverify: bool = False,
           aliases=None, should_stop: Callable[[], bool] = lambda: False) -> dict:
     """Scan, match, verify and record. See the module docstring for what is stored.
@@ -380,6 +393,9 @@ def build(store, *, roots: dict[str, Path], library: str, torrents_dir: Path,
     build: once spent, remaining links are left unverified (and reported as deferred).
     A verification whose files still match its recorded evidence is reused unless
     `reverify`. `aliases` is an AniList-style resolver or None (no lookups).
+    `torrents_dir` is one directory or a sequence of them (scanned in order, repeats
+    ignored); a torrent present in several is one torrent (same infohash), with protection
+    merged as for any duplicate.
     """
     _check_label(library, "Library")
     if not isinstance(roots, dict) or not roots:
@@ -390,6 +406,7 @@ def build(store, *, roots: dict[str, Path], library: str, torrents_dir: Path,
             raise KuraError("invalid_root", "Root paths must be absolute")
     if max_read_bytes is not None and max_read_bytes < 0:
         raise KuraError("invalid_argument", "max_read_bytes must be >= 0")
+    dirs = _torrent_dirs(torrents_dir)
     repo = ManifestRepo(store.db)
     complete = policy.has_denylist and policy.has_protected_list
 
@@ -397,7 +414,7 @@ def build(store, *, roots: dict[str, Path], library: str, torrents_dir: Path,
         # 1. Descriptors: parse, classify (fail closed), dedupe by infohash.
         parsed: dict[str, tuple[TorrentMeta, object]] = {}
         skipped, scanned, duplicates = [], 0, 0
-        for name, data, reason in iter_torrents(torrents_dir):
+        for name, data, reason in (item for d in dirs for item in iter_torrents(d)):
             scanned += 1
             if data is not None:
                 try:
@@ -548,7 +565,9 @@ def build(store, *, roots: dict[str, Path], library: str, torrents_dir: Path,
         "library": library, "policy_sha256": policy.sha256, "policy_complete": complete,
         "roots": {label: {"titles": len(inv.titles), "entries": inv.entries}
                   for label, inv in invs.items()},
-        "torrents": {"scanned": scanned, "parsed": len(parsed), "protected": protected_count,
+        "matched_by": {k: sum(1 for m in matches if m.strategy == k)
+                       for k in sorted({m.strategy for m in matches})},
+        "torrents": {"dirs": len(dirs), "scanned": scanned, "parsed": len(parsed), "protected": protected_count,
                      "duplicates": duplicates, "skipped": skipped[:MAX_LISTED],
                      "skipped_count": len(skipped)},
         "matched": len(matches), "unmatched": unmatched[:MAX_LISTED],

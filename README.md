@@ -130,7 +130,7 @@ kura library inventory --root media=/path/to/library [--files]
 kura torrent inspect release.torrent --tracker-denylist deny.txt --protected protected.txt
 kura torrent verify release.torrent --root /path/to/library [--base subdir] [--max-read-gib 50]
 kura manifest build --library home --root media=/path/to/library --torrents /path/to/torrents \
-  --tracker-denylist deny.txt --protected protected.txt [--max-read-gib 200] [--reverify] [--no-anilist]
+  [--torrents /path/to/more/torrents ...] --tracker-denylist deny.txt --protected protected.txt [--max-read-gib 200] [--reverify] [--no-anilist]
 kura manifest show --library home [--status reacquirable] [--title media/Some\ Title]
 ```
 
@@ -140,10 +140,17 @@ read-only root filesystem and a read-only library mount (inventory and verify ne
 network). Only `manifest build` and `manifest show` use the private state database.
 
 `manifest build` scans every `--root` (metadata only) and the `.torrent` files directly
-inside `--torrents`, matches each torrent to a library title by exact name (the title
-equals the torrent name, the torrent sits directly inside a title folder, or a
+inside every `--torrents` directory (the flag repeats, for example a directory of kept
+descriptors plus the `--torrents-out` of `manifest resolve`; a torrent seen twice is one
+torrent, deduplicated by infohash), matches each torrent to a library title by exact name (the
+title equals the torrent name, the torrent sits directly inside a title folder, or a
 single-file torrent's file name is unique; any other situation is `ambiguous` and left
-unlinked), verifies each linked title against the piece hashes, and records the result
+unlinked) and, when no name fits, by **content**: each torrent file is paired with a file of
+the title with the same name and size (or, for files of at least 64 MiB, a size that is unique
+in the title and in the torrent), the title must hold at least 90% of the torrent's bytes, and
+a tie between titles is `ambiguous`. Torrent and folder names may therefore differ freely;
+the output reports how many links each strategy made (`matched_by`). A content link is only a
+proposal. `build` verifies each linked title against the piece hashes, and records the result
 per torrent as it goes, so an interrupt or `--max-read-gib` budget keeps what finished.
 A verification is reused while every file's size, mtime, device and inode still match;
 touch a file, or pass `--reverify`, and it is read again. Private torrents are never
@@ -233,7 +240,8 @@ Most titles end up `unmatched` because nobody kept a `.torrent` for them. `manif
 searches Nyaa for candidates and saves their **descriptors** (small metadata files, never
 media) as `<infohash>.torrent` in `--torrents-out`; run `kura manifest build --torrents` on that
 directory afterwards. A wrong candidate is harmless: `build` verifies piece hashes and only a
-100% match makes a title `reacquirable`. Resolve itself never marks anything eligible.
+100% match makes a title `reacquirable`. Because `build` also matches by content, a candidate's
+name never has to equal the folder name. Resolve itself never marks anything eligible.
 
 Run it where there is network. It reads only the state database (title names, file names and
 sizes), never the library, and writes only inside `--torrents-out`: a Kura-owned directory that

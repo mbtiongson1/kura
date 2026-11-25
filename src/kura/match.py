@@ -11,9 +11,23 @@ it. Three strategies, tried together and compared:
              top-level directory
 
 Several distinct places (two titles, two roots, a loose copy and a nested one) make the
-torrent ``ambiguous`` and it is not linked at all. Matching never inspects content; the
+torrent ``ambiguous`` and it is not linked at all. Matching never reads file bytes; the
 piece verification that follows is what makes a link mean anything. Names are compared
 exactly (no case folding, no fuzzy matching).
+
+When none of those finds a place (torrent and folder names differ arbitrarily), the
+``content`` fallback maps a torrent to a title by what its files look like. Each non-pad
+torrent file is matched to a file of the title with the same basename and the same size;
+failing that, a file of at least 64 MiB whose size is unique both in the title and among
+the torrent's unclaimed files is matched by size alone. A title qualifies when the mapped
+files cover at least 90% of the torrent's bytes, and the title with the most covered bytes
+wins; an exact tie between titles is ``ambiguous``. The mapping is per file, so folder
+layout and names may differ freely, and a torrent file that found no counterpart is simply
+absent from the mapping (verification then reports it missing, so the title cannot become
+reacquirable). A local file is never claimed by two torrent files. Everything is built from
+one pass over the inventories (size indexes), not one scan per torrent. Content matching
+only ever proposes a link: a decoy with the same sizes and different bytes fails piece
+verification.
 
 A mapping sends every non-pad torrent file index to path components below the library
 root, ready for ``pieceverify.verify_tree``.
@@ -25,6 +39,9 @@ from .pieceverify import default_mapping
 from .torrentmeta import TorrentMeta
 
 PRIORITY = {"root_dir": 0, "nested_dir": 1, "file_name": 2}
+CONTENT = "content"
+MIN_COVERAGE = (9, 10)                 # matched bytes / torrent bytes, as a fraction
+SIZE_ONLY_MIN = 64 * 1024 * 1024       # files this large may match on size alone
 
 
 @dataclass(frozen=True)
@@ -76,10 +93,98 @@ class _Index:
         return found
 
 
+def _suffix(a: tuple[str, ...], b: tuple[str, ...]) -> int:
+    n = 0
+    while n < len(a) and n < len(b) and a[-1 - n] == b[-1 - n]:
+        n += 1
+    return n
+
+
+class _ContentIndex:
+    """Size indexes over every inventory file, built in one pass."""
+
+    def __init__(self, inventories: list[Inventory]):
+        # (basename, size) -> [(title key, root-relative parts)]
+        self.by_name_size: dict[tuple[str, int], list[tuple[tuple[str, str], tuple[str, ...]]]] = {}
+        self.big_by_size: dict[int, list[tuple[tuple[str, str], tuple[str, ...]]]] = {}
+        for inv in inventories:
+            for title in inv.titles:
+                key = (inv.label, title.rel_path)
+                for entry in title.files:
+                    parts = tuple(entry.rel_path.split("/"))
+                    item = (key, parts)
+                    self.by_name_size.setdefault((parts[-1], entry.size), []).append(item)
+                    if entry.size >= SIZE_ONLY_MIN:
+                        self.big_by_size.setdefault(entry.size, []).append(item)
+
+    def best(self, meta: TorrentMeta):
+        """``("match", title key, mapping)``, ``("ambiguous",)`` or ``None`` for one torrent."""
+        files = [f for f in meta.files if not f.pad]
+        total = sum(f.length for f in files)
+        if total <= 0:
+            return None
+        named: dict[tuple[str, str], dict[int, list[tuple[str, ...]]]] = {}
+        sized: dict[tuple[str, str], dict[int, list[tuple[str, ...]]]] = {}
+        for f in files:
+            for key, parts in self.by_name_size.get((f.path[-1], f.length), ()):
+                named.setdefault(key, {}).setdefault(f.index, []).append(parts)
+        big = {}
+        for f in files:
+            if f.length >= SIZE_ONLY_MIN:
+                big.setdefault(f.length, []).append(f)
+        for size in big:
+            for key, parts in self.big_by_size.get(size, ()):
+                sized.setdefault(key, {}).setdefault(size, []).append(parts)
+        by_index = {f.index: f for f in files}
+        need = total * MIN_COVERAGE[0]
+        results: list[tuple[int, tuple[str, str], dict[int, tuple[str, ...]]]] = []
+        for key in {*named, *sized}:
+            reachable = {*named.get(key, ()), *(f.index for s in sized.get(key, ()) for f in big[s])}
+            if sum(by_index[i].length for i in reachable) * MIN_COVERAGE[1] < need:
+                continue                       # cannot reach the coverage threshold
+            mapping = self._map_title(files, named.get(key, {}), sized.get(key, {}), big)
+            matched = sum(by_index[i].length for i in mapping)
+            if matched * MIN_COVERAGE[1] >= need:
+                results.append((matched, key, mapping))
+        if not results:
+            return None
+        results.sort(key=lambda r: r[0], reverse=True)
+        if len(results) > 1 and results[1][0] == results[0][0]:
+            return ("ambiguous",)
+        return ("match", results[0][1], results[0][2])
+
+    @staticmethod
+    def _map_title(files, named, sized, big) -> dict[int, tuple[str, ...]]:
+        by_index = {f.index: f for f in files}
+        chosen: dict[int, tuple[str, ...]] = {}
+        for index, locals_ in named.items():
+            if len(locals_) == 1:
+                chosen[index] = locals_[0]
+                continue
+            want = by_index[index].path
+            scores = sorted(((_suffix(parts, want), parts) for parts in locals_), reverse=True)
+            if scores[0][0] > scores[1][0]:
+                chosen[index] = scores[0][1]       # one candidate shares the most path suffix
+        claims: dict[tuple[str, ...], list[int]] = {}
+        for index, parts in chosen.items():
+            claims.setdefault(parts, []).append(index)
+        mapping = {}
+        for parts, indexes in claims.items():
+            if len(indexes) == 1:                  # two torrent files never share a local file
+                mapping[indexes[0]] = parts
+        used = set(claims)                         # contested files stay off limits too
+        for size, locals_ in sized.items():
+            free = [f for f in big[size] if f.index not in mapping]
+            if len(locals_) == 1 and len(free) == 1 and locals_[0] not in used:
+                mapping[free[0].index] = locals_[0]
+        return mapping
+
+
 def match_many(inventories: list[Inventory], metas: list[TorrentMeta]
                ) -> tuple[list[Match], list[dict]]:
     """Match against several library roots at once; a torrent found in two roots is ambiguous."""
     indexes = [_Index(inv) for inv in inventories]
+    content: _ContentIndex | None = None
     matches: list[Match] = []
     unmatched: list[dict] = []
     for meta in metas:
@@ -88,7 +193,16 @@ def match_many(inventories: list[Inventory], metas: list[TorrentMeta]
             for base, (strategy, title) in index.candidates(meta).items():
                 places.append((index.label, title, base, strategy))
         if not places:
-            unmatched.append({"infohash": meta.infohash, "name": meta.name, "reason": "no_match"})
+            if content is None:
+                content = _ContentIndex(inventories)
+            found = content.best(meta)
+            if found is None:
+                unmatched.append({"infohash": meta.infohash, "name": meta.name, "reason": "no_match"})
+            elif found[0] == "ambiguous":
+                unmatched.append({"infohash": meta.infohash, "name": meta.name, "reason": "ambiguous"})
+            else:
+                (root, title), mapping = found[1], found[2]
+                matches.append(Match(meta.infohash, title, mapping, CONTENT, root))
         elif len(places) > 1:
             unmatched.append({"infohash": meta.infohash, "name": meta.name, "reason": "ambiguous"})
         else:
