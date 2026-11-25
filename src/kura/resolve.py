@@ -11,7 +11,7 @@ What it reads and writes
   * Reads only the state database (title keys, file names, sizes). Never the media.
   * Writes only inside ``--torrents-out`` (``<infohash>.torrent`` descriptors, a small
     ``.kura-resolve.json`` attempt ledger and a lock file). The directory must already exist,
-    must not be a symlink, and is opened as a directory fd; every write is relative to that
+    must not be a symlink or look like a library (subdirectory or media inside), and is opened as a directory fd; every write is relative to that
     fd, a temp file then a rename, never replacing a descriptor. The state database is not
     written, except for the existing AniList alias cache.
   * Titles that are not ``unmatched`` (protected, blocked, stale, ...) are never searched, so
@@ -38,7 +38,9 @@ Candidate choice
     and reported as ``file_count_match`` (informational: a later approval of extra local
     files can still make a smaller torrent useful).
   * A descriptor is discarded, not written, if it is private, unparsable, does not hash to
-    the advertised infohash, or any announce URL could carry a credential.
+    the advertised infohash, or any announce URL could carry a credential. With a protection
+    policy (optional), a protected infohash is never requested and a protected descriptor
+    (denylisted tracker or source) is discarded.
 
 Politeness: one request per ``interval`` seconds (default 2) counted from the end of the
 previous one, exponential backoff on HTTP 429/5xx and network errors, a total time budget,
@@ -67,7 +69,7 @@ from .core import Core
 from .manifest import show
 from .manifest_store import ManifestRepo
 from .models import KuraError
-from .protect import _public_tracker
+from .protect import _public_tracker, classify
 from .releases import normalize
 from .torrentmeta import parse, release_group
 
@@ -91,6 +93,7 @@ MAX_LISTED = 200
 MAX_TITLE_KEYS = 100_000
 CATEGORIES = ("1_2", "1_3", "1_4")
 USER_TERM_LIMIT = 120
+MAX_OUT_ENTRIES = 200_000
 
 _EXT = re.compile(r"\.(mkv|mp4|avi|m4v|webm|mov)\Z", re.I)
 _SEASONS = (
@@ -318,6 +321,13 @@ def rank(candidates, *, local_bytes: int, names, groups, entry: str | None = Non
 
 # ---- pacing ----------------------------------------------------------------------------
 
+def transient(error: KuraError) -> bool:
+    """Worth retrying: a network error, HTTP 429 or a 5xx. A 404 or other 4xx is final."""
+    status = error.details.get("status")
+    return error.code == "provider_unavailable" and (
+        status is None or status == 429 or (isinstance(status, int) and status >= 500))
+
+
 class BudgetExhausted(KuraError):
     def __init__(self):
         super().__init__("budget_exhausted", "Time budget spent; run again to continue")
@@ -359,10 +369,7 @@ class Pacer:
                 data = self.fetcher(url, limit, descriptor)
             except KuraError as e:
                 self.next_ok = self.clock() + self.interval
-                status = e.details.get("status")
-                retryable = e.code == "provider_unavailable" and (
-                    status is None or status == 429 or (isinstance(status, int) and status >= 500))
-                if not retryable:
+                if not transient(e):
                     raise
                 self.next_ok = max(self.next_ok, self.clock() + min(
                     self.backoff_base * 2 ** attempt, self.backoff_cap))
@@ -386,7 +393,8 @@ class Pacer:
 class OutDir:
     """``--torrents-out`` as a directory fd: every write is relative to it, nothing else exists.
 
-    Refuses a missing directory, a symlink anywhere in the path and a concurrent resolve.
+    Refuses a missing directory, a symlink anywhere in the path, a concurrent resolve and a
+    directory that looks like a library (a subdirectory or a media file inside it).
     """
 
     def __init__(self, path):
@@ -394,6 +402,7 @@ class OutDir:
         self.fd = rofs.open_root(path)         # no symlink components; raises KuraError
         self.lock_fd = None
         try:
+            self._refuse_library_like()
             self.lock_fd = os.open(LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
                                    0o600, dir_fd=self.fd)
             try:
@@ -406,6 +415,19 @@ class OutDir:
         except BaseException:
             self.close()
             raise
+
+    def _refuse_library_like(self):
+        """A flat directory of descriptors never holds subdirectories or media. A library root does."""
+        try:
+            with os.scandir(self.fd) as it:
+                for seen, entry in enumerate(it, 1):
+                    if seen > MAX_OUT_ENTRIES:
+                        raise KuraError("unsafe_output_dir", "Output directory has too many entries")
+                    if entry.is_dir(follow_symlinks=False) or _EXT.search(entry.name):
+                        raise KuraError("unsafe_output_dir",
+                                        "Output directory looks like a library: it holds a subdirectory or media")
+        except OSError as e:
+            raise KuraError("io_error", f"Output directory could not be listed: {e.strerror}") from e
 
     def close(self):
         for name in ("lock_fd", "fd"):
@@ -533,7 +555,7 @@ def _describe(item: dict, c: Candidate, outcome: str, meta=None, local_files: in
     return row
 
 
-def _accept(data: bytes, candidate: Candidate):
+def _accept(data: bytes, candidate: Candidate, policy=None):
     """``(meta, None)`` for a descriptor worth keeping, else ``(None, reason)``. Fails closed."""
     try:
         meta = parse(data)
@@ -547,14 +569,24 @@ def _accept(data: bytes, candidate: Candidate):
         return None, "private"
     if not meta.announce_valid or not all(_public_tracker(u) for u in meta.announce_urls):
         return None, "announce_not_public"      # may carry a credential: never written
+    if policy is not None:
+        try:
+            if classify(meta, policy).protected:
+                return None, "protected"
+        except Exception:
+            return None, "unclassifiable"
     return meta, None
 
 
 def _search(pacer: Pacer, terms: Terms, local_bytes: int, groups, entry: str, tolerance: float,
             wanted: int):
-    """Query terms in order until `wanted` candidates fit. Returns (ranked, found, searched, failed)."""
+    """Query terms in order until `wanted` candidates fit.
+
+    Returns ``(ranked, found, searched, flaky)``: `flaky` counts queries that failed
+    for network reasons (worth retrying), not ones that returned an unusable feed.
+    """
     seen: dict[str, Candidate] = {}
-    searched = failed = 0
+    searched = flaky = 0
     ranked: list[dict] = []
     for query in terms.queries:
         try:
@@ -564,7 +596,7 @@ def _search(pacer: Pacer, terms: Terms, local_bytes: int, groups, entry: str, to
         except KuraError as e:
             if e.code == "provider_unavailable" and pacer.tripped:
                 raise
-            failed += 1
+            flaky += transient(e)
             continue
         searched += 1
         for c in found:
@@ -573,10 +605,10 @@ def _search(pacer: Pacer, terms: Terms, local_bytes: int, groups, entry: str, to
                       entry=entry, tolerance=tolerance)
         if len(ranked) >= wanted:
             break
-    return ranked, len(seen), searched, failed
+    return ranked, len(seen), searched, flaky
 
 
-def _process(key, row, files, *, pacer, out, core, max_candidates, tolerance):
+def _process(key, row, files, *, pacer, out, core, max_candidates, tolerance, policy=None):
     """One title. Returns ``(result, record)``; `record` False means retry on the next run."""
     entry = key.split("/", 1)[1] if "/" in key else key
     names = _file_names(files)
@@ -593,14 +625,21 @@ def _process(key, row, files, *, pacer, out, core, max_candidates, tolerance):
               "candidates": []}
     if not terms.queries:
         return {**result, "outcome": "no_terms"}, True
-    ranked, found, searched, failed = _search(pacer, terms, row["total_bytes"], terms.groups,
-                                              entry, tolerance, max_candidates)
+    ranked, found, searched, flaky = _search(pacer, terms, row["total_bytes"], terms.groups,
+                                                 entry, tolerance, max_candidates)
     result["results"] = found
     if searched == 0:
         return {**result, "outcome": "search_failed"}, False
+    # Any transient failure means the picture is incomplete: do not record an attempt.
+    incomplete = flaky > 0
+    if policy is not None:      # a protected infohash is never even requested
+        listed = [r for r in ranked if r["candidate"].infohash not in policy.infohashes]
+        result["skipped_protected"] = len(ranked) - len(listed)
+        ranked = listed
     if not ranked:
-        return {**result, "outcome": "no_results" if not found else "no_candidates"}, True
-    kept, retry = [], False
+        return {**result, "outcome": "no_results" if not found else "no_candidates",
+                **({"incomplete": True} if incomplete else {})}, not incomplete
+    kept = []
     for item in ranked[:max_candidates]:
         c = item["candidate"]
         if out.kind(c.infohash + ".torrent") == stat.S_IFREG:
@@ -612,12 +651,12 @@ def _process(key, row, files, *, pacer, out, core, max_candidates, tolerance):
         except BudgetExhausted:
             raise
         except KuraError as e:
-            retry = retry or e.code == "provider_unavailable"
+            incomplete = incomplete or transient(e)
             result["candidates"].append(_describe(item, c, "fetch_failed:" + e.code))
             if pacer.tripped:
                 break
             continue
-        meta, reason = _accept(data, c)
+        meta, reason = _accept(data, c, policy)
         if meta is None:
             result["candidates"].append(_describe(item, c, "discarded:" + reason))
             continue
@@ -625,23 +664,23 @@ def _process(key, row, files, *, pacer, out, core, max_candidates, tolerance):
             state = out.write_descriptor(c.infohash, data)
         except (OSError, KuraError) as e:
             code = e.code if isinstance(e, KuraError) else "io_error"
+            incomplete = True
             result["candidates"].append(_describe(item, c, "write_failed:" + code))
             continue
         kept.append(c.infohash)
         result["candidates"].append(_describe(item, c, state, meta, row["file_count"]))
     result["infohashes"] = kept
-    if kept:
-        return {**result, "outcome": "written"}, True
-    if retry:
-        return {**result, "outcome": "fetch_failed"}, False
-    return {**result, "outcome": "discarded"}, True
+    outcome = "written" if kept else "fetch_failed" if incomplete else "discarded"
+    if incomplete:
+        result["incomplete"] = True
+    return {**result, "outcome": outcome}, not incomplete
 
 
 def resolve(store, *, library: str, torrents_out, max_titles: int | None = None,
             max_candidates: int = 3, titles: list[str] | None = None, refresh: bool = False,
             aliases=None, budget_seconds: float = BUDGET_SECONDS, tolerance: float = TOLERANCE,
-            interval: float = INTERVAL, fetcher=None, sleep=time.sleep, clock=time.monotonic,
-            wall=time.time, should_stop=lambda: False) -> dict:
+            interval: float = INTERVAL, policy=None, fetcher=None, sleep=time.sleep,
+            clock=time.monotonic, wall=time.time, should_stop=lambda: False) -> dict:
     """Search for and fetch candidate descriptors for ``unmatched`` titles. See module docstring."""
     check_args(library, titles, max_titles, max_candidates, budget_seconds, interval)
     pacer = Pacer(fetcher or provider.fetch, interval=interval, budget=float(budget_seconds),
@@ -692,7 +731,8 @@ def resolve(store, *, library: str, torrents_out, max_titles: int | None = None,
                 break
             try:
                 result, record = _process(key, row, files, pacer=pacer, out=out, core=core,
-                                          max_candidates=max_candidates, tolerance=tolerance)
+                                          max_candidates=max_candidates, tolerance=tolerance,
+                                          policy=policy)
             except BudgetExhausted:
                 budget_hit = True
                 break

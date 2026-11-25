@@ -92,6 +92,8 @@ def register(sub, parser_class):
                    help="Total time budget; unfinished titles are retried by the next run")
     q.add_argument("--refresh", action="store_true",
                    help="Search again even for titles attempted within the last 7 days")
+    q.add_argument("--tracker-denylist", help="Optional: discard descriptors using these trackers")
+    q.add_argument("--protected", help="Optional: never request or keep these infohashes")
     q.add_argument("--no-anilist", action="store_true",
                    help="Skip AniList title lookups (on by default, rate-limited and cached)")
 
@@ -197,13 +199,16 @@ def _resolve(args, open_store) -> dict:
     inside --torrents-out (plus the AniList alias cache); never touches the library."""
     budget = args.budget_minutes * 60
     resolve.check_args(args.library, args.title, args.max_titles, args.max_candidates, budget)
+    policy = (load_policy(_abs(args.tracker_denylist) if args.tracker_denylist else None,
+                          _abs(args.protected) if args.protected else None)
+              if args.tracker_denylist or args.protected else None)
     aliases = None if args.no_anilist else AniList()
     store = open_store()
     try:
         return resolve.resolve(store, library=args.library, torrents_out=_abs(args.torrents_out),
                                titles=args.title, max_titles=args.max_titles,
                                max_candidates=args.max_candidates, refresh=args.refresh,
-                               aliases=aliases, budget_seconds=budget)
+                               aliases=aliases, budget_seconds=budget, policy=policy)
     finally:
         store.db.close()
 

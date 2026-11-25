@@ -369,6 +369,24 @@ class EndToEnd(Fixture, unittest.TestCase):
         for secret in ("SECRETKEY", "passkey", "tracker.example", "http://", "udp://"):
             self.assertNotIn(secret, text)
 
+    def test_protected_infohash_is_never_requested_and_denylisted_trackers_are_discarded(self):
+        from kura.protect import load_policy
+        listed = torrentgen.build(FOLDER, [("ep01.mkv", P("p", 30000)), ("ep02.mkv", P("q", 20000))],
+                                  announce="http://tracker.example/announce")
+        denied = torrentgen.build(FOLDER, [("ep01.mkv", P("r", 30000)), ("ep02.mkv", P("s", 20000))],
+                                  announce="http://blocked.example/announce")
+        self.lab.prot.write_text(listed.infohash + "\n")
+        policy = load_policy(self.lab.deny, self.lab.prot)
+        self.feed_for(item(FOLDER, 41, listed.infohash, seeders=50), item(FOLDER, 42, denied.infohash, seeders=40),
+                      item(FOLDER, 43, self.right.infohash, seeders=1))
+        self.nyaa.descriptors = {"41": listed.data, "42": denied.data, "43": self.right.data}
+        result = self.resolve(policy=policy)
+        self.assertEqual(sorted(u.rsplit("/", 1)[1] for u in self.nyaa.fetched), ["42.torrent", "43.torrent"])
+        self.assertEqual(result["titles"][0]["skipped_protected"], 1)
+        outcomes = {c["nyaa_id"]: c["outcome"] for c in result["titles"][0]["candidates"]}
+        self.assertEqual(outcomes, {"42": "discarded:protected", "43": "written"})
+        self.assertEqual([n for n in self.names() if n.endswith(".torrent")], [self.right.infohash + ".torrent"])
+
     def test_max_candidates_bounds_descriptor_fetches(self):
         items, descriptors = [], {}
         for i in range(5):
@@ -489,6 +507,34 @@ class Resume(Fixture, unittest.TestCase):
         self.nyaa.errors = []
         self.assertEqual(self.resolve()["processed"], 4)                   # all still pending: retried
 
+    def test_a_partially_failed_title_is_retried_not_recorded(self):
+        # first query answers nothing usable, the second one fails transiently (3 tries)
+        self.nyaa.feeds["Kura Sample Series"] = feed()
+        class Aliases:
+            def resolve(self, title):
+                return Identity(7, ("Kura Example Saga",), "Kura Sample Series"), "resolved"
+        self.nyaa.errors = [None] + [http_error(503)] * 3
+        result = self.resolve(aliases=Aliases())
+        self.assertEqual(self.nyaa.searches[:2], ["Kura Sample Series", "Kura Example Saga"])
+        self.assertTrue(result["titles"][0].get("incomplete"))
+        self.assertFalse((self.out / ".kura-resolve.json").exists())
+        self.assertEqual(self.resolve()["processed"], 1)
+
+    def test_one_failed_descriptor_keeps_the_kept_one_but_retries_the_title(self):
+        other = torrentgen.build(FOLDER, [("ep01.mkv", P("u", 30000)), ("ep02.mkv", P("v", 20000))],
+                                 announce="http://tracker.example/announce")
+        self.feed_for(item(FOLDER, 11, self.right.infohash, seeders=9), item(FOLDER, 12, other.infohash, seeders=1))
+        self.nyaa.descriptors = {"11": self.right.data}                     # 12 is gone (404)
+        first = self.resolve()
+        self.assertEqual(first["outcomes"], {"written": 1})
+        self.assertFalse(first["titles"][0].get("incomplete"))             # 404 is final, not transient
+        self.assertTrue((self.out / ".kura-resolve.json").exists())
+        (self.out / ".kura-resolve.json").unlink()
+        self.nyaa.errors = [None] + [http_error(500)] * 3                  # search fine, descriptor 11 flaps
+        second = self.resolve()
+        self.assertTrue(second["titles"][0]["incomplete"])
+        self.assertFalse((self.out / ".kura-resolve.json").exists())
+
     def test_corrupt_ledger_is_treated_as_empty(self):
         (self.out / ".kura-resolve.json").write_text("{not json")
         self.assertEqual(self.resolve()["processed"], 1)
@@ -548,6 +594,22 @@ class Boundaries(Fixture, unittest.TestCase):
             resolve.resolve(self.lab.store, library="home", torrents_out=link, fetcher=self.nyaa)
         self.assertEqual(caught.exception.code, "unsafe_path")
         self.assertEqual(self.nyaa.calls, [])
+
+    def test_a_library_like_directory_is_refused_before_anything_is_written(self):
+        (self.out / "Some Title").mkdir()
+        with self.assertRaises(KuraError) as caught:
+            self.resolve()
+        self.assertEqual(caught.exception.code, "unsafe_output_dir")
+        self.assertEqual(self.nyaa.calls, [])
+        self.assertEqual(self.names(), ["Some Title"])
+        (self.out / "Some Title").rmdir()
+        (self.out / "episode.MKV").write_bytes(b"x")
+        with self.assertRaises(KuraError) as caught:
+            self.resolve()
+        self.assertEqual(caught.exception.code, "unsafe_output_dir")
+        with self.assertRaises(KuraError):
+            resolve.OutDir(self.lab.lib)                                   # a real library root
+        self.assertEqual(sorted(p.name for p in self.lab.lib.iterdir()), [FOLDER])
 
     def test_concurrent_resolve_is_refused(self):
         with resolve.OutDir(self.out):
@@ -625,6 +687,15 @@ class Cli(Fixture, unittest.TestCase):
             run("manifest", "resolve", "--library", "home", "--torrents-out", str(self.out), "--no-anilist")
             self.assertIsNone(call.call_args.kwargs["aliases"])
             aniList.assert_not_called()
+
+    def test_policy_files_are_optional_and_loaded(self):
+        with patch("kura.cli.private_root", return_value=self.lab.state), \
+             patch("kura.cli_handover.resolve.resolve", return_value={"processed": 0}) as call:
+            run("manifest", "resolve", "--library", "home", "--torrents-out", str(self.out), "--no-anilist")
+            self.assertIsNone(call.call_args.kwargs["policy"])
+            run("manifest", "resolve", "--library", "home", "--torrents-out", str(self.out), "--no-anilist",
+                "--protected", str(self.lab.prot))
+            self.assertTrue(call.call_args.kwargs["policy"].has_protected_list)
 
     def test_errors(self):
         base = ["manifest", "resolve", "--library", "home", "--torrents-out", str(self.out)]
