@@ -104,7 +104,11 @@ class PrintUrl(Cli):
         code, out, _ = self.run_cli("anilist", "login", "--print-url", "--client-id", "999002")
         self.assertIn("client_id=999002&", out["data"]["authorize_url"])
         code, out, _ = self.run_cli("anilist", "login", "--print-url", client_id=False)
-        self.assertEqual((code, out["error"]["code"]), (2, "anilist_client_missing"))
+        self.assertIn(f"client_id={anilist_auth.DEFAULT_CLIENT_ID}&", out["data"]["authorize_url"])
+        self.assertEqual(anilist_auth.DEFAULT_CLIENT_ID, 58022)              # the registered client
+        with patch.object(anilist_auth, "DEFAULT_CLIENT_ID", None):
+            code, out, _ = self.run_cli("anilist", "login", "--print-url", client_id=False)
+            self.assertEqual((code, out["error"]["code"]), (2, "anilist_client_missing"))
         with patch.object(anilist_auth, "DEFAULT_CLIENT_ID", 999003):
             code, out, _ = self.run_cli("anilist", "login", "--print-url", client_id=False)
             self.assertIn("client_id=999003&", out["data"]["authorize_url"])

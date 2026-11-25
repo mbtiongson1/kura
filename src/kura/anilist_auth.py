@@ -19,7 +19,7 @@ from .anilist import valid_token
 from .models import KuraError
 from .safety import ensure_dir, no_symlinks
 
-DEFAULT_CLIENT_ID = None        # public identifier, set in a 1-line PR once the owner registers the app
+DEFAULT_CLIENT_ID = 58022       # the project's registered AniList client "Kura"; public, not secret
 CLIENT_ID_ENV = "KURA_ANILIST_CLIENT_ID"
 AUTHORIZE = "https://anilist.co/api/v2/oauth/authorize"
 TOKEN_FILE = "anilist-auth.json"

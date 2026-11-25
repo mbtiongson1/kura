@@ -6,10 +6,10 @@ needs an access token.
 
 ## Log in (PIN flow)
 
-1. Register an AniList API client once at the AniList developer settings and set its
-   **Redirect URL** to `https://anilist.co/api/v2/oauth/pin`. The client ID is public. Pass it
-   with `--client-id N` or `KURA_ANILIST_CLIENT_ID` (a built-in default is added once the
-   project registers one).
+1. Kura ships with its registered AniList client (ID `58022`, redirect
+   `https://anilist.co/api/v2/oauth/pin`), so most users skip this step. To use your own client,
+   register one at the AniList developer settings with that **Redirect URL** and pass its public
+   ID with `--client-id N` or `KURA_ANILIST_CLIENT_ID`; either beats the built-in default.
 2. `kura anilist login --print-url` prints the authorize URL
    (`https://anilist.co/api/v2/oauth/authorize?client_id=<ID>&response_type=token`). It touches
    no state. Open it, approve, and copy the token AniList shows.
