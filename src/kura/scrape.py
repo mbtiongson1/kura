@@ -249,24 +249,26 @@ class _Plain(http.client.HTTPConnection):
     def __init__(self, host, port, addresses, deadline):
         super().__init__(host, port, timeout=TIMEOUT)
         self._addresses, self._deadline = addresses, deadline
+        self.live = None    # http.client forgets `sock` once a Connection: close reply starts
 
     def connect(self):
-        self.sock = _pin(self._deadline, self._addresses, self.port)
+        self.sock = self.live = _pin(self._deadline, self._addresses, self.port)
 
 
 class _Secure(http.client.HTTPSConnection):
     def __init__(self, host, port, addresses, deadline, context):
         super().__init__(host, port, timeout=TIMEOUT, context=context)
         self._addresses, self._deadline, self._ctx = addresses, deadline, context
+        self.live = None
 
     def connect(self):
-        raw = self.sock = _pin(self._deadline, self._addresses, self.port)   # the deadline timer can reach it
+        raw = self.sock = self.live = _pin(self._deadline, self._addresses, self.port)  # reachable by the timer
         try:
             raw.settimeout(max(self._deadline - time.monotonic(), 0.001))
-            self.sock = self._ctx.wrap_socket(raw, server_hostname=self.host)
+            self.sock = self.live = self._ctx.wrap_socket(raw, server_hostname=self.host)
         except BaseException:
             raw.close()
-            self.sock = None
+            self.sock = self.live = None
             raise
 
 
@@ -285,7 +287,7 @@ def fetch(scheme: str, host: str, port: int, target: str, *, timeout: float = TI
             if scheme == "https" else _Plain(host, port, addresses, deadline))
 
     def expire():     # unblock a stalled read: the socket timeout only bounds each recv
-        sock = conn.sock
+        sock = conn.live
         if sock is not None:
             try:
                 sock.shutdown(socket.SHUT_RDWR)
@@ -307,10 +309,18 @@ def fetch(scheme: str, host: str, port: int, target: str, *, timeout: float = TI
         length = response.getheader("Content-Length")
         if length is not None and (not length.isdigit() or int(length) > limit):
             raise KuraError("scrape_invalid", "Tracker response exceeds the size limit")
-        data = response.read(limit + 1)
-        if len(data) > limit:
+        chunks, size = [], 0
+        while size <= limit:
+            if time.monotonic() > deadline:
+                raise KuraError("scrape_unavailable", "Tracker response was too slow")
+            chunk = response.read(min(8192, limit + 1 - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        if size > limit:
             raise KuraError("scrape_invalid", "Tracker response exceeds the size limit")
-        return data
+        return b"".join(chunks)
     except KuraError:
         raise
     except (OSError, http.client.HTTPException, ValueError) as e:

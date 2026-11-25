@@ -265,6 +265,41 @@ class Transport(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 2.0)
 
 
+    def test_slow_drip_body_with_connection_close_is_cut_off(self):
+        dead = threading.Event()
+        head = io.BytesIO(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+
+        class Drip(FakeSocket):
+            def makefile(self, *a, **k):
+                class Stream:
+                    def readline(self, *a):
+                        return head.readline(*a)
+
+                    def read(self, n=-1):
+                        if dead.is_set():
+                            raise OSError("shut down")
+                        time.sleep(0.03)       # always inside any per-recv timeout
+                        return b"x"
+
+                    def flush(self):
+                        pass
+
+                    def close(self):
+                        pass
+                return Stream()
+
+            def shutdown(self, how):
+                dead.set()
+
+        with patch("kura.scrape.socket.getaddrinfo",
+                   return_value=[(socket.AF_INET, 1, 6, "", (PUBLIC, 80))]), \
+             patch("kura.scrape.socket.create_connection", return_value=Drip()):
+            started = time.monotonic()
+            with self.assertRaises(KuraError) as caught:
+                self.get(timeout=0.3)
+        self.assertEqual(caught.exception.code, "scrape_unavailable")
+        self.assertLess(time.monotonic() - started, 1.5)
+
     def test_stalled_dns_is_abandoned_at_the_deadline(self):
         gate = threading.Event()
 
