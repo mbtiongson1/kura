@@ -88,12 +88,23 @@ class Sampling(Lib):
         self.assertEqual(out["sample"]["files_selected"], 5)
         self.assertEqual((out["probed"], out["cached"]), (1, 4))
 
-    def test_second_run_reads_nothing_and_opens_nothing(self):
+    def test_second_run_reads_nothing(self):
         first = self.probe()
-        with patch.object(rofs, "open_file_ro", side_effect=AssertionError("opened a file")):
+        with patch("os.pread", side_effect=AssertionError("read a byte")):
             second = self.probe()
         self.assertEqual((second["probed"], second["cached"], second["bytes_read"]), (0, first["probed"], 0))
         self.assertEqual(second["pending"], 0)
+
+    def test_a_cache_hit_still_proves_the_file_is_the_inventoried_one(self):
+        self.probe()
+        other = self.tmp / "lib2"
+        shutil.copytree(self.lib, other, copy_function=shutil.copy2)       # same names, sizes, mtimes
+        out = self.probe(roots={"main": other})
+        self.assertEqual((out["cached"], out["probed"], out["changed"], out["bytes_read"]), (0, 0, 4, 0))
+        self.assertEqual(self.probe()["probed"], 4)                          # the right root re-probes them
+        (self.show / next(self.show.glob("*Other Group*")).name).unlink()
+        gone = self.probe()
+        self.assertEqual((gone["cached"], gone["changed"]), (3, 1))
 
     def test_reprobe_ignores_the_cache(self):
         self.probe()

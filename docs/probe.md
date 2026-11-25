@@ -88,13 +88,13 @@ Each file is opened through `rofs` below its root, and its size and mtime must e
 inventory row, else the file is reported `changed` and not probed. Results are upserted into
 `probe_results` as each file finishes, so an interrupted run loses nothing.
 
-Cache: a stored result is reused, at no I/O cost, when the inventory's size and mtime and
+Cache: a stored result is reused (no bytes are read, but the file is opened and its size, mtime,
+device and inode compared with the inventory) when the inventory's size and mtime and
 `PROBE_VERSION` match and the stored status describes content (`ok`, `partial`,
 `unsupported_container`, `invalid`) and the probe was not cut by the per-file byte limit (a cut
 result is stored with the `allowance` it ran under and is retried only when a larger one is asked for). `unsafe`, `changed` and
-`io_error` rows record why a file was not probed and are retried every run. The cache trusts the inventory (it never opens the file), but a hit still needs the title's
-root label to be given with `--root`, the root to open safely (no symlinks) and to be on the
-device the inventory recorded (`root_mismatch` otherwise). Re-run `manifest build` after files change.
+`io_error` rows record why a file was not probed and are retried every run. A hit also needs the title's root label to be given with `--root`, the
+root to open safely (no symlinks) and to be on the device the inventory recorded (`root_mismatch` otherwise). Re-run `manifest build` after files change.
 
 Budget: `--max-files` (default 2000) bounds the files that need I/O in one run (cache hits are free, so
 repeated runs progress through a larger selection); `--max-read-mib` is a hard cap on bytes read per run; a file gets the smaller of the

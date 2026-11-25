@@ -12,11 +12,11 @@ Sampling
                     cluster is probed, at most ``MAX_CLUSTERS`` clusters per title
   all               every video file, resumable under the byte budget
 
-Cache: a row is a hit when the inventory's size and mtime and ``PROBE_VERSION`` equal the
+Cache: a row is a hit (no bytes read; the file is still opened and its size, mtime, device and
+inode compared with the inventory, so a swapped root cannot serve stale results) when the inventory's size and mtime and ``PROBE_VERSION`` equal the
 stored ones, the stored status describes the content (ok, partial, unsupported_container,
 invalid), the probe was not cut by the per-file byte limit (or was cut at an allowance no smaller than
-the current one; the stored result then carries an ``allowance`` key) and ``reprobe`` is off. A hit costs no I/O at all. The cache is as fresh as the
-inventory: re-run ``manifest build`` after files change. Rows describing an access problem
+the current one; the stored result then carries an ``allowance`` key) and ``reprobe`` is off. The cache is as fresh as the inventory: re-run ``manifest build`` after files change. Rows describing an access problem
 (unsafe, changed, io_error) are recorded but never count as hits, so they are retried.
 
 A title is only probed (or served from the cache) when its root opens safely and sits on the
@@ -193,17 +193,22 @@ def probe_library(store, *, library, roots, sample="groups", titles=None, max_fi
                     fail("root_mismatch")                   # not the filesystem this title was inventoried on
                     handled += 1
                     continue
-                if not reprobe and _cached(store.db, title["id"], f, per_file_bytes):
+                hit = not reprobe and _cached(store.db, title["id"], f, per_file_bytes)
+                allowance = 0
+                if not hit:
+                    if worked >= max_files:
+                        break
+                    remaining = max_read_bytes - stats["bytes_read"]
+                    if remaining <= 0:
+                        exhausted = True
+                        break
+                    allowance = min(per_file_bytes, remaining)
+                # Even a cache hit opens the file (no read) to prove it is the inventoried one here.
+                outcome = _probe_file(root, f, allowance, per_file_bytes, check_only=hit)
+                if outcome[0] == "cached":
                     stats["cached"] += 1
                     handled += 1
                     continue
-                if worked >= max_files:
-                    break
-                remaining = max_read_bytes - stats["bytes_read"]
-                if remaining <= 0:
-                    exhausted = True
-                    break
-                outcome = _probe_file(root, f, min(per_file_bytes, remaining), per_file_bytes)
                 if outcome[0] == "budget":
                     stats["bytes_read"] += outcome[1]
                     exhausted = True
@@ -231,8 +236,9 @@ def probe_library(store, *, library, roots, sample="groups", titles=None, max_fi
                 "pending": len(selected) - handled}
 
 
-def _probe_file(root_fd, f, allowance, full):
-    """``(status, result|None, bytes_read)``, or ``("budget", bytes_read)`` for a discarded probe."""
+def _probe_file(root_fd, f, allowance, full, check_only=False):
+    """``(status, result|None, bytes_read)``; ``("cached",)`` when `check_only` and the file is
+    exactly the inventoried one; ``("budget", bytes_read)`` for a discarded probe."""
     try:
         fd = rofs.open_file_ro(root_fd, tuple(f["rel_path"].split("/")))
     except KuraError as exc:
@@ -251,6 +257,8 @@ def _probe_file(root_fd, f, allowance, full):
         if ((st.st_size, st.st_mtime_ns, st.st_dev, st.st_ino)
                 != (f["size"], f["mtime_ns"], f["dev"], f["ino"])):
             return "changed", None, 0           # not the file (or the version) the inventory saw
+        if check_only:
+            return ("cached",)
         try:
             result = mkvprobe.probe(read, st.st_size, max_bytes=allowance)
         except OSError:
