@@ -377,6 +377,23 @@ class Build(unittest.TestCase):
         self.assertEqual((gone["status"], gone["reasons"]), ("unmatched", ["no_torrent_linked"]))
         self.assertEqual(self.lab.status("Kura Private Show")["status"], "protected")
 
+    def test_obsolete_links_are_superseded_before_the_inventory_is_published(self):
+        self.lab.build()
+        (self.lab.torrents / "Kura Sample Series.torrent").unlink()
+        with patch.object(ManifestRepo, "save_inventory", side_effect=KeyboardInterrupt), \
+             self.assertRaises(KeyboardInterrupt):
+            self.lab.build()
+        row = self.lab.status("Kura Sample Series")
+        self.assertEqual((row["status"], row["reasons"]), ("unmatched", ["no_torrent_linked"]))
+
+    def test_roots_not_scanned_this_time_keep_their_links(self):
+        self.lab.build()
+        other = self.lab.tmp / "lib2"
+        other.mkdir()
+        manifest.build(self.lab.store, roots={"spare": other}, library="home",
+                       torrents_dir=self.lab.torrents, policy=self.lab.policy())
+        self.assertEqual(self.lab.status("Kura Sample Series")["status"], "reacquirable")
+
     def test_ambiguity_after_a_clean_build_supersedes_the_old_link(self):
         self.lab.build()
         self.lab.add("Kura Sample Series", GOOD, torrent=False, where=self.lab.lib / "Kura Elsewhere")

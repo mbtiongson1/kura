@@ -428,6 +428,16 @@ def build(store, *, roots: dict[str, Path], library: str, torrents_dir: Path,
 
         # 3. Persist inventories, including titles that vanished from a root.
         existing = {t["rel_path"]: t for t in repo.titles(library)}
+        # A link that this scan no longer produces (torrent removed, now ambiguous, title
+        # renamed) stops counting toward coverage; it still counts toward protection. Done
+        # before the new inventory is published so an interrupt can only lose eligibility.
+        current = {(f"{m.root}/{m.title_rel}", m.infohash) for m in matches}
+        for key, old in existing.items():
+            if key.split("/", 1)[0] not in invs:     # a root not scanned this time is untouched
+                continue
+            for link in repo.links(old["id"]):
+                if (key, link["infohash"]) not in current and link["strategy"] != SUPERSEDED:
+                    repo.link(old["id"], link["infohash"], SUPERSEDED, {})
         ids: dict[str, int] = {}
         files_by_key: dict[str, dict[str, tuple]] = {}
         assessments: dict[str, dict] = {}
@@ -454,13 +464,6 @@ def build(store, *, roots: dict[str, Path], library: str, torrents_dir: Path,
         by_torrent: dict[str, list] = {}
         for m in matches:
             by_torrent.setdefault(m.infohash, []).append(m)
-        # A link that this scan no longer produces (torrent removed, now ambiguous, title
-        # renamed) stops counting toward coverage; it still counts toward protection.
-        current = {(ids[f"{m.root}/{m.title_rel}"], m.infohash) for m in matches}
-        for title_id in ids.values():
-            for link in repo.links(title_id):
-                if (title_id, link["infohash"]) not in current and link["strategy"] != SUPERSEDED:
-                    repo.link(title_id, link["infohash"], SUPERSEDED, {})
         left = max_read_bytes
         stats = {"run": 0, "cached": 0, "deferred": 0, "skipped_protected": 0, "bytes_read": 0}
         interrupted = False
