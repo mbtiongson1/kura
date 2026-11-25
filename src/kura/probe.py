@@ -232,6 +232,9 @@ def _probe_file(root_fd, f, allowance, full):
             result = mkvprobe.probe(read, st.st_size, max_bytes=allowance)
         except OSError:
             return "io_error", None, used            # what was read before the failure still counts
+        after = os.fstat(fd)
+        if (after.st_size, after.st_mtime_ns) != (st.st_size, st.st_mtime_ns):
+            return "changed", None, used             # it moved under the reads: the result is mixed
     finally:
         os.close(fd)
     if allowance < full and "budget_exhausted" in result["warnings"]:

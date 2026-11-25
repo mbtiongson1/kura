@@ -165,6 +165,23 @@ class Changes(Lib):
         healed = self.probe()
         self.assertEqual((healed["changed"], healed["probed"], healed["cached"]), (0, 1, 3))
 
+    def test_file_modified_during_the_probe_is_changed_and_not_cached(self):
+        path = next(self.show.glob("*Other Group*"))
+        real, state = os.pread, {"hit": False}
+
+        def racing(fd, n, offset):
+            data = real(fd, n, offset)
+            if not state["hit"] and os.fstat(fd).st_size == path.stat().st_size and fd > 2:
+                state["hit"] = True
+                os.utime(path, ns=(5, 5))          # someone touches the file mid-probe
+            return data
+
+        with patch("os.pread", racing):
+            out = self.probe(titles=["main/Kura Sample Series"])
+        self.assertEqual(out["changed"], 1)
+        row = self.store.db.execute("SELECT status FROM probe_results WHERE rel_path LIKE '%Other Group%'").fetchone()
+        self.assertEqual(row, ("changed",))
+
     def test_mtime_change_alone_counts_as_changed(self):
         path = next(self.show.glob("*Other Group*"))
         os.utime(path, ns=(1, 1))
