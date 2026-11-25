@@ -53,6 +53,11 @@ starts at one request per 2 s, adopts the advertised `X-RateLimit-Limit`, waits 
 when `X-RateLimit-Remaining` reaches 0, persists a 429 penalty for all processes, never retries a
 429 itself, and never waits more than 30 s for one request. `--max-requests` bounds each command.
 
+Known limit (by design of the shared limiter, which spaces request *starts*): a process that starts
+while another one's slow request is still in flight does not wait for its response. If that
+response is a 429, the penalty is recorded when it arrives and every later start honours it; at
+most the few requests started inside one request's duration (about 2 s apart) can overlap it.
+
 ## Testing the limits live (owner procedure, no bursts)
 
 1. `kura anilist limits` and note `limit`, `remaining`, `reset`.
