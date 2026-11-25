@@ -238,7 +238,7 @@ class ManifestRepo:
     def prune_titles(self, library: str, titles: list[dict], dry_run: bool = True) -> dict[str, int]:
         """Delete these titles (dicts with id and rel_path, all of `library`) with their files,
         links, verifications, probe results, absent marks and recorded identities, from Kura's
-        own state only. Returns the row counts (what was deleted, or with `dry_run` what would
+        own state only. Owner decisions (``identity pin``) are never deleted. Returns the row counts (what was deleted, or with `dry_run` what would
         be). Torrent rows are shared and never deleted. A dry run only reads."""
         ids = list(dict.fromkeys(t["id"] for t in titles))
         keys = list(dict.fromkeys(t["rel_path"] for t in titles))
@@ -248,7 +248,7 @@ class ManifestRepo:
                 ("verifications", "verifications", "title_id", ids, ""),
                 ("probe_results", "probe_results", "title_id", ids, ""),
                 ("marks", "library_absent", "title_id", ids, ""),
-                ("identities", "title_identities", "title", keys, " AND library=?"))
+                ("identities", "title_identities", "title", keys, " AND library=? AND source<>'owner'"))
         counts = {name: 0 for name, *_ in plan}
 
         def run(db):

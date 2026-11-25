@@ -209,9 +209,9 @@ only some roots on purpose, pass `--keep-other-roots`. A title that vanishes fro
 `kura manifest prune --library home` deletes rows from Kura's own state: absent titles and, with
 `--older-than-days`, titles that vanished from a scanned root, with their file, link, verification, probe-result and identity
 rows (torrent rows are shared and stay; a title linked to a protected or private torrent is kept and
-counted as `kept_protected`, because its links are the evidence that protects that torrent elsewhere). It never touches media or `.torrent` files. Without
+counted (and sampled) as `kept_protected`, and stays until that torrent is unprotected or unlinked, because its links are the evidence that protects that torrent elsewhere). It never touches media or `.torrent` files. Without
 `--yes` it only prints the counts (`--dry-run` is the default; the two flags are mutually
-exclusive). `--older-than-days N` keeps titles absent (or last seen) for less than N days; vanished titles are only
+exclusive). Identities of pruned titles are deleted too, except owner pins (`identity pin`). `--older-than-days N` keeps titles absent (or last seen) for less than N days; vanished titles are only
 deleted when it is given (a root that was down for one build must not cost their history).
 
 ### Quarantine plan (a proposal only)

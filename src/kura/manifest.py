@@ -614,7 +614,8 @@ def prune(store, library: str, *, older_than_days: float | None = None, dry_run:
     means all) and, only when `older_than_days` is given, titles a scan found vanished (last
     seen at least that long ago). Their file, link, verification, probe-result, absent-mark and
     identity rows go with them (the identities, so a fully pruned library cannot leak them into
-    AniList or SeaDex lookups). A title whose links point at a protected or private torrent is
+    AniList or SeaDex lookups; owner pins from ``identity pin`` are never deleted). The dry run
+    is advisory: it reads without a snapshot. A title whose links point at a protected or private torrent is
     kept (``kept_protected``). Torrent rows, plans and reports stay. With `dry_run` (the
     default) it only counts.
     Nothing here opens a library root.
@@ -628,10 +629,10 @@ def prune(store, library: str, *, older_than_days: float | None = None, dry_run:
     with (contextlib.nullcontext() if dry_run else store.lock()):   # a preview never blocks a build
         repo = ManifestRepo(store.db)
         total = len(repo.titles(library, include_absent=True))
-        candidates, kept_protected = [], 0
+        candidates, kept_protected = [], []
         for c in repo.prunable(library, cutoff):
             if _protection_evidence(repo, c["id"]):
-                kept_protected += 1      # its links are the proof that a torrent is protected elsewhere
+                kept_protected.append(c["rel_path"])   # its links prove a torrent is protected elsewhere
             else:
                 candidates.append(c)
         counts = repo.prune_titles(library, candidates, dry_run=dry_run)
@@ -643,7 +644,8 @@ def prune(store, library: str, *, older_than_days: float | None = None, dry_run:
             "absent": sum(1 for c in candidates if c["state"] == "absent"),
             "vanished": sum(1 for c in candidates if c["state"] == "vanished"),
             "deleted" if not dry_run else "would_delete": counts,
-            "kept_protected": kept_protected, "by_root": dict(sorted(by_root.items())),
+            "kept_protected": len(kept_protected), "kept_protected_sample": kept_protected[:20],
+            "by_root": dict(sorted(by_root.items())),
             "sample": [c["rel_path"] for c in candidates[:20]],
             "titles_kept": total - len(candidates)}
 
@@ -654,12 +656,15 @@ def _protection_evidence(repo: ManifestRepo, title_id: int) -> bool:
     ``_protected_elsewhere`` uses the links of other libraries as the evidence that stops a
     public copy from clearing a protection, so prune never deletes those links (fail closed).
     """
-    for link in repo.links(title_id):
-        row = repo.torrent(link["infohash"])
-        protection = row and row.get("protection")
-        if (not isinstance(protection, dict) or not isinstance(protection.get("protected"), bool)
-                or not isinstance(row.get("private"), bool) or protection["protected"] or row["private"]):
-            return True
+    try:
+        for link in repo.links(title_id):
+            row = repo.torrent(link["infohash"])
+            protection = row and row.get("protection")
+            if (not isinstance(protection, dict) or not isinstance(protection.get("protected"), bool)
+                    or protection["protected"] or row["private"]):
+                return True
+    except Exception:       # corrupt rows prove nothing: keep the title
+        return True
     return False
 
 

@@ -361,8 +361,29 @@ class Prune(Base):
                                   "protection": {**row["protection"], "protected": True}})
         out = manifest.prune(self.lab.store, "home", dry_run=False)
         self.assertEqual((out["kept_protected"], out["deleted"]["titles"]), (1, 1))
+        self.assertEqual(out["kept_protected_sample"], [victim["rel_path"]])
         self.assertEqual(self.repo.links(victim["id"])[0]["infohash"], infohash)    # the evidence stays
         self.assertEqual(len(self.repo.titles("home", include_absent=True)), 3)
+
+    def test_unreadable_protection_evidence_keeps_the_title(self):
+        for title in self.repo.titles("home", include_absent=True):
+            if title["rel_path"].startswith("disk"):
+                self.db.execute("UPDATE manifest_torrents SET protection='{not json'")
+                break
+        self.db.commit()
+        out = manifest.prune(self.lab.store, "home", dry_run=False)
+        self.assertEqual((out["kept_protected"], out["deleted"]["titles"]), (2, 0))
+
+    def test_owner_pins_survive_a_prune(self):
+        self.db.execute("INSERT INTO title_identities(library, title, anilist_id, status, source, updated_at)"
+                        " VALUES ('home', 'disk1/Kura Sample Series', 999000002, 'pinned', 'owner', 1.0)")
+        self.db.execute("INSERT INTO title_identities(library, title, anilist_id, status, source, updated_at)"
+                        " VALUES ('home', 'disk2/Kura Extra Show', 999000004, 'resolved', 'list', 1.0)")
+        self.db.commit()
+        out = manifest.prune(self.lab.store, "home", dry_run=False)
+        self.assertEqual(out["deleted"]["identities"], 1)
+        self.assertEqual(self.db.execute("SELECT title FROM title_identities").fetchall(),
+                         [("disk1/Kura Sample Series",)])
 
     def test_prune_dry_run_does_not_take_a_write_transaction(self):
         other = sqlite3.connect(self.lab.state / "state.sqlite3", timeout=0.1)
