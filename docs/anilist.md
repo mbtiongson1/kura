@@ -15,9 +15,11 @@ every update need an access token. An agent can walk you through the login with 
 2. `kura anilist login --print-url` prints the authorize URL
    (`https://anilist.co/api/v2/oauth/authorize?client_id=<ID>&response_type=token`). It touches
    no state. Open it, approve, and copy the token AniList shows.
-3. `kura anilist login --token-stdin < file` or paste at the hidden prompt of a plain
-   `kura anilist login` on a terminal. One Viewer request verifies the token before anything is
-   stored.
+3. `kura anilist login --token-stdin < file` (or `pbpaste | kura anilist login --token-stdin` on
+   macOS) or paste at the hidden prompt of a plain `kura anilist login` on a terminal. One Viewer
+   request verifies the token before anything is stored. The prompt reads the terminal in
+   non-canonical mode, so a token longer than the terminal's line limit (1024 bytes on macOS,
+   which AniList tokens exceed) is read whole instead of hanging after Enter.
 
 There is no `--token` option. The token is never in argv, environment, output or logs, and is
 never stored in SQLite. It lives in `anilist-auth.json` (file 0600 in a 0700 directory; symlinks

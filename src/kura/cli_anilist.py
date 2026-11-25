@@ -5,6 +5,7 @@ into a hidden prompt or piped on stdin, stored in a private file, and never prin
 `login --print-url` is stateless (it never opens Kura's state).
 """
 import getpass
+import os
 import sys
 import time
 import warnings
@@ -63,11 +64,68 @@ def _ani(store) -> AniList:
     return AniList(max_retries=0, limiter=SharedLimiter(store.root, "anilist", interval=2.0))
 
 
+def _read_tty_line(fd: int, prompt: str) -> str:
+    """Read one hidden line from the terminal `fd` in non-canonical mode.
+
+    A canonical-mode read (what ``getpass`` does) is capped by the terminal's line limit
+    (``MAX_CANON``, 1024 bytes on macOS): a longer pasted token is cut and its Enter is dropped,
+    so the prompt hangs. Here echo and line editing are off, bytes are read as they arrive, and
+    only Backspace/Delete, Ctrl-U and Ctrl-D are interpreted. Ctrl-C still interrupts (signals
+    stay on). The terminal settings are always restored.
+    """
+    import termios
+    old = termios.tcgetattr(fd)
+    new = termios.tcgetattr(fd)
+    new[3] &= ~(termios.ECHO | termios.ICANON)
+    new[6][termios.VMIN], new[6][termios.VTIME] = 1, 0
+    print(prompt, end="", file=sys.stderr, flush=True)
+    typed = bytearray()
+    try:
+        termios.tcsetattr(fd, termios.TCSANOW, new)    # keep a paste that arrived before the prompt
+        while True:
+            chunk = os.read(fd, 4096)
+            if not chunk:
+                break
+            for byte in chunk:
+                if byte in (10, 13):
+                    return typed.decode("ascii", "replace")
+                if byte in (8, 127):
+                    del typed[-1:]
+                elif byte == 21:                    # Ctrl-U: start over
+                    typed.clear()
+                elif byte == 4:                     # Ctrl-D
+                    if not typed:
+                        raise KuraError("anilist_token_invalid", "No token was provided")
+                    return typed.decode("ascii", "replace")
+                else:
+                    typed.append(byte)
+                if len(typed) > anilist_auth.TOKEN_MAX_BYTES:
+                    raise KuraError("anilist_token_invalid", "The token input is too long")
+        return typed.decode("ascii", "replace")
+    finally:
+        termios.tcsetattr(fd, termios.TCSAFLUSH, old)
+        print(file=sys.stderr, flush=True)
+        typed[:] = b"\0" * len(typed)
+
+
+def _tty_fd():
+    """The stdin file descriptor when it is a real terminal with termios, else None."""
+    try:
+        import termios  # noqa: F401  (absent on Windows)
+        fd = sys.stdin.fileno()
+    except (ImportError, AttributeError, OSError, ValueError):
+        return None
+    return fd if os.isatty(fd) else None
+
+
 def _read_hidden() -> str:
     if not sys.stdin.isatty():
         raise KuraError("anilist_login_needs_tty",
                         "No terminal: pipe the token with `kura anilist login --token-stdin`")
     print("Open this URL, approve Kura, then paste the token shown on the page:", file=sys.stderr)
+    fd = _tty_fd()
+    if fd is not None:
+        return anilist_auth.clean_token(_read_tty_line(fd, "AniList token (hidden): "))
     with warnings.catch_warnings():
         warnings.simplefilter("error", getpass.GetPassWarning)      # never fall back to echoed input
         try:
