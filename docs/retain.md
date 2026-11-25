@@ -78,7 +78,7 @@ matched.
 Root entries that are not titles. A loose file that is not a video (poster or logo images,
 `.nfo`, dotfiles, `*.ffs_db`) and a folder that holds files but no video (a `fonts` folder)
 are skipped by `identity sync` (reported as `non_media`, not counted as unresolved; an old
-non-owner row for one is dropped), by `identity show`'s `unrecorded`, by the retain check's
+non-owner row for one is dropped), by `identity show`'s `counts`, `unrecorded` and `titles` (a non-media entry that still has a row, such as an owner pin, is listed under `non_media` instead), by the retain check's
 `unidentified_titles` and by the audit's `identity_unknown` flag. They get no identity, so a
 retain plan still refuses to touch them (`identity_unknown`), and an owner row for one is kept.
 

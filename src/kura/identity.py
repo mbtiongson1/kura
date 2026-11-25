@@ -755,23 +755,33 @@ def apply_pins(store, library: str, pins, *, now=time.time) -> dict:
 
 
 def show(store, library: str, status: str | None = None) -> dict:
-    """Recorded identities, newest state; read-only. ``unrecorded`` counts manifest titles with no row."""
+    """Recorded identities, newest state; read-only. ``unrecorded`` counts media manifest titles
+    with no row. ``counts``, ``unrecorded`` and ``titles`` cover the media entries only; a root
+    entry that is not media (see ``has_media``) that still has a row (an owner pin, or an old row
+    the next sync drops) is listed under ``non_media`` so nothing is hidden."""
     if status is not None and status not in STATUSES:
         raise _bad("Unknown status filter", allowed=list(STATUSES))
     rows = load(store.db, library)
-    manifest = ManifestRepo(store.db).titles(library)
-    present = {r["rel_path"] for r in manifest}     # identities of absent or pruned titles stay out of sight
-    keys = sorted(_media_titles(store, manifest))
+    manifest = ManifestRepo(store.db).titles(library)    # identities of absent or pruned titles stay out of sight
+    media = _media_titles(store, manifest)
+    keys = sorted(media)
     counts = {s: 0 for s in STATUSES}
     for key in keys:
         if key in rows:
             counts[rows[key]["status"]] += 1
-    listed = [{"title": k, **v} for k, v in sorted(rows.items())
-              if k in present and (status is None or v["status"] == status)]
+
+    def listing(wanted):
+        return [{"title": k, **v} for k, v in sorted(rows.items())
+                if k in wanted and (status is None or v["status"] == status)]
+    listed = listing(media)
+    other = listing({r["rel_path"] for r in manifest} - media)
     out = {"library": library, "counts": {k: v for k, v in counts.items() if v},
-           "unrecorded": sum(1 for k in keys if k not in rows), "titles": listed[:MAX_LISTED]}
+           "unrecorded": sum(1 for k in keys if k not in rows), "titles": listed[:MAX_LISTED],
+           "non_media": other[:MAX_LISTED]}
     if len(listed) > MAX_LISTED:
         out["titles_truncated"] = len(listed) - MAX_LISTED
+    if len(other) > MAX_LISTED:
+        out["non_media_truncated"] = len(other) - MAX_LISTED
     return out
 
 

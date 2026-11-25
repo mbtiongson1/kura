@@ -808,6 +808,30 @@ class NonMedia(Tree):
         out = identity.retain_check(self.store, "home", retain)
         self.assertEqual((out["unidentified_titles"], [t["title"] for t in out["retained_titles"]]), (0, ["main/Real Show"]))
 
+    def test_show_lists_and_counts_the_same_entries_and_reports_non_media_rows_apart(self):
+        identity.pin(self.store, "home", "main/fonts", not_anime=True)
+        self.store.db.execute("INSERT INTO title_identities(library, title, status, source, candidates, updated_at)"
+                              " VALUES ('home', 'main/sync.ffs_db', 'unresolved', 'list', '[]', 1.0)")
+        self.store.db.commit()
+        self.sync(aliases=None)                 # the owner row stays, the stale row is dropped
+        shown = identity.show(self.store, "home")
+        self.assertEqual(sorted(t["title"].partition("/")[2] for t in shown["titles"]),
+                         ["Real Show", "[ASW] Bocchi the Rock! - 04 [1080p HEVC][A7801AD7].mkv"])
+        self.assertEqual(sum(shown["counts"].values()), len(shown["titles"]))     # same key set for both
+        self.assertEqual([(t["title"], t["status"], t["source"]) for t in shown["non_media"]],
+                         [("main/fonts", "not_anime", "owner")])
+        self.assertNotIn("not_anime", shown["counts"])
+        self.store.db.execute("INSERT INTO title_identities(library, title, status, source, candidates, updated_at)"
+                              " VALUES ('home', 'main/sync.ffs_db', 'unresolved', 'list', '[]', 1.0)")
+        self.store.db.commit()
+        shown = identity.show(self.store, "home")                                  # a stale row before the next sync
+        self.assertEqual(sorted(t["title"] for t in shown["non_media"]), ["main/fonts", "main/sync.ffs_db"])
+        self.assertNotIn("unresolved", shown["counts"])
+        only = identity.show(self.store, "home", status="unresolved")
+        self.assertEqual(([t["title"] for t in only["titles"]], [t["title"] for t in only["non_media"]]),
+                         ([], ["main/sync.ffs_db"]))
+        self.assertEqual(identity.show(self.store, "home")["non_media"][0]["title"], "main/fonts")
+
     def test_an_explicit_non_media_title_is_skipped_and_an_old_row_is_dropped(self):
         key = "main/fonts"
         self.store.db.execute("INSERT INTO title_identities(library, title, status, source, candidates, updated_at)"
