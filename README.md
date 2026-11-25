@@ -180,6 +180,28 @@ now ambiguous) stops counting toward coverage but keeps protecting; a torrent wh
 protection was classified under a different policy than the title's last assessment is
 `unverified` until the next build reprocesses it (descriptors are reclassified first thing in every build, even one that is later interrupted).
 
+### Quarantine plan (a proposal only)
+```sh
+kura manifest plan --library home [--title media/Some\ Title ...] [--min-seeders 3] \
+  [--skip-swarm] [--max-inventory-age-h 24] [--min-quiet-days 14]
+```
+`manifest plan` writes a JSON **proposal**, stores it in the state database under its
+`plan_hash` and prints it. **Kura never moves, renames, deletes or purges anything**: the
+command does not even open the library. The owner's own infrastructure may execute the
+plan later, after the owner approved that exact `plan_hash`, and must first check every
+entry of `preconditions` (same device for source and destination, `tree_sha256` equal to a
+fresh re-inventory, destination absent, a rename that never replaces, swarm checked again
+right before the move). A title is proposed only if it is `reacquirable`, its policy lists
+were complete, its inventory is at most 24 hours old, nothing inside it changed for 14
+days, and every linked torrent has a recent stored swarm check with at least 3 seeders.
+Swarm data has no collector yet, so until it exists the plan needs `--skip-swarm`, which is
+recorded as `swarm_unchecked` in the plan and on every move. Every other title appears in
+`refused` with fixed reason tokens. Each move goes to `.kura-quarantine/<batch_id>/<title>`
+on the same root (the only quarantine name the inventory ignores); `undo` lists the exact
+inverse renames and `purge_not_before` is 30 days after the plan was created. Paths are
+relative to a root label, never absolute. The `plan_hash` is the SHA-256 of the canonical
+plan without that field, so any edit invalidates the approval.
+
 ## Storage, interruption and status
 Default state: `~/.local/share/kura/state.sqlite3` (preferences, receipts, audit events
 and validated sanitized descriptors for explicit offline resume). This is private data,
