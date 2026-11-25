@@ -29,7 +29,7 @@ import re
 import statistics
 import time
 
-from . import idlist, identity, mkvprobe, names, policy
+from . import idlist, identity, manifest, mkvprobe, names, policy
 from . import probe as probe_mod
 from .manifest_store import ManifestRepo, canonical
 from .models import KuraError
@@ -209,7 +209,8 @@ def _files(repo, title) -> list[dict]:
         local = rel[len(prefix):] if title["kind"] == "dir" and rel.startswith(prefix) else rel.rsplit("/", 1)[-1]
         parsed = names.parse(local)
         out.append({"rel": rel, "local": local, "size": f["size"], "mtime_ns": f["mtime_ns"],
-                    "video": local.lower().endswith(probe_mod.VIDEO_EXT), "n": parsed})
+                    "video": local.lower().endswith(probe_mod.VIDEO_EXT) and not local.lower().endswith(".mka"),
+                    "n": parsed})
     return out
 
 
@@ -257,7 +258,7 @@ def _representative(samples, video_files):
 def _held(db, repo, title, videos):
     groups = {_norm(f["n"]["group"]): f["n"]["group"] for f in videos if f["n"]["group"]}
     groups.pop("", None)
-    hashes = {link["infohash"] for link in repo.links(title["id"])}
+    hashes = {link["infohash"] for link in repo.links(title["id"]) if link["strategy"] != manifest.SUPERSEDED}
     for infohash in hashes:
         row = db.execute("SELECT release_group FROM manifest_torrents WHERE infohash=?", (infohash,)).fetchone()
         if row and _norm(row[0]):
@@ -350,12 +351,16 @@ def _season(f):
 
 
 def _superseded(videos):
-    seen: dict = {}
-    for f in videos:
-        n = f["n"]
-        if n["episode"] is not None:
-            seen.setdefault((_norm(n["group"]), _season(f), n["episode"]), set()).add(n["version"] or 1)
-    return sorted({ep for (_g, _s, ep), versions in seen.items() if 1 in versions and max(versions) >= 2})
+    held = [(_norm(f["n"]["group"]), _season(f), f["n"]["episode"], f["n"]["version"] or 1)
+            for f in videos if f["n"]["episode"] is not None]
+    found = set()
+    for g, s, ep, v in held:
+        if v < 2:
+            continue
+        # A missing season on either side matches any season (same rule as upstream revisions).
+        if any(g2 == g and ep2 == ep and v2 < 2 and (None in (s, s2) or s == s2) for g2, s2, ep2, v2 in held):
+            found.add(ep)
+    return sorted(found)
 
 
 # ---- one title ----------------------------------------------------------------------------
@@ -543,14 +548,15 @@ def run(store, *, library, retain=None, overrides=None, user=None, titles=None, 
         every = repo.titles(library)
         if not every:
             raise KuraError("no_inventory", "No inventory for this library; run manifest build first")
-        chosen = every
+        present = [t for t in every if "absent_from_scan" not in (t["blocked"] or [])]   # others are gone from disk
+        chosen = present
         if titles:
             known = {t["rel_path"] for t in every}
             for key in titles:
                 if key not in known:
                     raise _bad("Unknown title key", title=key)
             wanted = set(titles)
-            chosen = [t for t in every if t["rel_path"] in wanted]
+            chosen = [t for t in chosen if t["rel_path"] in wanted]
         identities = identity.load(db, library)
         anilist_doc, favourites, scores = _anilist(db, user, moment)
         sd_status = seadex.status(store, now=lambda: moment)
@@ -582,7 +588,7 @@ def run(store, *, library, retain=None, overrides=None, user=None, titles=None, 
                           "coverage": round(probed / videos, 4) if videos else None, "changed": changed},
                 "seadex": {"synced_at": sd_status["last_ok"], "stale": sd_status["stale"]},
                 "anilist": anilist_doc,
-                "retain": _retain_doc(retain, identities, every),
+                "retain": _retain_doc(retain, identities, present),
                 "policy": {"efficient": dict(policy.EFFICIENT), "archival": dict(policy.ARCHIVAL),
                            "overrides_sha256": overrides.sha256 if overrides else None,
                            "overrides_ids": len(overrides.ids) if overrides else None}},

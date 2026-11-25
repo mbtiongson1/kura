@@ -30,6 +30,7 @@ class Tokens(unittest.TestCase):
         n = names.parse("Show.S01E01.1080p.WEB-DL.DDP5.1.H.264-GROUP.mkv")
         self.assertEqual((n["group"], n["episode"]), ("GROUP", 1))
         self.assertEqual(names.parse("Show.1080p.AAC2.0-GROUP.mkv")["group"], "GROUP")
+        self.assertIsNone(names.parse("Show 01 1080p Re-Zero.mkv")["group"])
         self.assertIsNone(names.parse("[Gr] Show - 2019 Special (BD 1080p).mkv")["episode"])
         self.assertEqual(names.parse("[Gr] Show - 1080 [720p]")["episode"], None)
 

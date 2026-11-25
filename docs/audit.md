@@ -142,25 +142,26 @@ the owner to look at, nothing more.
 
 ## Runner contract
 
-The audit is a state-only step in the Unraid runner (`tower/kura/kura-run.sh`): it needs no media
-and no network, so it runs in the offline container with the policy files staged read-only.
+The audit is a state-only step for a runner: it needs no media and no network, so a runner should
+run it in an offline container with the policy files staged read-only. Absent titles (marked
+`absent_from_scan` by `manifest build`) and superseded manifest links are ignored.
 
 ```
-audit  ->  kura audit --library anime --retain /policy/retain.txt [--policy-overrides /policy/policy-overrides.txt]
+audit  ->  kura audit --library LIBRARY --retain /policy/retain.txt [--policy-overrides /policy/policy-overrides.txt]
 ```
 
-Steps by class (same split as the rest of the runner):
+Steps by class:
 
 - media steps (network none, roots read-only, state read-write, refused during a parity check):
-  `probe [--sample all] [--max-read-mib N]` runs `kura probe library --library anime --root L=/library/L ...`.
+  `probe [--sample all] [--max-read-mib N]` runs `kura probe library --library LIBRARY --root LABEL=/library/LABEL ...`.
 - networked steps (state read-write, no media): `seadex-sync [--full]`
-  (`kura seadex sync [--full] --files-for-library anime`), `anilist-login` (the token is read by
+  (`kura seadex sync [--full] --files-for-library LIBRARY`), `anilist-login` (the token is read by
   the host with `read -rs` and piped to `docker run -i ... kura anilist login --token-stdin`;
   never argv or `-e`), `anilist-url`, `anilist-whoami [--check]`, `anilist-list [--max-age-h 12]`,
-  `anilist-media` (`kura anilist media --library anime --missing`), `identify`
-  (`kura identity sync --library anime --max-lookups 60`) and `resolve` (5 s pacing is internal).
+  `anilist-media` (`kura anilist media --library LIBRARY --missing`), `identify`
+  (`kura identity sync --library LIBRARY --max-lookups 60`) and `resolve` (5 s pacing is internal).
 - state-only steps (network none, policy staged read-only): `audit`, `retain-check`
-  (`kura retain check --library anime --retain /policy/retain.txt`) and `plan [--skip-swarm]`,
+  (`kura retain check --library LIBRARY --retain /policy/retain.txt`) and `plan [--skip-swarm]`,
   which adds `--retain /policy/retain.txt` and refuses when the file is missing.
 
 Suggested nightly order: build, probe, seadex-sync (incremental daily, full weekly), anilist-list,

@@ -308,6 +308,32 @@ class Flags(Lab):
         self.seadex(A, [{"files": [[f"[{GROUP}] {SHOW} S01E01v2 [1080p].mkv", 1000]]}])
         self.assertIn("v2_known_upstream", self.codes())
 
+    def test_superseded_without_a_season_pairs_with_a_season_tagged_file(self):
+        self.title(files=[(ep(5), 1), (f"[{GROUP}] {SHOW} S01E05v2 [1080p].mkv", 1)])
+        self.assertIn("superseded_version_present", self.codes())
+
+    def test_audio_sidecars_are_not_episodes(self):
+        self.title(files=[(ep(1), 250 * MB), (ep(2), 250 * MB), (f"[{GROUP}] {SHOW} - 01.mka", 5 * MB),
+                          (f"[{GROUP}] {SHOW} - 02.mka", 5 * MB)])
+        d = self.doc()
+        self.assertEqual((d["files"]["video"], d["files"]["per_episode_mb"]["median"]), (2, 250.0))
+
+    def test_absent_titles_and_superseded_links_are_ignored(self):
+        self.eps(2)
+        self.identify()
+        self.seadex(A, [{"group": GROUP}])
+        torrent_hash = self.db.execute("SELECT infohash FROM seadex_torrents").fetchone()[0]
+        self.title(files=[(ep(1, group=OTHER), 250 * MB), (ep(2, group=OTHER), 250 * MB)])
+        self.db.execute("INSERT INTO manifest_torrents VALUES (?, 'x', ?, 1, 16384, '[]', 0, '{}', NULL, NULL,"
+                        " ?, 'test', 1.0, 1.0)", (torrent_hash, GROUP, "0" * 64))
+        self.db.execute("INSERT INTO manifest_links VALUES (?,?,'superseded','{}')", (self.ids[KEY], torrent_hash))
+        self.db.commit()
+        self.assertEqual(self.doc()["seadex"]["held_matches"], "none")
+        self.db.execute("UPDATE library_titles SET blocked='[\"absent_from_scan\"]'")
+        self.db.commit()
+        report = self.audit()
+        self.assertEqual((report["counts"]["titles"], report["titles"]), (0, []))
+
     def test_invalid_probe_row_is_not_a_probe(self):
         self.eps(1)
         self.probe(ep(1), {**result(), "status": "invalid", "video": None, "encoder": None})
