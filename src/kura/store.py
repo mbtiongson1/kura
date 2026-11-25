@@ -25,7 +25,7 @@ def validate_prefs(p: Preferences) -> Preferences:
     return p
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Each migration is idempotent DDL (IF NOT EXISTS) so a concurrent opener that
 # queued behind the writer re-runs it harmlessly; the version bump is guarded.
@@ -63,6 +63,79 @@ MIGRATIONS = {
         CREATE TABLE IF NOT EXISTS quarantine_plans (
             plan_hash TEXT PRIMARY KEY, created_at REAL NOT NULL, plan TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'proposed');
+    """,
+    # Library quality foundation (wave 0): shared limiter, SeaDex/AniList caches,
+    # title identities, probe cache, audit reports. Policy files and the AniList
+    # token are files, never rows.
+    3: """
+        CREATE TABLE IF NOT EXISTS rate_limits (
+          service TEXT PRIMARY KEY CHECK(length(service) BETWEEN 1 AND 32),   -- 'anilist','nyaa','seadex'
+          next_ok REAL NOT NULL DEFAULT 0,          -- wall-clock epoch: earliest start of the next request
+          interval REAL NOT NULL,                   -- seconds between request starts
+          penalty_until REAL NOT NULL DEFAULT 0,    -- from 429 Retry-After / X-RateLimit-Reset
+          observed_limit INTEGER, remaining INTEGER, reset_at REAL,
+          updated_at REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS sync_state (
+          source TEXT PRIMARY KEY,                  -- 'seadex', 'anilist:list:<user_id>', 'anilist:favourites:<user_id>'
+          cursor TEXT, last_attempt REAL, last_ok REAL, last_full_ok REAL,
+          status TEXT NOT NULL DEFAULT 'never', detail TEXT NOT NULL DEFAULT '{}');
+        CREATE TABLE IF NOT EXISTS seadex_entries (
+          id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 32),
+          anilist_id INTEGER NOT NULL CHECK(anilist_id > 0),
+          incomplete INTEGER NOT NULL CHECK(incomplete IN (0,1)),
+          notes TEXT NOT NULL DEFAULT '', theoretical_best TEXT NOT NULL DEFAULT '',
+          comparison TEXT NOT NULL DEFAULT '[]',    -- JSON list of https URLs (bounded)
+          updated TEXT NOT NULL, synced_at REAL NOT NULL);
+        CREATE INDEX IF NOT EXISTS seadex_entries_anilist ON seadex_entries(anilist_id);
+        CREATE TABLE IF NOT EXISTS seadex_torrents (
+          id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 32),
+          infohash TEXT CHECK(infohash IS NULL OR length(infohash)=40),   -- NULL unless 40-hex
+          release_group TEXT, tracker TEXT NOT NULL,                       -- tracker value is data, verbatim, bounded
+          public INTEGER NOT NULL CHECK(public IN (0,1)),                  -- see C: Nyaa view URL + 40-hex only
+          nyaa_id INTEGER, is_best INTEGER NOT NULL CHECK(is_best IN (0,1)),
+          dual_audio INTEGER NOT NULL CHECK(dual_audio IN (0,1)), tags TEXT NOT NULL DEFAULT '[]',
+          files TEXT, total_bytes INTEGER, video_files INTEGER, median_video_bytes INTEGER, files_fetched_at REAL,
+          updated TEXT NOT NULL, synced_at REAL NOT NULL);
+        CREATE INDEX IF NOT EXISTS seadex_torrents_infohash ON seadex_torrents(infohash);
+        CREATE TABLE IF NOT EXISTS seadex_entry_torrents (
+          entry_id TEXT NOT NULL, torrent_id TEXT NOT NULL, PRIMARY KEY(entry_id, torrent_id));
+        CREATE TABLE IF NOT EXISTS anilist_users (
+          user_id INTEGER PRIMARY KEY CHECK(user_id > 0), name TEXT NOT NULL,
+          is_viewer INTEGER NOT NULL DEFAULT 0 CHECK(is_viewer IN (0,1)), score_format TEXT,
+          list_fetched_at REAL, favourites_fetched_at REAL, updated_at REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS anilist_media (
+          anilist_id INTEGER PRIMARY KEY CHECK(anilist_id > 0),
+          title_romaji TEXT, title_english TEXT, title_native TEXT, synonyms TEXT NOT NULL DEFAULT '[]',
+          format TEXT, episodes INTEGER, duration INTEGER, status TEXT, season TEXT, season_year INTEGER,
+          average_score INTEGER, popularity INTEGER, favourites INTEGER, is_adult INTEGER,
+          next_airing_episode INTEGER, next_airing_at INTEGER, fetched_at REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS anilist_list_entries (
+          user_id INTEGER NOT NULL, anilist_id INTEGER NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('CURRENT','PLANNING','COMPLETED','DROPPED','PAUSED','REPEATING')),
+          score REAL CHECK(score IS NULL OR (score > 0 AND score <= 10)),   -- POINT_10_DECIMAL; 0 => NULL
+          progress INTEGER, repeat INTEGER, updated_at INTEGER, fetched_at REAL NOT NULL,
+          PRIMARY KEY(user_id, anilist_id));
+        CREATE TABLE IF NOT EXISTS anilist_favourites (
+          user_id INTEGER NOT NULL, anilist_id INTEGER NOT NULL, position INTEGER, fetched_at REAL NOT NULL,
+          PRIMARY KEY(user_id, anilist_id));
+        CREATE TABLE IF NOT EXISTS title_identities (
+          library TEXT NOT NULL, title TEXT NOT NULL,                 -- title key "<root label>/<entry>"
+          anilist_id INTEGER CHECK(anilist_id IS NULL OR anilist_id > 0),
+          status TEXT NOT NULL CHECK(status IN ('resolved','pinned','ambiguous','unresolved','unavailable','not_anime')),
+          source TEXT NOT NULL CHECK(source IN ('list','alias','owner')),
+          query TEXT, matched TEXT, candidates TEXT NOT NULL DEFAULT '[]',   -- JSON list of candidate AniList IDs
+          updated_at REAL NOT NULL, PRIMARY KEY(library, title),
+          CHECK((status IN ('resolved','pinned')) = (anilist_id IS NOT NULL)));
+        CREATE TABLE IF NOT EXISTS probe_results (
+          title_id INTEGER NOT NULL, rel_path TEXT NOT NULL,          -- same keys as library_files
+          size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL,           -- cache validity (dev/ino deliberately excluded)
+          probe_version INTEGER NOT NULL, status TEXT NOT NULL,       -- ok|partial|unsupported_container|invalid|unsafe|changed|io_error
+          result TEXT NOT NULL, bytes_read INTEGER NOT NULL, probed_at REAL NOT NULL,
+          PRIMARY KEY(title_id, rel_path));
+        CREATE TABLE IF NOT EXISTS audit_reports (
+          id INTEGER PRIMARY KEY, library TEXT NOT NULL, created_at REAL NOT NULL,
+          report_sha256 TEXT NOT NULL CHECK(length(report_sha256)=64), report TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS audit_reports_library ON audit_reports(library, created_at);
     """,
 }
 

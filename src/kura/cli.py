@@ -7,13 +7,18 @@ import signal
 import sqlite3
 import sys
 
-from . import cli_handover
+from . import cli_anilist, cli_audit, cli_handover, cli_identity, cli_probe, cli_seadex
 from .core import Core
 from .anilist import AniList
 from .models import KuraError
 from .provider import Nyaa
+from .ratelimit import SharedLimiter
 from .safety import private_root
 from .store import Store
+
+# Every module exposes register(sub, parser_class) and dispatch(args, open_store) ->
+# (handled, data). Order matters only for the registered command names, which must not collide.
+COMMAND_MODULES = (cli_handover, cli_anilist, cli_seadex, cli_probe, cli_identity, cli_audit)
 
 
 class Parser(argparse.ArgumentParser):
@@ -60,7 +65,8 @@ def parser():
     q = prefs.add_parser("set")
     q.add_argument("--json", action="store_true")
     options(q)
-    cli_handover.register(sub, Parser)
+    for module in COMMAND_MODULES:
+        module.register(sub, Parser)
     return p
 
 
@@ -73,12 +79,18 @@ def confirm(plan):
 
 
 def execute(args):
-    handled, data = cli_handover.dispatch(args, lambda: Store(private_root()))
-    if handled:
-        return data
+    def open_store():
+        return Store(private_root())
+
+    for module in COMMAND_MODULES:
+        handled, data = module.dispatch(args, open_store)
+        if handled:
+            return data
     store = Store(private_root())
     try:
-        core = Core(store, Nyaa(), None if getattr(args, "no_alias", False) else AniList())
+        aliases = None if getattr(args, "no_alias", False) else AniList(
+            limiter=SharedLimiter(store.root, "anilist", interval=2.0))
+        core = Core(store, Nyaa(), aliases)
         overrides = {key: getattr(args, key) for key in asdict(store.prefs())
                      if getattr(args, key, None) is not None}
         if "groups" in overrides:

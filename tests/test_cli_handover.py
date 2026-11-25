@@ -168,7 +168,9 @@ class Stateful(unittest.TestCase):
         self.assertEqual((code, out["data"]["anilist"]["enabled"]), (0, False))
         resolver.assert_not_called()
         code, out = self.cli(*self.build_args, resolver=resolver)
-        resolver.assert_called_once_with()
+        resolver.assert_called_once()      # wired to the shared limiter, nothing else
+        self.assertEqual(list(resolver.call_args.kwargs), ["limiter"])
+        self.assertEqual((resolver.call_args.kwargs["limiter"].service, resolver.call_args.args), ("anilist", ()))
         self.assertEqual((code, out["data"]["anilist"]["enabled"], out["data"]["anilist"]["unresolved"]),
                          (0, True, 2))
 
