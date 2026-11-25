@@ -175,7 +175,7 @@ class Penalty(Base):
 
     def test_bad_arguments(self):
         for kw in ({"interval": 0}, {"interval": -1}, {"interval": float("inf")},
-                   {"interval": 1, "max_penalty": 0}):
+                   {"interval": 1, "max_penalty": 0}, {"interval": 7200}):
             with self.assertRaises(KuraError):
                 SharedLimiter(self.root, "anilist", **kw)
         for service in ("", "x" * 33, "bad\nname", "café"):

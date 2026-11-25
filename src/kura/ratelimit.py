@@ -38,7 +38,8 @@ class SharedLimiter:
         if (not isinstance(service, str) or not 1 <= len(service) <= SERVICE_MAX or
                 not service.isascii() or not service.isprintable()):
             raise KuraError("invalid_argument", "Invalid rate-limit service name")
-        if not interval > 0 or not max_penalty > 0 or interval == float("inf") or max_penalty == float("inf"):
+        if (not interval > 0 or not max_penalty > 0 or interval == float("inf") or
+                max_penalty == float("inf") or interval > max_penalty):    # clamping must never shorten a real interval
             raise KuraError("invalid_argument", "Invalid rate-limit parameters")
         self.path = Path(store_root) / "state.sqlite3"
         self.service, self.interval, self.max_penalty = service, float(interval), float(max_penalty)
