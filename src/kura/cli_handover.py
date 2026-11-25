@@ -67,7 +67,8 @@ def register(sub, parser_class):
     q = leaf(manifest_, "prune")
     q.add_argument("--library", required=True)
     q.add_argument("--older-than-days", type=float, metavar="N",
-                   help="Only titles absent (or last seen) at least N days ago; default all")
+                   help="Only titles absent (or last seen) at least N days ago. Default: every absent-marked "
+                        "title; vanished titles are pruned only when this is given")
     approval = q.add_mutually_exclusive_group()
     approval.add_argument("--dry-run", action="store_true",
                           help="Count what would be deleted (the default without --yes)")

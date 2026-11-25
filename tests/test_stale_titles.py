@@ -265,7 +265,7 @@ class Prune(Base):
         torrents = snapshot(self.lab.torrents)
         out = manifest.prune(self.lab.store, "home", dry_run=False)
         self.assertEqual(out["deleted"], {"titles": 2, "files": 4, "links": 2, "verifications": 2,
-                                          "probe_results": 0, "marks": 2})
+                                          "probe_results": 0, "marks": 2, "identities": 0})
         after = self.counts()
         self.assertEqual((after["library_titles"], after["library_files"], after["manifest_links"],
                           after["verifications"], after["library_absent"]), (2, 4, 2, 2, 0))
@@ -318,7 +318,8 @@ class Prune(Base):
         self.assertEqual(keyed, {"library_files", "manifest_links", "verifications", "probe_results",
                                  "library_absent"})
         deleted = manifest.prune(self.lab.store, "home")["would_delete"]
-        self.assertEqual(set(deleted), {"titles", "files", "links", "verifications", "probe_results", "marks"})
+        self.assertEqual(set(deleted), {"titles", "files", "links", "verifications", "probe_results", "marks",
+                                  "identities"})
 
     def test_pruned_titles_identities_stay_out_of_media_and_seadex_ids(self):
         from kura import anilist_list
@@ -334,6 +335,44 @@ class Prune(Base):
             manifest.prune(self.lab.store, "home", dry_run=False)
 
     absent_key = "disk1/Kura Sample Series"
+
+    def test_a_fully_pruned_library_leaks_no_identities(self):
+        from kura import anilist_list
+        from kura.sources import seadex
+        self.build("anime")
+        self.db.executemany(
+            "INSERT INTO title_identities(library, title, anilist_id, status, source, updated_at)"
+            " VALUES ('home', ?, ?, 'resolved', 'list', 1.0)",
+            [("disk1/Kura Sample Series", 999000002), ("anime/Kura Extra Show", 999000003)])
+        self.db.commit()
+        self.db.execute("INSERT OR REPLACE INTO library_absent SELECT id, 1.0 FROM library_titles")   # none is present
+        self.db.commit()
+        out = manifest.prune(self.lab.store, "home", dry_run=False)
+        self.assertEqual(self.counts()["library_titles"], 0)
+        self.assertEqual(out["deleted"]["identities"], 2)
+        self.assertEqual(anilist_list.media_ids(self.db, [], "home", False), [])
+        self.assertEqual(seadex.library_ids(self.lab.store, "home"), [])
+
+    def test_titles_linked_to_a_protected_torrent_are_kept(self):
+        victim = next(t for t in self.repo.titles("home", include_absent=True) if t["rel_path"].startswith("disk1/"))
+        infohash = self.repo.links(victim["id"])[0]["infohash"]
+        row = self.repo.torrent(infohash)
+        self.repo.upsert_torrent({**row, "info": None, "magnet": None,
+                                  "protection": {**row["protection"], "protected": True}})
+        out = manifest.prune(self.lab.store, "home", dry_run=False)
+        self.assertEqual((out["kept_protected"], out["deleted"]["titles"]), (1, 1))
+        self.assertEqual(self.repo.links(victim["id"])[0]["infohash"], infohash)    # the evidence stays
+        self.assertEqual(len(self.repo.titles("home", include_absent=True)), 3)
+
+    def test_prune_dry_run_does_not_take_a_write_transaction(self):
+        other = sqlite3.connect(self.lab.state / "state.sqlite3", timeout=0.1)
+        other.execute("BEGIN IMMEDIATE")
+        try:
+            out = manifest.prune(self.lab.store, "home")
+        finally:
+            other.rollback()
+            other.close()
+        self.assertTrue(out["dry_run"])
 
     def test_other_libraries_are_untouched(self):
         row = next(iter(self.repo.titles("home")))

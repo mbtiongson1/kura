@@ -235,25 +235,38 @@ class ManifestRepo:
                 out.append({"id": r[0], "rel_path": r[1], "state": state})
         return out
 
-    def prune_titles(self, title_ids: list[int], dry_run: bool = True) -> dict[str, int]:
-        """Delete these titles with their files, links, verifications, probe results and
-        absent marks, from Kura's own state only. Returns the row counts (what was deleted,
-        or with `dry_run` what would be). Torrent rows are shared and never deleted."""
-        ids = list(dict.fromkeys(title_ids))
-        tables = (("titles", "library_titles", "id"), ("files", "library_files", "title_id"),
-                  ("links", "manifest_links", "title_id"), ("verifications", "verifications", "title_id"),
-                  ("probe_results", "probe_results", "title_id"), ("marks", "library_absent", "title_id"))
-        counts = {name: 0 for name, _, _ in tables}
-        with self._tx() as db:
-            for start in range(0, len(ids), 500):
-                chunk = ids[start:start + 500]
-                marks = ",".join("?" * len(chunk))
-                for name, table, column in tables:
-                    where = f" WHERE {column} IN ({marks})"
+    def prune_titles(self, library: str, titles: list[dict], dry_run: bool = True) -> dict[str, int]:
+        """Delete these titles (dicts with id and rel_path, all of `library`) with their files,
+        links, verifications, probe results, absent marks and recorded identities, from Kura's
+        own state only. Returns the row counts (what was deleted, or with `dry_run` what would
+        be). Torrent rows are shared and never deleted. A dry run only reads."""
+        ids = list(dict.fromkeys(t["id"] for t in titles))
+        keys = list(dict.fromkeys(t["rel_path"] for t in titles))
+        plan = (("titles", "library_titles", "id", ids, ""),
+                ("files", "library_files", "title_id", ids, ""),
+                ("links", "manifest_links", "title_id", ids, ""),
+                ("verifications", "verifications", "title_id", ids, ""),
+                ("probe_results", "probe_results", "title_id", ids, ""),
+                ("marks", "library_absent", "title_id", ids, ""),
+                ("identities", "title_identities", "title", keys, " AND library=?"))
+        counts = {name: 0 for name, *_ in plan}
+
+        def run(db):
+            for name, table, column, values, extra in plan:
+                for start in range(0, len(values), 500):
+                    chunk = values[start:start + 500]
+                    where = f" WHERE {column} IN ({','.join('?' * len(chunk))}){extra}"
+                    args = [*chunk, *([library] if extra else [])]
                     if dry_run:
-                        counts[name] += db.execute(f"SELECT COUNT(*) FROM {table}{where}", chunk).fetchone()[0]
+                        counts[name] += db.execute(f"SELECT COUNT(*) FROM {table}{where}", args).fetchone()[0]
                     else:
-                        counts[name] += db.execute(f"DELETE FROM {table}{where}", chunk).rowcount
+                        counts[name] += db.execute(f"DELETE FROM {table}{where}", args).rowcount
+
+        if dry_run:
+            run(self.db)
+        else:
+            with self._tx() as db:
+                run(db)
         return counts
 
     def title_files(self, title_id: int) -> list[dict]:
