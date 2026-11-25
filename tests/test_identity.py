@@ -146,7 +146,7 @@ class OfflineMatch(Base):
         for name, season in (("Kura Pack S02", 2), ("Kura Pack Season 2", 2), ("Kura Pack 2nd Season", 2),
                              ("Kura Pack", None), ("[Kura] Kura Pack - S01 (BD 1080p)", 1),
                              ("Kura Pack (Season 2)", 2), ("Kura Pack [S02]", 2), ("Kura_Pack_S02", 2),
-                             ("[Kura] Kura Pack - 05 [S01E05].mkv", None)):
+                             ("[Kura] Kura Pack - 05 [S01E05].mkv", 1)):
             with self.subTest(name=name):
                 self.assertEqual(identity.folder_terms(f"main/{name}")[1:], (season, False))
 
@@ -514,6 +514,36 @@ class FileNames(Tree):
         out = self.sync(aliases=resolver, max_lookups=5, titles=["main/Misc Folder"])
         self.assertEqual((resolver.queries, out["pending"]), (["Misc Folder", "Misc Folder", "Show Six"], 0))
 
+    def test_conflicting_or_mixed_season_markers_prevent_the_fallback(self):
+        two, three = "[G] Show [Season 2] - 01.mkv", "[G] Show [Season 3] - 02.mkv"
+        for files in ([two, three], [two, "[G] Show - 02.mkv"],                        # conflict; marked + unmarked
+                      ["[G] Show (S2) - 01.mkv", "[G] Show (S3) - 02.mkv"],
+                      ["Show S02E01.mkv", "Show S03E02.mkv"], ["Show 2nd Season - 01.mkv", "Show - 02.mkv"],
+                      ["Season 1/Show - 01.mkv", "Season 2/Show - 01.mkv"],              # per-season folders
+                      ["Show S01E01.mkv", "Show [Season 2] - 02.mkv"],                  # one file contradicts itself
+                      ["Show [Season 1-2] - 01.mkv"], ["Show S00E01.mkv"]):
+            with self.subTest(files=files):
+                self.assertIsNone(identity.file_terms(files, "Other", None))
+        for files, wanted in ((["[G] Show [Season 2] - 01.mkv", "[G] Show [Season 2] - 02.mkv"], ("Show", 2)),
+                              (["[G] Show (S2) - 01.mkv", "[G] Show S02E02.mkv"], ("Show", 2)),
+                              (["Season 2/Show - 01.mkv", "Season 2/Show - 02.mkv"], ("Show", 2)),
+                              (["Show S01E01.mkv", "Show S01E02.mkv"], ("Show", 1))):
+            with self.subTest(files=files):
+                self.assertEqual(identity.file_terms(files, "Other", None), wanted)
+        self.assertIsNone(identity.file_terms(["Show [Season 2] - 01.mkv"], "Other", 3))   # folder says 3
+
+    def test_files_with_bracketed_conflicting_seasons_stay_unresolved(self):
+        tree = {"Odd Show": {"[G] Dead Mount Death Play [Season 2] - 01.mkv": None,
+                             "[G] Dead Mount Death Play [Season 3] - 02.mkv": None}}
+        for entry, content in tree.items():
+            for rel in content:
+                (self.lab.lib / entry).mkdir(exist_ok=True)
+                (self.lab.lib / entry / rel).write_bytes(b"x" * 100)
+        self.lab.build()
+        self.sync(aliases=None)
+        row = self.row("Odd Show")
+        self.assertEqual((row["status"], row["anilist_id"], row["query"]), ("unresolved", None, "Odd Show"))
+
     def test_file_terms_rules(self):
         self.assertEqual(identity.file_terms(["[G] Show - 01.mkv", "[G] Show - 02.mkv"], "Other", None), ("Show", None))
         self.assertIsNone(identity.file_terms(["[G] Show - 01.mkv", "[G] Show - 02.mkv"], "Show", None))   # adds nothing
@@ -548,12 +578,36 @@ class NonMedia(Tree):
     def test_loose_video_has_its_episode_stripped(self):
         key = "main/[ASW] Bocchi the Rock! - 04 [1080p HEVC][A7801AD7].mkv"
         self.assertEqual(identity.folder_terms(key), ("Bocchi the Rock", None, False))
-        self.assertEqual(identity.folder_terms("main/[G] Show - 05 [S01E05].mkv"), ("Show", None, False))
-        self.assertEqual(identity.folder_terms("main/Show S02E05.mkv")[1], None)       # nothing to strip without a marker
+        self.assertEqual(identity.folder_terms("main/[G] Show - 05 [S01E05].mkv"), ("Show", 1, False))
+        self.assertEqual(identity.folder_terms("main/Show S02E05.mkv")[1], 2)
         self.assertEqual(identity.folder_terms("main/Movie Name.mkv")[0], "Movie Name")
         self.sync(aliases=None)
         row = identity.load(self.store.db, "home")[key]
         self.assertEqual((row["status"], row["anilist_id"], row["query"]), ("resolved", A, "Bocchi the Rock"))
+
+    def test_loose_video_keeps_its_season(self):
+        for name, season, undecidable in (("Foo S02E01.mkv", 2, False), ("Foo S2 - 01.mkv", 2, False),
+                                          ("Foo 2nd Season - 01.mkv", 2, False), ("[G] Foo [Season 2] - 01.mkv", 2, False),
+                                          ("[G] Foo (S2) - 01.mkv", 2, False), ("Foo.S03E04.1080p.WEB.x265-Grp.mkv", 3, False),
+                                          ("Foo S01E01.mkv", 1, False), ("Foo - 01.mkv", None, False),
+                                          ("Foo S1-S2 - 01.mkv", None, True), ("Foo S02E01 [Season 3].mkv", None, True),
+                                          ("Foo S00E01.mkv", None, True)):
+            with self.subTest(name=name):
+                base, got, bad = identity.folder_terms(f"main/{name}")
+                self.assertEqual((base, bad), ("Foo", undecidable))
+                if not undecidable:
+                    self.assertEqual(got, season)
+
+    def test_a_loose_season_two_file_never_binds_to_the_season_one_entry(self):
+        rows = [{"id": A, "titles": ["Foo"]}]
+        for name in ("Foo S02E01.mkv", "Foo S2 - 01.mkv", "Foo 2nd Season - 01.mkv"):
+            base, season, _ = identity.folder_terms(f"main/{name}")
+            self.assertEqual(identity.match(rows, base, season)["status"], "unresolved", name)
+            both = rows + [{"id": B, "titles": ["Foo Season 2"]}]
+            self.assertEqual(identity.match(both, base, season)["anilist_id"], B, name)
+        base, season, _ = identity.folder_terms("main/Foo S01E01.mkv")      # season 1 refuses a later-season entry
+        self.assertEqual(identity.match([{"id": B, "titles": ["Foo Season 2"]}], base, season)["status"], "unresolved")
+        self.assertEqual(identity.match(rows, base, season)["anilist_id"], A)
 
     def test_sidecars_dotfiles_and_media_free_folders_are_not_titles(self):
         out = self.sync(aliases=None)

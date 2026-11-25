@@ -146,21 +146,34 @@ def folder_terms(key: str) -> tuple[str, int | None, bool]:
     # A loose video file: the episode marker is not part of the title.
     head = names.series(entry) if entry.lower().endswith(MEDIA_EXT) else None
     base = resolve.derive_terms(head or entry).base
-    # Markers inside brackets count too ("Title (Season 2)", "Title [S02]"): the title cleaner drops
-    # bracketed text, so look at the name with only the bracket characters removed as well.
-    plain = resolve._EXT.sub("", unicodedata.normalize("NFKC", entry.strip()))
-    texts = [resolve._PAIRS.sub(" ", resolve._flatten(resolve._EXT.sub("", entry.strip()))),
-             re.sub(r"[\[\](){}_]", " ", plain)]
+    season, undecidable = season_markers([entry], episode_marker=head is not None)
+    return base, season, undecidable
+
+
+def season_markers(texts: list[str], *, episode_marker: bool = False) -> tuple[int | None, bool]:
+    """``(season, undecidable)`` from the season markers in ``texts`` (a name, or the parts of a path).
+
+    Markers inside brackets count too ("Title (Season 2)", "Title [S02]"): the title cleaner drops
+    bracketed text, so the name is also read with only the bracket characters removed.
+    ``episode_marker`` also reads the season of an ``SxxEyy`` marker in a release file name.
+    Undecidable: a range, several different seasons, or season 0."""
     numbers, ranged = set(), False
-    for text in texts:
-        for pattern in resolve._SEASONS:
-            for found in pattern.finditer(text):
-                numbers.add(int(found.group(1)))
-                if pattern.groups > 1 and found.group(2):
-                    ranged = True
-        ranged = ranged or bool(_RANGE.search(text))
+    for entry in texts:
+        plain = resolve._EXT.sub("", unicodedata.normalize("NFKC", entry.strip()))
+        for text in (resolve._PAIRS.sub(" ", resolve._flatten(resolve._EXT.sub("", entry.strip()))),
+                     re.sub(r"[\[\](){}_]", " ", plain)):
+            if episode_marker:      # "Show S2 - 05" is season 2, episode 5, not the range S2-05
+                text = names.DASH_EPISODE.sub(" ", text)
+            for pattern in resolve._SEASONS:
+                for found in pattern.finditer(text):
+                    numbers.add(int(found.group(1)))
+                    if pattern.groups > 1 and found.group(2):
+                        ranged = True
+            ranged = ranged or bool(_RANGE.search(text))
+        if episode_marker and (marked := names.parse(entry)["season"]) is not None:
+            numbers.add(marked)
     season = next(iter(numbers)) if len(numbers) == 1 else None
-    return base, season, ranged or len(numbers) > 1 or season == 0
+    return season, ranged or len(numbers) > 1 or season == 0
 
 
 def carries_season(title: str, season: int) -> bool:
@@ -454,15 +467,17 @@ def file_terms(files: list[str], folder_base: str, folder_season: int | None):
     for path in files:
         if not path.lower().endswith(MEDIA_EXT):
             continue
-        parsed = names.parse(path)
-        if parsed["extra"]:
+        if names.parse(path)["extra"]:
             continue
         head = names.series(path)
         if head is None:
             return None
-        base, season = resolve._name(head)
-        season = season if season is not None else parsed["season"]
-        if not norm_words(base):
+        # Season markers are read from the whole relative path before the title is cleaned: the
+        # cleaner drops bracketed text, so "Show [Season 2] - 01" and "Show [Season 3] - 02"
+        # would both look like plain "Show".
+        season, undecidable = season_markers(path.split("/"), episode_marker=True)
+        base = resolve._name(head)[0]
+        if undecidable or not norm_words(base):
             return None
         found.setdefault((norm_words(base).replace(" ", ""), season), base)
     if len(found) != 1:

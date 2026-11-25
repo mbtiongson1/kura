@@ -26,10 +26,11 @@ _TAGLIKE = re.compile(
     r"hi10p?|10-?bits?|8-?bits?|bd|bdrip|blu-?ray|remux|web|webrip|web-?dl|dl|rip|tv|hdtv|dvd|"
     r"multi-?subs?|ddp?\d?|truehd|atmos|h|ray|audio|subs?|batch|[0-9a-f]{8})", re.I)
 _VER = r"(?:v(\d{1,2}))?"
+DASH_EPISODE = re.compile(r"\s-\s(\d{1,3})" + _VER + r"(?![0-9A-Za-z]|-[0-9])")    # "Show - 05"
 _EPISODES = (
     re.compile(r"(?<![A-Za-z0-9])S\d{1,2}E(\d{1,4})" + _VER + r"(?![A-Za-z0-9])", re.I),
     re.compile(r"(?<![A-Za-z0-9])EP?\.?\s?(\d{1,4})" + _VER + r"(?![A-Za-z0-9])", re.I),
-    re.compile(r"\s-\s(\d{1,3})" + _VER + r"(?![0-9A-Za-z]|-[0-9])"),
+    DASH_EPISODE,
     re.compile(r"(?<![A-Za-z0-9.#])#?(\d{2,3})v(\d{1,2})(?![A-Za-z0-9])", re.I),
     re.compile(r"#(\d{1,4})" + _VER + r"(?![A-Za-z0-9])"),
 )
