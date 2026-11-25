@@ -164,9 +164,9 @@ def _digits(value):
 
 
 def _product(app):
-    """The muxer's name without its version: 'mkvmerge v81.0 (...)' -> 'mkvmerge'."""
-    words = (app or "").lower().split()
-    return words[0] if words else None
+    """The muxer's name without its version: 'mkvmerge v81.0 (...)' -> 'mkvmerge', 'Lavf59.2' -> 'lavf'."""
+    m = re.match(r"[a-z][a-z_]*", (app or "").strip().lower())
+    return m[0] if m else None
 
 
 def _clock(value):
@@ -870,26 +870,28 @@ class _Probe:
     def video_bitrate(self, tags, duration):
         """(kbps, source) for the video track; a stale BPS tag is replaced by a size-based estimate."""
         total = None
-        if duration and duration > 0 and self.size > 0 and not self.rd.short:
+        if duration and duration > 0 and self.size > 0:
             total = self.size * 8 / duration / 1000
+        # The size test needs the real file and a segment duration (a DURATION tag may itself be copied).
+        verifiable = total is not None and not self.rd.short and self.info.get("duration_s") is not None
         bps = _digits(tags.get("BPS"))
-        if bps and total is None:
+        if bps and not verifiable:
             self.warn("bitrate_unverified")        # cannot be checked against the file: kept, flagged
             return round(bps / 1000), "tags"
         if bps and not self.tag_stale(tags, total):
             return round(bps / 1000), "tags"
         if total is None:
             return None, None
-        if bps:
-            self.warn("stale_statistics_tags")
         audio = 0.0
-        for t in self.tracks:
-            if t.get("type") != 2:
-                continue
-            at = self.tags.get(t.get("uid"), {}) if t.get("uid") is not None else {}
-            abps = _digits(at.get("BPS"))
-            if abps and not self.tag_stale(at, total):
-                audio += abps / 1000
+        if bps:                                    # a stale tag: the estimate also sheds the audio
+            self.warn("stale_statistics_tags")
+            for t in self.tracks:
+                if t.get("type") != 2:
+                    continue
+                at = self.tags.get(t.get("uid"), {}) if t.get("uid") is not None else {}
+                abps = _digits(at.get("BPS"))
+                if abps and not self.tag_stale(at, total):
+                    audio += abps / 1000
         estimate = total - audio if 0 < total - audio else total
         return round(estimate), "size_over_duration"
 

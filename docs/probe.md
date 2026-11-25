@@ -73,15 +73,16 @@ stream, so the tag is trusted only when it is plausible. With the file size and 
 `total_kbps = size x 8 / duration`. The tag is **stale** when any of these hold:
 
 - it exceeds `total_kbps x 1.02` (the primary test: the video cannot outrun the whole file);
-- the track's `_STATISTICS_WRITING_APP` names a different product (first word, case-insensitive,
-  version ignored) than both the segment's `writing_app` and `muxing_app`;
+- the track's `_STATISTICS_WRITING_APP` names a different product (leading letters, case-insensitive,
+  version ignored: `Lavf59.2` is `lavf`) than both the segment's `writing_app` and `muxing_app`;
 - the track's `DURATION` tag differs from the segment duration by more than 2% (both must exist).
 
 A stale tag is replaced: `bitrate_kbps` is `total_kbps` minus the `BPS` of every audio track whose own
 tags pass the same tests, else `total_kbps` itself, with `bitrate_source: "size_over_duration"` and the
 warning `stale_statistics_tags`. Attachments and subtitles stay inside the estimate, so it is a slight
-over-estimate. A plain `size_over_duration` (no usable video tag) is whole file over duration. When the
-file size or duration is unknown, or the file was cut short, the tag cannot be checked: it is kept
+over-estimate. A plain `size_over_duration` (no video tag) is the whole file over the duration, audio included, with no subtraction. When the
+file size or segment duration is unknown (a duration taken from a track tag does not count), or the
+file was cut short, the tag cannot be checked: it is kept
 (`bitrate_source: "tags"`) and the result carries `bitrate_unverified`. With no tag and no duration the
 bitrate is null.
 
@@ -94,7 +95,7 @@ Warnings: `truncated`, `budget_exhausted`, `element_limit`, `depth_limit`, `inva
 `laced_block_skipped`, `content_encoded_video`, `multiple_video_tracks`, `frame_prefix_only`,
 `attachments_truncated`, `tracks_truncated`, `chapters_truncated`, `tags_truncated`,
 `seekhead_truncated`, `info_truncated`, `too_short`, `invalid_ebml_header`, `no_segment`,
-`internal_error` (a bug; never expected).
+`stale_statistics_tags`, `bitrate_unverified`, `internal_error` (a bug; never expected).
 
 ## Library runs
 

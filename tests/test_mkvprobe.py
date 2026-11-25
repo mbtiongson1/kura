@@ -353,6 +353,24 @@ class Facts(unittest.TestCase):
         self.assertIn("bitrate_unverified", result["warnings"])
         self.assertNotIn("stale_statistics_tags", result["warnings"])
 
+    def test_a_version_glued_to_the_writer_name_is_ignored(self):
+        extra = {"_STATISTICS_WRITING_APP-eng": "Kura59.27.100"}
+        same, _ = run(self.tagged(1_500_000, extra=extra))
+        self.assertEqual(same["video"]["bitrate_source"], "tags")           # 'Kura Writer 1.0' and 'Kura59...' are both kura
+
+    def test_audio_is_only_taken_off_a_stale_estimate(self):
+        data = mkvgen.build(tag_values={2000: {"BPS": "192000"}}, attach=[("a.ttf", "font/ttf", 2 * MIB)],
+                            duration=8.0)
+        result, _ = run(data)
+        self.assertEqual(result["video"]["bitrate_kbps"], round(self.total_kbps(data)))
+
+    def test_a_duration_from_a_track_tag_leaves_the_bps_tag_unverified(self):
+        data = self.tagged(8_000_000, duration=None, default_duration=0,
+                           extra={"DURATION-eng": "00:00:08.000000000"})
+        result, _ = run(data)
+        self.assertEqual(result["video"]["bitrate_source"], "tags")
+        self.assertIn("bitrate_unverified", result["warnings"])
+
     def test_no_tag_and_no_duration_means_no_bitrate_and_no_warning(self):
         result, _ = run(mkvgen.build(duration=None, default_duration=0))
         self.assertIsNone(result["video"]["bitrate_kbps"])
