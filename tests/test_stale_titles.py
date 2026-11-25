@@ -113,6 +113,9 @@ class Marking(Base):
     def test_a_budget_spent_mid_verification_still_marks(self):
         self.build("disk1", "disk2")
         out = self.build("anime", reverify=True, max_read_bytes=100)
+        verdicts = {r[0] for r in self.db.execute(
+            "SELECT verdict FROM verifications ORDER BY id DESC LIMIT 1")}
+        self.assertEqual(verdicts, {"budget_exhausted"})     # the case really is a mid-verification cut
         self.assertEqual((out["absent"]["complete"], out["absent"]["marked"]), (True, 2))
 
     def test_a_stop_requested_after_the_last_step_marks_nothing(self):
