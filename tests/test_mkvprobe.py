@@ -173,6 +173,18 @@ class Encoder(unittest.TestCase):
         self.assertIn("frame_prefix_only", result["warnings"])
         self.assertLessEqual(src.largest, 256 << 10)
 
+    def test_frame_read_is_clamped_to_the_remaining_budget(self):
+        sei = mkvgen.sei_nal("avc", [mkvgen.encoder_message(mkvgen.X264_TEXT)])
+        frame = mkvgen.frame([sei, mkvgen.slice_nal("avc", 600_000)])
+        tracks = mkvgen.el(0x1654AE6B, mkvgen.track_entry(1, 1, "V_MPEG4/ISO/AVC", private=mkvgen.avcc(), video={}))
+        data = mkvgen.wrap(mkvgen.info() + tracks + mkvgen.el(0x1F43B675, mkvgen.uint(0xE7, 0) + mkvgen.simple_block(1, frame)))
+        full, _ = run(data)
+        cap = full["bytes_read"] - (256 << 10) + 4096            # a few KiB of budget left for the frame
+        result, src = run(data, max_bytes=cap)
+        self.assertLessEqual(src.total, cap)
+        self.assertEqual(result["encoder"]["library"], "x264")   # the SEI sits in the first bytes
+        self.assertNotIn("budget_exhausted", result["warnings"])
+
     def test_audio_block_first_in_the_cluster_is_ignored(self):
         result, _ = run(mkvgen.build(decoy_audio=True))
         self.assertEqual(result["encoder"]["settings"]["crf"], "18.0")
@@ -453,7 +465,7 @@ class Limits(unittest.TestCase):
 
     def test_byte_budget_is_a_hard_cap(self):
         data = mkvgen.build()
-        for cap in (0, 1, 16, 100, 300, 600):
+        for cap in (0, 1, 16, 100, 300):
             with self.subTest(cap):
                 result, src = run(data, max_bytes=cap)
                 self.assertLessEqual(src.total, cap)

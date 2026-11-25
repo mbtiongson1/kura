@@ -73,7 +73,9 @@ Status meaning: `ok` complete; `partial` truncated file, budget or limit reached
 Warnings: `truncated`, `budget_exhausted`, `element_limit`, `depth_limit`, `invalid_element`,
 `unknown_size_element`, `bad_seek`, `no_tracks`, `no_video_block`, `no_encoder_settings`,
 `laced_block_skipped`, `content_encoded_video`, `multiple_video_tracks`, `frame_prefix_only`,
-`attachments_truncated`, `tracks_truncated`, `chapters_truncated`, `tags_truncated`.
+`attachments_truncated`, `tracks_truncated`, `chapters_truncated`, `tags_truncated`,
+`seekhead_truncated`, `info_truncated`, `too_short`, `invalid_ebml_header`, `no_segment`,
+`internal_error` (a bug; never expected).
 
 ## Library runs
 

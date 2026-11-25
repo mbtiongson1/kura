@@ -799,7 +799,7 @@ class _Probe:
                     break
         # Only the leading bytes of each block are read to learn its track; the body of the
         # first usable video block is read up to CLUSTER_CAP (SEI precedes the slice data).
-        frame = None
+        frame, clamped = None, False
         for start, stop in self.block_spans(body, self.seg_end if bend is None else bend):
             lead = self.rd.read(start, min(stop - start, 12))
             track = _vint(lead, 0)
@@ -809,8 +809,10 @@ class _Probe:
                 self.warn("laced_block_skipped")
                 continue
             first = start + track[1] + 3
-            frame = self.rd.read(first, min(stop - first, CLUSTER_CAP))
-            if stop - first > CLUSTER_CAP:
+            want = min(stop - first, CLUSTER_CAP, max(self.rd.max - self.rd.asked, 0))
+            clamped = want < min(stop - first, CLUSTER_CAP)
+            frame = self.rd.read(first, want)
+            if stop - first > want and not clamped:
                 self.warn("frame_prefix_only")           # normal for a large keyframe, not damage
             break
         if self.encoder is None and frame is not None:
@@ -823,6 +825,9 @@ class _Probe:
             self.warn("no_video_block")
         if self.encoder is None:
             self.warn("no_encoder_settings")
+            if clamped:                                  # the budget, not the file, ended the search
+                self.warn("budget_exhausted", partial=True)
+                self.cut = True
 
     def set_encoder(self, found, where):
         library, raw = found
@@ -865,7 +870,7 @@ class _Probe:
     def tag_duration(self):
         for t in self.tracks:
             value = self.tags.get(t.get("uid"), {}).get("DURATION")
-            m = re.fullmatch(r"(\d+):(\d{1,2}):(\d{1,2}(?:\.\d+)?)", value or "")
+            m = re.fullmatch(r"([0-9]+):([0-9]{1,2}):([0-9]{1,2}(?:\.[0-9]+)?)", value or "", re.ASCII)
             if m:
                 return round(int(m[1]) * 3600 + int(m[2]) * 60 + float(m[3]), 3)
         return None
@@ -928,4 +933,12 @@ def probe(read, size, *, max_bytes=2 << 20):
     except (ArithmeticError, ValueError, IndexError, KeyError, TypeError, AttributeError,
             struct.error, UnicodeError, RecursionError):
         p.warn("internal_error", partial=True)
-    return p.result()
+    try:
+        return p.result()
+    except (ArithmeticError, ValueError, IndexError, KeyError, TypeError, AttributeError,
+            struct.error, UnicodeError, RecursionError):
+        return {"schema": SCHEMA, "status": "invalid", "container": p.container, "bytes_read": p.rd.used,
+                "duration_s": None, "muxing_app": None, "writing_app": None, "video": None,
+                "encoder": None, "audio": [], "subtitles": [],
+                "attachments": {"count": 0, "fonts": 0, "bytes": 0, "names": []},
+                "chapters": {"present": False, "count": 0}, "warnings": ["internal_error"]}

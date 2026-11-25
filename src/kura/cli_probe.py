@@ -40,8 +40,8 @@ def _roots(values):
     roots = {}
     for value in values:
         label, sep, path = value.partition("=")
-        if not sep or not label or not path:
-            raise KuraError("invalid_arguments", "--root expects LABEL=PATH")
+        if not sep or not label.strip() or "/" in label or not path:
+            raise KuraError("invalid_arguments", "--root expects LABEL=PATH (a label has no '/')")
         if label in roots:
             raise KuraError("invalid_arguments", "Duplicate root label", label=label)
         roots[label] = Path(os.path.abspath(path))

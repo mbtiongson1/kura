@@ -457,6 +457,8 @@ class Commands(Lib):
         self.assertEqual(out["error"]["code"], "invalid_arguments")
         code, out = run(*argv, "--root", f"main={self.lib}", home=str(home))
         self.assertEqual(out["error"]["code"], "invalid_arguments")
+        code, out = run("probe", "library", "--library", "home", "--root", f"a/b={self.lib}", home=str(home))
+        self.assertEqual(out["error"]["code"], "invalid_arguments")
 
     def test_probe_registers_both_operations(self):
         import kura.cli as cli
