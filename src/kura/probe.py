@@ -156,10 +156,6 @@ def probe_library(store, *, library, roots, sample="groups", titles=None, max_fi
             for title, f in selected:
                 if should_stop is not None and should_stop():
                     break
-                if not reprobe and _cached(store.db, title["id"], f, per_file_bytes):
-                    stats["cached"] += 1
-                    handled += 1
-                    continue
                 if worked >= max_files:
                     break
                 remaining = max_read_bytes - stats["bytes_read"]
@@ -167,8 +163,12 @@ def probe_library(store, *, library, roots, sample="groups", titles=None, max_fi
                     exhausted = True
                     break
                 label = title["rel_path"].partition("/")[0]
-                if label not in roots:
+                if label not in roots:                      # checked first: a hit needs its root named too
                     fail("no_root")
+                    handled += 1
+                    continue
+                if not reprobe and _cached(store.db, title["id"], f, per_file_bytes):
+                    stats["cached"] += 1
                     handled += 1
                     continue
                 if label not in root_fds:

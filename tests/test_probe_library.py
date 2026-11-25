@@ -124,10 +124,13 @@ class Sampling(Lib):
         out = self.probe(sample="all", max_files=2)
         self.assertEqual((out["cached"], out["probed"], out["pending"]), (4, 1, 0))
 
-    def test_unlabelled_root_counts_as_failed(self):
+    def test_unlabelled_root_counts_as_failed_even_for_cached_files(self):
         out = self.probe(roots={"elsewhere": self.lib})
         self.assertEqual((out["probed"], out["failed"], out["pending"]), (0, {"no_root": 4}, 0))
         self.assertEqual(self.rows(), {})
+        self.probe()
+        again = self.probe(roots={"elsewhere": self.lib})
+        self.assertEqual((again["cached"], again["failed"]), (0, {"no_root": 4}))
 
     def test_mp4_is_recorded_as_unsupported_container(self):
         self.write("Kura Other Show/Kura Other Show - 01 [1080p].mp4", b"\x00\x00\x00\x18ftypisom" + bytes(64))
