@@ -180,7 +180,8 @@ def match(rows: list[dict], base: str, season: int | None) -> dict:
     top = min(key for key, _, _ in scored)
     tied = sorted({i for key, i, _ in scored if key == top})
     if len(tied) > 1:
-        return {"status": "ambiguous", "anilist_id": None, "matched": None, "candidates": tied}
+        every = sorted({i for _, i, _ in scored})       # the tied entries and the weaker ones
+        return {"status": "ambiguous", "anilist_id": None, "matched": None, "candidates": every}
     _, chosen, matched = next(s for s in scored if s[1] == tied[0])
     # Weaker matches stay plausible (an unmarked folder may hold several seasons), so retain
     # planning must see them even when the winner is an exact match.

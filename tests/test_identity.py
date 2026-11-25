@@ -159,6 +159,8 @@ class OfflineMatch(Base):
                                "Kura Show", None)
         self.assertEqual((exact["anilist_id"], exact["candidates"]), (1, [2]))   # even behind an exact match
         tied = [{"id": 1, "titles": ["Kura Show"]}, {"id": 2, "titles": ["kura  show"]}]
+        weaker = identity.match(tied + [{"id": 3, "titles": ["Kura Show Season 2"]}], "Kura Show", None)
+        self.assertEqual((weaker["status"], weaker["candidates"]), ("ambiguous", [1, 2, 3]))
         self.assertEqual(choose(tied, "Kura Show"), (None, "ambiguous"))
         self.assertEqual(identity.match(tied, "Kura Show", None)["status"], "ambiguous")
         self.assertEqual(identity.match(rows, "", None)["status"], "unresolved")
