@@ -233,12 +233,14 @@ def _record(found: dict, source: str, query: str | None) -> dict:
 
 
 def _carry(record: dict, before: dict | None) -> dict:
-    """A refreshed record keeps what an earlier resolved row knew: its weaker candidates and its
-    own ID (when the new answer differs) stay candidates, so a retain list can still see them.
-    Only ``identity pin`` clears candidates."""
-    if before is None or before["status"] != "resolved":
+    """A newer record keeps what the row it replaces knew: its candidates, and its own ID when it
+    was resolved, stay candidates so a retain list can still see them across resolved, ambiguous,
+    unresolved and unavailable transitions. Only ``identity pin`` clears candidates."""
+    if before is None or before["source"] == "owner":
         return record
-    extra = set(before["candidates"]) | {before["anilist_id"]}
+    extra = set(before["candidates"])
+    if before["anilist_id"] is not None:
+        extra.add(before["anilist_id"])
     extra.discard(record["anilist_id"])
     return {**record, "candidates": sorted(set(record["candidates"]) | extra)}
 

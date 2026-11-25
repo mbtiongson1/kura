@@ -234,6 +234,17 @@ class AliasFallback(Base):
         row = self.row("Kura Alpha")
         self.assertEqual((row["anilist_id"], row["source"], row["candidates"]), (A, "list", [B]))
 
+    def test_candidate_history_survives_a_failed_refresh(self):
+        page = [(A, ["Kura Alpha"]), (B, ["Kura Alpha Season 2"])]
+        self.sync(aliases=Resolver({"Kura Alpha": page}), titles=["main/Kura Alpha"])
+        self.sync(aliases=Resolver({"Kura Alpha": "down"}), titles=["main/Kura Alpha"], refresh=True)
+        row = self.row("Kura Alpha")
+        self.assertEqual((row["status"], row["candidates"]), ("unavailable", [A, B]))
+        self.sync(aliases=Resolver({"Kura Alpha": (C, ["Kura Alpha"])}), titles=["main/Kura Alpha"],
+                  now=lambda: 2e9)                                      # long after the outage window
+        row = self.row("Kura Alpha")
+        self.assertEqual((row["status"], row["anilist_id"], row["candidates"]), ("resolved", C, [A, B]))
+
     def test_a_tie_inside_the_page_is_ambiguous_with_candidates(self):
         self.sync(aliases=Resolver({"Kura Alpha": "ambiguous"}), titles=["main/Kura Alpha"])
         row = self.row("Kura Alpha")
