@@ -269,6 +269,13 @@ class Sync(Case):
             self.sync(transport=lambda url: json.dumps(pages[int(parse_qs(urlsplit(url).query)["page"][0]) - 1]).encode())
         self.assertEqual(caught.exception.code, "seadex_unstable")
 
+    def test_repeated_record_across_pages_is_refused(self):
+        pages = [{"items": [entry(1, AL), entry(2, AL)], "totalItems": 4, "totalPages": 2},
+                 {"items": [entry(2, AL), entry(3, AL)], "totalItems": 4, "totalPages": 2}]
+        with self.assertRaises(KuraError) as caught:
+            self.sync(transport=lambda url: json.dumps(pages[int(parse_qs(urlsplit(url).query)["page"][0]) - 1]).encode())
+        self.assertEqual(caught.exception.code, "seadex_unstable")
+
     def test_run_byte_budget(self):
         body = json.dumps({"items": [], "totalItems": 0, "totalPages": 3}).encode()
         with patch.object(seadex, "RUN_LIMIT", len(body) * 2 - 1):
@@ -368,11 +375,13 @@ class Builders(unittest.TestCase):
             f("Show/Show - PV 01.mkv", 10), f("Show/Show - CM01.mkv", 10), f("Show/Show Menu.mkv", 10),
             f("Show/Show - Trailer.mkv", 10), f("Show/Show - Preview.mkv", 10),
             f("Show/Extras/Making of.mkv", 10), f("Show/NC/Clean.mkv", 10), f("Show/Bonus/Bits.mkv", 10),
-            f("Show/Show - 01.ass", 5), f("Show/cover.jpg", 5),
-            f("x" * 300 + ".mkv", 9), {"name": "bad", "length": True}, {"name": "", "length": 1}, "junk"])
+            f("Show/Show - 01.ass", 5), f("Show/cover.jpg", 5)])
         self.assertEqual((parsed["video_files"], parsed["median_video_bytes"]), (3, 200))
         self.assertEqual(parsed["total_bytes"], 710)
         self.assertEqual(len(parsed["files"]), 15)
+        for bad in (f("x" * 300 + ".mkv", 9), {"name": "bad", "length": True}, {"name": "", "length": 1},
+                    {"name": "a.mkv", "length": -1}, {"name": "a.mkv"}, "junk"):
+            self.assertIsNone(seadex.parse_files([f("ok.mkv", 1), bad]), bad)
         self.assertIsNone(seadex.parse_files("x"))
         self.assertIsNone(seadex.parse_files([f("a.txt", 1)])["median_video_bytes"])
         many = seadex.parse_files([f(f"Show - {i}.mkv", 1) for i in range(2500)])

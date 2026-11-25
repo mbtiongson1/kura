@@ -297,7 +297,7 @@ def parse_files(value) -> dict | None:
         size = f.get("length") if isinstance(f, dict) else None
         if (not name or len(name) > MAX_NAME or not isinstance(size, int) or isinstance(size, bool) or
                 not 0 <= size <= MAX_BYTES):
-            continue
+            return None         # a partial list would store understated totals as complete
         total += size
         if total > MAX_TOTAL:
             return None
@@ -389,6 +389,8 @@ class Client:
                 row = parser(item)
                 if row is None:
                     skipped[0] += 1
+                elif row["id"] in rows:     # offset paging repeated a record: something moved
+                    raise KuraError("seadex_unstable", "SeaDex changed while it was being read; run it again")
                 else:
                     rows[row["id"]] = row
             if page >= body["pages"]:

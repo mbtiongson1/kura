@@ -70,7 +70,9 @@ a NULL infohash and no `nyaa_id`: Kura treats "SeaDex lists it only on a private
   only, at most 20). A malformed record is skipped and counted in `skipped_malformed`.
 * A listing whose `totalItems` changes between pages, or whose item count does not match it,
   is refused (`seadex_unstable`): offset paging could otherwise skip records. A file list
-  longer than 20000 entries is treated as malformed rather than summarized partially.
+  that is longer than 20000 entries or holds any malformed entry is skipped as a whole (and
+  stays pending) rather than summarized partially. A record id repeated across pages is refused
+  the same way.
 * A failed run keeps the previous rows, records `status=failed` in `sync_state` and returns
   a `success=false` envelope (`seadex_unavailable`, `seadex_invalid`, `rate_limited`,
   `request_budget`, `seadex_unstable`, `sync_conflict`). A failure in the optional files step leaves the committed listing as
