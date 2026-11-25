@@ -95,6 +95,9 @@ class Requester:
         errors = document.get("errors")
         if errors:
             first = errors[0] if isinstance(errors, list) and errors and isinstance(errors[0], dict) else {}
+            if first.get("status") == 429:      # a rate limit reported in a 200 body binds every process too
+                raise KuraError("anilist_rate_limited", "AniList rate limit reached; retry later",
+                                retry_after=self.ani.penalize(self.last_headers))
             raise self._failure(first.get("status"), clean(first.get("message")), auth)
         data = document.get("data")
         if not isinstance(data, dict):
@@ -181,11 +184,15 @@ def fetch_list(req: Requester, *, user_id: int | None, user_name: str | None, au
         if not valid_id(owner.get("id")) or not owner_name or (user_id is not None and owner["id"] != user_id):
             raise KuraError("anilist_invalid_response", "AniList returned a list for an unexpected user")
         user = {"id": owner["id"], "name": owner_name}
-        lists = collection.get("lists") if isinstance(collection.get("lists"), list) else []
+        lists, more = collection.get("lists"), collection.get("hasNextChunk")
+        if not isinstance(lists, list) or not isinstance(more, bool):    # never replace a snapshot with a partial one
+            raise KuraError("anilist_invalid_response", "AniList returned an incomplete list")
         # Status lists first. An entry the owner hid from them is only in a custom list, and the same
         # entry (same mediaId, same status) can appear in several lists, so keep the first of each.
         for group in sorted((g for g in lists if isinstance(g, dict)), key=lambda g: g.get("isCustomList") is True):
-            for item in group.get("entries") if isinstance(group.get("entries"), list) else []:
+            if not isinstance(group.get("entries"), list):
+                raise KuraError("anilist_invalid_response", "AniList returned an incomplete list")
+            for item in group["entries"]:
                 parsed = parse_entry(item)
                 if parsed is None or parsed[0]["anilist_id"] in entries:
                     continue
@@ -194,7 +201,7 @@ def fetch_list(req: Requester, *, user_id: int | None, user_name: str | None, au
                     media[parsed[1]["anilist_id"]] = parsed[1]
         if len(entries) > MAX_ENTRIES:
             raise KuraError("anilist_list_too_large", "The list is larger than Kura will store")
-        if collection.get("hasNextChunk") is not True:
+        if not more:
             return user, list(entries.values()), list(media.values())
     raise KuraError("anilist_list_too_large", "The list has more chunks than Kura will fetch")
 
@@ -208,11 +215,13 @@ def fetch_favourites(req: Requester, user_id: int) -> list[int]:
         anime = favourites.get("anime") if isinstance(favourites, dict) else None
         if not isinstance(anime, dict):
             raise KuraError("anilist_invalid_response", "AniList returned no favourites")
-        for node in anime.get("nodes") if isinstance(anime.get("nodes"), list) else []:
+        nodes, info = anime.get("nodes"), anime.get("pageInfo")
+        if not isinstance(nodes, list) or not isinstance(info, dict) or not isinstance(info.get("hasNextPage"), bool):
+            raise KuraError("anilist_invalid_response", "AniList returned incomplete favourites")
+        for node in nodes:
             if isinstance(node, dict) and valid_id(node.get("id")) and node["id"] not in ids:
                 ids.append(node["id"])
-        info = anime.get("pageInfo")
-        if not (isinstance(info, dict) and info.get("hasNextPage") is True):
+        if not info["hasNextPage"]:
             return ids
     raise KuraError("anilist_list_too_large", "More favourites pages than Kura will fetch")
 

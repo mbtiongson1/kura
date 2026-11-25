@@ -356,6 +356,13 @@ class AniList:
             self._observe(headers)
             return choose(parse_response(data), title)
 
+    def penalize(self, headers: dict) -> float:
+        """Record a rate-limit penalty reported inside a response body. Returns the delay in seconds."""
+        try:
+            return self._penalize({k: v for k, v in headers.items() if isinstance(v, str)})
+        except KuraError as e:
+            raise KuraError("anilist_unavailable", e.message) from e
+
     def query(self, query: str, variables: dict, *, token: str | None = None, limit: int = GQL_LIMIT):
         """One paced GraphQL request through the shared budget. Returns (body, headers).
 

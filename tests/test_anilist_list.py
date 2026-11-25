@@ -175,6 +175,43 @@ class ListSync(Lab):
                 self.sync(user_name="nobody", refresh=True)
             self.assertEqual(cm.exception.code, code)
 
+    def test_incomplete_responses_never_replace_a_snapshot(self):
+        self.sync()
+        before = self.rows("SELECT * FROM anilist_list_entries ORDER BY 1")
+        base = {"user": dict(VIEWER), "lists": [], "hasNextChunk": False}
+        for broken in ({k: v for k, v in base.items() if k != "lists"},
+                       {k: v for k, v in base.items() if k != "hasNextChunk"},
+                       {**base, "hasNextChunk": "false"},
+                       {**base, "lists": [{"isCustomList": False}]}):
+            self.fake.queue = [({"data": {"MediaListCollection": broken}}, {})]
+            out = self.sync(refresh=True)
+            self.assertEqual((out["stale"], out["error"]), (True, "anilist_invalid_response"))
+        self.assertEqual(self.rows("SELECT * FROM anilist_list_entries ORDER BY 1"), before)
+
+    def test_incomplete_favourites_keep_the_old_ones_and_warn(self):
+        self.fake.favourites = IDS[:2]
+        self.sync()
+        self.fake.entries = self.fake.entries[:2]
+        original = self.fake.respond
+
+        def respond(query, variables):
+            if "User(id" in query:
+                return {"User": {"favourites": {"anime": {"nodes": []}}}}
+            return original(query, variables)
+        self.fake.respond = respond
+        out = self.sync(refresh=True)
+        self.assertEqual(out["warnings"], ["anilist_favourites_failed"])
+        self.assertEqual(out["favourites"], 2)
+
+    def test_a_429_inside_a_200_body_is_persisted_for_other_processes(self):
+        self.fake.queue = [({"data": None, "errors": [{"message": "Too Many Requests.", "status": 429}]},
+                            {"Retry-After": "90", "X-RateLimit-Remaining": "0"})]
+        with self.assertRaises(KuraError) as cm:
+            self.sync()
+        self.assertEqual((cm.exception.code, cm.exception.details["retry_after"]), ("anilist_rate_limited", 90))
+        penalty = self.rows("SELECT penalty_until FROM rate_limits WHERE service='anilist'")[0][0]
+        self.assertGreater(penalty, self.wall.now + 80)
+
     def test_budget_stops_cleanly_and_reports_progress(self):
         self.fake.per_chunk = 2
         with self.assertRaises(KuraError) as cm:
