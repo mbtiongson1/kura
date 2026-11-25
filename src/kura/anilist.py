@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import ipaddress
 import json
 import socket
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -123,7 +124,24 @@ def choose(rows: list[dict], query: str):
     return Identity(best[1], tuple(ordered), best[2]), "resolved"
 
 
-def request(title: str) -> bytes:
+RATE_HEADERS = ("Retry-After", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset")
+
+
+def _headers(source) -> dict:
+    """Only the rate-limit headers, as plain strings; anything else is dropped."""
+    out = {}
+    for name in RATE_HEADERS:
+        try:
+            value = source.get(name)
+        except (AttributeError, TypeError):
+            value = None
+        if isinstance(value, str):
+            out[name] = value.strip()
+    return out
+
+
+def fetch(title: str) -> tuple[bytes, dict]:
+    """One bounded request. Returns (body, rate-limit headers). HTTP 429 carries Retry-After."""
     validate_endpoint(ENDPOINT)
     try:
         addresses = socket.getaddrinfo(HOST, 443, type=socket.SOCK_STREAM)
@@ -136,19 +154,93 @@ def request(title: str) -> bytes:
             "User-Agent": "Kura/0.1 (+https://github.com/mbtiongson1/kura)"})
         with opener.open(request_, timeout=15) as response:
             data = response.read(LIMIT + 1)
+            headers = _headers(getattr(response, "headers", None))
         if len(data) > LIMIT:
             raise KuraError("alias_invalid", "AniList response exceeds the metadata limit")
-        return data
+        return data, headers
     except urllib.error.HTTPError as e:
+        if e.code == 429:
+            raise KuraError("alias_unavailable", "AniList rate limit reached; retry later",
+                            status=429, **_headers(e.headers)) from e
         raise KuraError("alias_unavailable", "AniList rejected the query; retry later") from e
     except (OSError, urllib.error.URLError) as e:
         raise KuraError("alias_unavailable", "AniList request failed; retry later") from e
 
 
+def request(title: str) -> bytes:
+    return fetch(title)[0]
+
+
+def _number(value, default=None):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if number == number and number not in (float("inf"), float("-inf")) else default
+
+
 class AniList:
-    """Alias resolver port. One bounded request per uncached query."""
+    """Alias resolver port. One bounded request per uncached query, paced.
+
+    Defaults assume AniList's degraded limit of 30 requests per minute unless its
+    ``X-RateLimit-Limit`` header says more (capped at 90). A 429 honours ``Retry-After``
+    and ``X-RateLimit-Remaining`` / ``Reset`` are respected, but the total wait for one
+    lookup never exceeds ``max_wait`` seconds: past that the resolver raises
+    ``alias_unavailable`` immediately (and keeps doing so, without any request, until the
+    advertised window passes) so a large library can never hammer the service or stall.
+    """
+
+    def __init__(self, *, per_minute: int = 30, max_wait: float = 30.0, max_retries: int = 2,
+                 transport=None, sleep=time.sleep, clock=time.monotonic, wall=time.time):
+        if per_minute < 1 or max_wait < 0 or max_retries < 0:
+            raise KuraError("invalid_argument", "Invalid AniList pacing parameters")
+        self.per_minute, self.max_wait, self.max_retries = per_minute, max_wait, max_retries
+        self.transport, self.sleep, self.clock, self.wall = transport or fetch, sleep, clock, wall
+        self.interval = 60.0 / per_minute
+        self.next_ok = 0.0      # earliest monotonic time for the next request
+
+    def _pace(self):
+        wait = max(self.next_ok - self.clock(), 0.0)
+        if wait > self.max_wait:
+            raise KuraError("alias_unavailable", "AniList rate limit window is still open",
+                            status=429, rate_limited=True)
+        if wait:
+            self.sleep(wait)
+        self.next_ok = self.clock() + self.interval
+
+    def _penalize(self, headers: dict):
+        delay = _number(headers.get("Retry-After"))
+        if delay is None:
+            reset = _number(headers.get("X-RateLimit-Reset"))
+            delay = reset - self.wall() if reset is not None else 60.0
+        delay = min(max(delay, 1.0), 3600.0)
+        self.next_ok = max(self.next_ok, self.clock() + delay)
+
+    def _observe(self, headers: dict):
+        limit = _number(headers.get("X-RateLimit-Limit"))
+        if limit and limit > 0:
+            self.interval = 60.0 / min(max(limit, self.per_minute), 90)
+        remaining = _number(headers.get("X-RateLimit-Remaining"))
+        if remaining is not None and remaining <= 1:
+            reset = _number(headers.get("X-RateLimit-Reset"))
+            delay = reset - self.wall() if reset is not None else 60.0
+            self.next_ok = max(self.next_ok, self.clock() + min(max(delay, 0.0), 3600.0))
 
     def resolve(self, title: str):
         if not normalize(title) or len(title) > MAX_TITLE or any(ord(c) < 32 for c in title):
             raise KuraError("invalid_query", "Title must be 1..200 printable characters")
-        return choose(parse_response(request(title)), title)
+        throttled = 0
+        while True:
+            self._pace()
+            try:
+                data, headers = self.transport(title)
+            except KuraError as e:
+                if e.details.get("status") != 429:
+                    raise
+                self._penalize({k: v for k, v in e.details.items() if isinstance(v, str)})
+                throttled += 1
+                if throttled > self.max_retries:
+                    raise
+                continue
+            self._observe(headers)
+            return choose(parse_response(data), title)

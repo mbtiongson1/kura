@@ -7,6 +7,7 @@ import signal
 import sqlite3
 import sys
 
+from . import cli_handover
 from .core import Core
 from .anilist import AniList
 from .models import KuraError
@@ -59,6 +60,7 @@ def parser():
     q = prefs.add_parser("set")
     q.add_argument("--json", action="store_true")
     options(q)
+    cli_handover.register(sub, Parser)
     return p
 
 
@@ -71,6 +73,9 @@ def confirm(plan):
 
 
 def execute(args):
+    handled, data = cli_handover.dispatch(args, lambda: Store(private_root()))
+    if handled:
+        return data
     store = Store(private_root())
     try:
         core = Core(store, Nyaa(), None if getattr(args, "no_alias", False) else AniList())

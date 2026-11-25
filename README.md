@@ -114,6 +114,68 @@ Torrent peer traffic exposes your IP and uses a temporary BitTorrent listener; *
 endpoint** is enabled. Keep aria2 patched. There is no persistent seeding service;
 `--seed-time=0` exits at completion, though BitTorrent may upload pieces while downloading.
 
+## Library handover: reacquisition manifest (read-only)
+Kura can answer one question about an existing media library: which titles could be
+cleared from local storage because they are safely backed by a healthy torrent? The model
+is a photo app that clears the local copy of a picture once it is safely in the cloud. A
+copy may only be *proposed* for clearing when it is **on the server** (every file's bytes
+verified, piece by piece, against a torrent descriptor) AND its **torrent is healthy and
+re-downloadable** (public and unprotected; swarm health is a later stage). **Kura
+proposes; the owner purges.** Nothing in this pipeline moves, renames, deletes or writes
+inside a library or torrent directory: library and descriptor paths are only opened
+read-only, never through a symlink.
+
+```sh
+kura library inventory --root media=/path/to/library [--files]
+kura torrent inspect release.torrent --tracker-denylist deny.txt --protected protected.txt
+kura torrent verify release.torrent --root /path/to/library [--base subdir] [--max-read-gib 50]
+kura manifest build --library home --root media=/path/to/library --torrents /path/to/torrents \
+  --tracker-denylist deny.txt --protected protected.txt [--max-read-gib 200] [--reverify] [--no-anilist]
+kura manifest show --library home [--status reacquirable] [--title media/Some\ Title]
+```
+
+`library inventory`, `torrent inspect` and `torrent verify` are **stateless**: they never
+open the state database or touch `HOME`, so they run in a throwaway container with a
+read-only root filesystem and a read-only library mount (inventory and verify need no
+network). Only `manifest build` and `manifest show` use the private state database.
+
+`manifest build` scans every `--root` (metadata only) and the `.torrent` files directly
+inside `--torrents`, matches each torrent to a library title by exact name (the title
+equals the torrent name, the torrent sits directly inside a title folder, or a
+single-file torrent's file name is unique; any other situation is `ambiguous` and left
+unlinked), verifies each linked title against the piece hashes, and records the result
+per torrent as it goes, so an interrupt or `--max-read-gib` budget keeps what finished.
+A verification is reused while every file's size, mtime, device and inode still match;
+touch a file, or pass `--reverify`, and it is read again. Private torrents are never
+read. AniList identity lookup is on by default for linked titles and can be switched off
+with `--no-anilist`; it is paced to at most 30 requests per minute, honours `429` /
+`Retry-After` and the rate-limit headers, is cached for 7 days, and degrades to
+`unavailable` rather than failing a build.
+
+Titles are keyed `<root label>/<top-level entry>`. `manifest show` recomputes each title's
+status from the database alone:
+
+| status | meaning |
+| --- | --- |
+| `reacquirable` | every file is listed by a linked torrent and verified, nothing protected, both policy lists supplied |
+| `partial` | some files verified; others failed, are unverified, or no torrent lists them (`uncovered_files`) |
+| `unverified` | linked but nothing verified (not yet read, budget spent, mismatching bytes, or policy lists missing) |
+| `unmatched` | no torrent linked |
+| `protected` | a `path:` entry covers it, or a linked torrent is private, on the tracker/source denylist, on the protected list or has unparsable announce data |
+| `blocked` | the inventory could not follow something inside it (symlink, mount crossing, special file) |
+| `stale` | the title vanished from the latest scan, or its files changed since they were verified |
+
+Fail closed: anything unparsable or unrecognised is protected or unverified, never
+reacquirable. A title containing **any file that no matched torrent lists** (an extra
+file) is never reacquirable until the owner explicitly approves those exact files in a
+later step. Announce URLs can embed private-tracker credentials, so they are never stored
+or printed; a magnet link is produced only for public, unprotected torrents and only from
+credential-free trackers. `manifest build` needs both policy files; an absent file means
+the status cannot reach `reacquirable`. Policy files: `#` comments; denylist lines are
+tracker hosts (matching subdomains) or `source:TAG`; protected-list lines are 40-hex
+infohashes or `path:relative/prefix`. Descriptors that cannot be parsed are reported in
+`skipped` and never linked.
+
 ## Storage, interruption and status
 Default state: `~/.local/share/kura/state.sqlite3` (preferences, receipts, audit events
 and validated sanitized descriptors for explicit offline resume). This is private data,
