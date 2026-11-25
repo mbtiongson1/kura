@@ -59,27 +59,47 @@ _CODEC = re.compile(r"(?<![0-9a-z])(x264|x265|h\.?264|h\.?265|hevc|avc|av1|vp9|1
                     r"hi10p?|flac|aac|ac-?3|e-?ac-?3|dts|opus)(?![0-9a-z])", re.I)
 
 
+class _Sniffed:
+    """The file reader shared by the sniff and the parser: one counter for every byte received.
+
+    The first bytes are fetched once; a read inside them is answered from that copy, and one that
+    runs past them asks the file only for the part beyond. So no byte is requested twice and
+    ``received`` is exactly what the file was asked for.
+    """
+
+    def __init__(self, read, head):
+        self._read, self.head, self.received = read, head, len(head)
+
+    def __call__(self, offset, length):
+        end, have = offset + length, len(self.head)
+        if offset < 0 or length <= 0 or offset >= have:
+            data = bytes(self._read(offset, length))
+            self.received += len(data)
+            return data
+        if end <= have:
+            return self.head[offset:end]
+        tail = bytes(self._read(have, end - have))
+        self.received += len(tail)
+        return self.head[offset:] + tail
+
+
 def probe_container(read, size, *, max_bytes=2 << 20):
     """Probe one file with the parser its first bytes call for.
 
     ``1A 45 DF A3`` is Matroska/WebM; an ISO BMFF box type (``ftyp``, ``moov``, ``mdat``,
     ``free``, ``skip``, ``wide``) at offset 4 is MP4. Anything else goes to ``mkvprobe``, which
     reports it ``unsupported_container`` (or ``invalid`` when too short). The extension is never
-    consulted. The sniffed bytes are handed on, so no more than `max_bytes` are ever requested.
+    consulted. The sniff is charged to `max_bytes` (the parser gets what is left), and the
+    document's ``bytes_read`` is the total actually received from the file, sniff included.
     """
     n = min(SNIFF_BYTES, size) if isinstance(size, int) and size > 0 else 0
     if not isinstance(max_bytes, int) or n == 0 or max_bytes < n:
         return mkvprobe.probe(read, size, max_bytes=max_bytes)
-    head = bytes(read(0, n))[:n]
-
-    def cached(offset, length):
-        if 0 <= offset and offset + length <= len(head):
-            return head[offset:offset + length]
-        return read(offset, length)
-
-    if head[:4] != EBML_MAGIC and head[4:8] in mp4probe.SNIFF_BOXES:
-        return mp4probe.probe(cached, size, max_bytes=max_bytes)
-    return mkvprobe.probe(cached, size, max_bytes=max_bytes)
+    shared = _Sniffed(read, bytes(read(0, n))[:n])
+    parser = mp4probe if shared.head[:4] != EBML_MAGIC and shared.head[4:8] in mp4probe.SNIFF_BOXES else mkvprobe
+    result = parser.probe(shared, size, max_bytes=max_bytes - n)
+    result["bytes_read"] = shared.received
+    return result
 
 
 def signature(name: str) -> tuple:

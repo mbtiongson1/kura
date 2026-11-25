@@ -21,8 +21,10 @@ The container is chosen from the first bytes of the file, never from the extensi
 (`probe.probe_container`): `1A 45 DF A3` is Matroska/WebM (`mkvprobe`); an ISO BMFF box type
 (`ftyp`, `moov`, `mdat`, `free`, `skip` or `wide`) at offset 4 is MP4 (`mp4probe`). Anything
 else is `unsupported_container` (AVI, TS, WMV, ... and files that are not video at all). Both
-parsers return the same `kura.probe/1` document, so the audit reads either. The sniffed 16
-bytes are handed to the parser and count against its budget.
+parsers return the same `kura.probe/1` document, so the audit reads either. The first 16 bytes are
+fetched once and charged to `max_bytes` (the parser gets the rest); a parser read inside them is
+answered from that copy and one running past them asks the file only for the remainder, so
+`bytes_read` is exactly what the file was asked for.
 
 ## What is read (Matroska)
 
@@ -87,8 +89,10 @@ Vision `dvav`/`dva1`), `hevc` (`hvc1`, `hev1`, `dvh1`, `dvhe`), `av1`, `vp9`, `v
 
 A fragmented file (`mvex` in `moov`, or a `moof` before any `moov`) is not walked past `moov`: the
 result carries what `moov` gives plus the `fragmented_mp4` warning. The video track is the enabled
-one with a known codec that is not a one-sample still (so cover art does not win), with
-`multiple_video_tracks` when several qualify.
+one that is not a one-sample still when any such track exists (so cover art never wins, whatever
+its codec), then one with a known codec over an unknown one, with `multiple_video_tracks` when
+several video tracks exist. The sample entries are parsed before the status is decided, so any
+truncation warning makes the result `partial`.
 
 ## Hostile input
 

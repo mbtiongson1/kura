@@ -305,6 +305,22 @@ class Tracks(unittest.TestCase):
         self.assertEqual((result["video"]["track"], result["video"]["codec"]), (1, "h264"))
         self.assertIn("multiple_video_tracks", result["warnings"])
 
+    def test_a_known_codec_still_does_not_beat_the_real_video_of_an_unknown_codec(self):
+        real = mp4gen.trak(1, b"vide", mp4gen.visual_entry(b"zzzz", 1280, 720), samples=100, timescale=24000,
+                           duration=24000 * 60, delta=1001)
+        cover = mp4gen.trak(5, b"vide", mp4gen.visual_entry(b"avc1", 300, 300, mp4gen.avcc()), samples=1)
+        for order in ((real, cover), (cover, real)):
+            data = mp4gen.FTYP + box(b"moov", mp4gen.mvhd(1000, 60_000) + b"".join(order)) + box(b"mdat", bytes(64))
+            r, _ = run(data)
+            self.assertEqual((r["video"]["track"], r["video"]["codec"], r["video"]["width"]), (1, "other", 1280))
+            self.assertIn("multiple_video_tracks", r["warnings"])
+        # With only stills, one is still reported; among moving tracks a known codec wins.
+        data = mp4gen.FTYP + box(b"moov", mp4gen.mvhd(1000, 60_000) + cover) + box(b"mdat", bytes(64))
+        self.assertEqual(run(data)[0]["video"]["track"], 5)
+        other = mp4gen.trak(2, b"vide", mp4gen.visual_entry(b"avc1", 640, 360, mp4gen.avcc()), samples=50)
+        data = mp4gen.FTYP + box(b"moov", mp4gen.mvhd(1000, 60_000) + real + other) + box(b"mdat", bytes(64))
+        self.assertEqual(run(data)[0]["video"]["track"], 2)
+
     def test_disabled_only_video_track_is_still_reported(self):
         result, _ = run(mp4gen.build(video_enabled=False))
         self.assertEqual(result["video"]["codec"], "h264")
@@ -546,6 +562,35 @@ class Hostile(unittest.TestCase):
         self.assertLess(time.time() - t0, 2)
         self.assertEqual(r["video"]["codec"], "h264")
 
+    def test_a_damaged_sample_entry_is_partial_at_every_budget(self):
+        data = mp4gen.build()
+        i = data.index(b"avc1", data.index(b"stsd")) - 4
+        size = int.from_bytes(data[i:i + 4], "big")
+        hacked = data[:i] + u32(size + 5000) + data[i + 4:]            # the entry claims to outrun its stsd
+        full = run(hacked)[0]
+        self.assertEqual(full["status"], "partial")
+        self.assertIn("truncated", full["warnings"])
+        for budget in range(0, full["bytes_read"] + 300, 13):
+            r, src = run(hacked, max_bytes=budget)
+            self.assertLessEqual(src.total, budget)
+            if "truncated" in r["warnings"] or "budget_exhausted" in r["warnings"]:
+                self.assertEqual(r["status"], "partial", (budget, r["warnings"]))
+            self.assertFalse(r["status"] == "ok" and r["warnings"] and
+                             {"truncated", "invalid_box"} & set(r["warnings"]), (budget, r["warnings"]))
+
+    def test_entries_are_parsed_before_the_status_is_decided(self):
+        # Drive the parser by hand so that nothing parses the sample entries before result().
+        data = mp4gen.build()
+        i = data.index(b"avc1", data.index(b"stsd")) - 4
+        hacked = data[:i] + u32(int.from_bytes(data[i:i + 4], "big") + 5000) + data[i + 4:]
+        p = mp4probe._Probe(Source(hacked), len(hacked), 1 << 20)
+        moov = hacked.index(b"moov") - 4
+        p.moov_box(moov + 8, int.from_bytes(hacked[moov:moov + 4], "big") + moov)
+        self.assertEqual(p.warnings, [])
+        result = p.result()
+        self.assertEqual(result["status"], "partial")
+        self.assertIn("truncated", result["warnings"])
+
     def test_stsd_larger_than_its_cap_is_partial(self):
         entry = mp4gen.visual_entry(b"avc1", 16, 16, mp4gen.avcc() + box(b"free", bytes(80_000)))
         r = self.check(mp4gen.FTYP + box(b"moov", mp4gen.mvhd() + mp4gen.trak(1, b"vide", entry)))
@@ -636,8 +681,9 @@ class Dispatch(unittest.TestCase):
 
     def test_the_result_equals_the_direct_parser(self):
         mkv, mp4 = mkvgen.build(), mp4gen.build()
-        self.assertEqual(self.go(mkv)[0], mkvprobe.probe(Source(mkv), len(mkv)))
-        self.assertEqual(self.go(mp4)[0], mp4probe.probe(Source(mp4), len(mp4)))
+        for raw, parser in ((mkv, mkvprobe), (mp4, mp4probe)):
+            via, direct = self.go(raw)[0], parser.probe(Source(raw), len(raw))
+            self.assertEqual({**via, "bytes_read": 0}, {**direct, "bytes_read": 0})
 
     def test_matroska_magic_wins_over_an_mp4_looking_offset_4(self):
         data = b"\x1a\x45\xdf\xa3ftyp" + bytes(40)
@@ -648,7 +694,31 @@ class Dispatch(unittest.TestCase):
             for budget in (0, 3, 8, 15, 16, 20, 200):
                 r, src = self.go(data, max_bytes=budget)
                 self.assertLessEqual(src.total, budget, (budget, len(data)))
-                self.assertLessEqual(r["bytes_read"], budget)
+                self.assertEqual(r["bytes_read"], src.total)
+
+    def test_totals_are_one_count_for_the_sniff_and_the_parser(self):
+        for data in (mp4gen.build(), mp4gen.build(faststart=False, mdat_pad=4000), mp4gen.build(codec="hevc"),
+                     mkvgen.build(), mkvgen.build(codec="hevc", settings=mkvgen.X265_TEXT, sei="private")):
+            full, src = self.go(data)
+            self.assertEqual(full["bytes_read"], src.total)
+            for budget in list(range(16, 80)) + [100, 150, 200, 400, 800, 1200, 1600, 2400, 1 << 20]:
+                with self.subTest(budget=budget, size=len(data)):
+                    r, src = self.go(data, max_bytes=budget)
+                    self.assertLessEqual(src.total, budget)
+                    self.assertEqual(r["bytes_read"], src.total)       # what the file was asked for, once
+                    self.assertEqual(src.reads[0], (0, 16))
+                    self.assertTrue(all(o >= 16 for o, _ in src.reads[1:]), src.reads[:6])
+
+    def test_a_read_that_straddles_the_sniff_asks_only_for_the_rest(self):
+        data = bytes(range(200))
+        src = Source(data)
+        shared = probe_mod._Sniffed(src, data[:16])
+        self.assertEqual(shared(0, 16), data[:16])
+        self.assertEqual(shared(12, 8), data[12:20])
+        self.assertEqual(shared(10, 100), data[10:110])
+        self.assertEqual(shared(40, 5), data[40:45])
+        self.assertEqual(src.reads, [(16, 4), (16, 94), (40, 5)])
+        self.assertEqual(shared.received, 16 + 4 + 94 + 5)
 
     def test_tiny_files(self):
         for tiny in (b"", b"\x00", b"abc", b"\x00\x00\x00\x08ftyp", b"\x1a\x45\xdf\xa3"):

@@ -427,7 +427,8 @@ class _Probe:
     # -- first video sample --------------------------------------------------------------
 
     def video(self):
-        """The track whose codec describes the file: enabled, a known codec, not a still."""
+        """The track whose codec describes the file: enabled, never a one-sample still when a
+        real video track exists, then a known codec over an unknown one."""
         videos = [t for t in self.tracks if t["type"] == b"vide"]
         enabled = [t for t in videos if t["enabled"]]
         if videos and not enabled:
@@ -437,7 +438,8 @@ class _Probe:
             self.warn("multiple_video_tracks")
         if not pool:
             return None
-        return max(pool, key=lambda t: (t.get("fourcc") in _VIDEO, t["samples"] != 1))
+        moving = [t for t in pool if t["samples"] != 1]
+        return max(moving or pool, key=lambda t: t.get("fourcc") in _VIDEO)
 
     def parse_entries(self):
         for i, t in enumerate(self.tracks):
@@ -561,6 +563,7 @@ class _Probe:
         return {"present": True, "count": count or 0}
 
     def result(self):
+        self.parse_entries()                    # may flag a damaged sample entry: before the status
         if self.rd.short:
             self.truncated()                    # whatever the cause, the file was not read in full
         if self.status is None:
@@ -571,7 +574,6 @@ class _Probe:
             else:
                 self.status = "invalid"
                 self.warn("no_tracks")
-        self.parse_entries()
         duration = self.duration()
         video = self.video() if self.tracks else None
         audio, subs = [], []
