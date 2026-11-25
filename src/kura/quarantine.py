@@ -47,6 +47,7 @@ QUARANTINE_DIR = ".kura-quarantine"   # the only name the inventory scanner skip
 SUPERSEDED = "superseded"
 DAY = 86400
 MAX_REFUSED = 200
+MIN_QUARANTINE_DAYS = 30   # founder decision: never purge earlier
 MAX_TITLES = 10_000
 NOTICE = ("Proposal only. Kura never moves, renames, deletes or purges anything: the owner's "
           "own infrastructure may execute this plan after approval, once every precondition "
@@ -107,7 +108,7 @@ def check_args(library, titles, quarantine_dir, min_seeders, max_inventory_age_h
             raise _bad("Titles must be a list of title keys")
     for name, value, low in (("min_seeders", min_seeders, 1), ("min_quiet_days", min_quiet_days, 0),
                              ("max_inventory_age_h", max_inventory_age_h, 0),
-                             ("quarantine_days", quarantine_days, 1),
+                             ("quarantine_days", quarantine_days, MIN_QUARANTINE_DAYS),
                              ("max_swarm_age_h", max_swarm_age_h, 0)):
         if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value \
                 or value < low or value > 10**6:

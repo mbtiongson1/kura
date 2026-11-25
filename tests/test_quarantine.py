@@ -120,6 +120,10 @@ class Eligibility(Base):
         picked = self.plan(now=lambda: t, titles=["main/Kura Good B", "main/Kura Good A"])
         self.assertEqual([m["from"] for m in picked["moves"]], [m["from"] for m in b["moves"]])
 
+    def test_purge_not_before_can_only_be_later_than_thirty_days(self):
+        doc = self.plan(quarantine_days=45)
+        self.assertEqual(doc["purge_not_before"], doc["created_at"] + 45 * DAY)
+
     def test_undo_is_the_exact_inverse(self):
         doc = self.plan()
         self.assertEqual(len(doc["undo"]), len(doc["moves"]))
@@ -396,7 +400,7 @@ class Arguments(Base):
         for kw in ({"min_seeders": 0}, {"min_seeders": -1}, {"min_seeders": True},
                    {"min_seeders": 2.5}, {"min_seeders": "3"}, {"min_quiet_days": -1},
                    {"min_quiet_days": float("nan")}, {"max_inventory_age_h": -1},
-                   {"quarantine_days": 0}, {"titles": "main/Kura Good"}, {"titles": [1]},
+                   {"quarantine_days": 0}, {"quarantine_days": 29.9}, {"titles": "main/Kura Good"}, {"titles": [1]},
                    {"max_swarm_age_h": None}):
             with self.assertRaises(KuraError, msg=repr(kw)) as caught:
                 self.plan(**kw)
