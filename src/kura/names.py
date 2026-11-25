@@ -4,7 +4,9 @@
 episode, version, season, resolution, codec, bit depth, source, CRC and an extras flag. Every field
 that cannot be read is ``None``. It is deliberately forgiving and therefore sometimes wrong:
 its output feeds audit statistics and flags, and must never decide which torrent or title a
-file is (acquisition identity stays exact, see ``match`` and ``manifest``).
+file is (acquisition identity stays exact, see ``match`` and ``manifest``). ``series`` is the one
+other consumer: ``identity`` reads it as a second opinion on a folder name, and only when every
+video file of the title agrees.
 
 Pure: no I/O, no state, no network.
 """
@@ -89,6 +91,20 @@ def _episode(stem: str):
             version = int(m.group(2)) if m.group(2) else None
             return int(m.group(1)), version
     return None, None
+
+
+def series(name: str) -> str | None:
+    """The text before the episode marker of a release name (path allowed), or None when no
+    episode marker is found. Same episode patterns as ``parse``; season tokens and the scene
+    style dots stay in the text for the caller (``resolve._name`` reduces it to a title)."""
+    stem = _EXT.sub("", name.replace("\\", "/").rsplit("/", 1)[-1])
+    text = _NOISE.sub(" ", _BRACKETS.sub(" ", stem))
+    for pattern in _EPISODES:
+        m = pattern.search(text)
+        if m:
+            head = text[:m.start()].strip(" \t-")
+            return head or None
+    return None
 
 
 def parse(name: str) -> dict:

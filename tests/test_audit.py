@@ -382,6 +382,21 @@ class Flags(Lab):
         self.assertNotIn("identity_unknown", self.codes())
         self.assertEqual(self.doc()["anilist_id"], A)
 
+    def test_identity_unknown_skips_root_entries_that_are_not_media(self):
+        self.title("[G] Kura Show - 04.mkv", files=[("[G] Kura Show - 04.mkv", 100 * MB)], kind="file")
+        self.title("[G] Kura Show - 04-poster.jpg", files=[("[G] Kura Show - 04-poster.jpg", 1000)], kind="file")
+        self.title(".DS_Store", files=[(".DS_Store", 10)], kind="file")
+        self.title("fonts", files=[("a.ttf", 10), ("b.otf", 10)])
+        self.title("Kura Subs Only", files=[("ep01.srt", 10)])
+        self.title("Kura Empty")
+        report = self.audit()
+        flagged = {t["title"] for t in report["titles"] if any(f["code"] == "identity_unknown" for f in t["flags"])}
+        self.assertEqual(flagged, {"main/[G] Kura Show - 04.mkv", "main/Kura Empty"})
+        self.assertEqual(report["counts"]["titles"], 6)
+        self.assertEqual(report["counts"]["by_flag"]["identity_unknown"], 2)
+        report = self.audit(retain=self.idfile(f"{A}\n"))
+        self.assertEqual(report["counts"]["by_flag"]["identity_unknown"], 2)
+
     def test_probe_missing_and_unsupported_container(self):
         self.eps(2)
         self.assertEqual(self.codes()["probe_missing"]["detail"], {"video_files": 2})

@@ -12,6 +12,25 @@ the outcome in ``title_identities``. Two passes, cheapest first:
      candidates are kept too. The alias cache is not used here because it stores only one
      pick; a recent negative alias answer is remembered in the row instead.
 
+Name variants. Both sides are compared through one normalisation: case, compatibility forms,
+accents on Latin letters, every apostrophe variant dropped, ``\u00d7`` read as ``x`` and ``&`` as
+"and". A title whose words differ only in spacing or punctuation ("Tatte Iru" and "Tatteiru")
+is also an exact match, ranked just below a word-for-word one. A folder name that is mojibake
+(UTF-8 bytes read as cp1252 or latin-1) is repaired in memory for matching, only when the repair
+round-trips cleanly and removes mojibake marker characters; nothing on disk is renamed.
+
+File names as a second opinion. When the folder name matches nothing, the series name and
+season are read from the video file names inside (``names.series``; extras are ignored). They
+are used only if every video file agrees on both; the name then goes through the same offline
+and alias matching, and the ``query`` column records it. Any disagreement keeps the folder result.
+A loose video file at a root has its episode marker stripped before matching.
+
+Root entries that cannot be anime titles (a loose file that is not a video, such as a sidecar
+image, ``.nfo`` or a dotfile; a folder with files but no video in it) are left out of ``sync``,
+its counts, ``show``'s ``unrecorded`` and the audit's ``identity_unknown`` flag. They are not
+given a status, and an old non-owner row for one is dropped. They remain unidentified, so a retain
+plan still refuses to touch them.
+
 Season rule: a folder with a season marker 2 or higher is accepted only by an entry whose
 matched title carries that season ("Season N", "Nth Season", "SN" or a trailing "N"); a
 folder marked season 1 never binds to an entry titled for a later season; a folder spanning
@@ -36,13 +55,15 @@ from .core import ALIAS_FAILURE_TTL, ALIAS_TTL
 from .manifest_store import ManifestRepo
 from .models import KuraError
 from .releases import normalize
-from . import resolve
+from .sources.seadex import VIDEO_EXT
+from . import names, resolve
 
 STATUSES = ("resolved", "pinned", "ambiguous", "unresolved", "unavailable", "not_anime")
 IDENTIFIED = ("resolved", "pinned")
 MAX_LOOKUPS = 1000
 MAX_LISTED = 500
 MAX_ID = 10**9
+MEDIA_EXT = VIDEO_EXT + (".iso", ".vob", ".mpg", ".mpeg", ".flv", ".ogm", ".divx")
 
 _SEASON_WORDS = (
     lambda n: re.compile(rf"\bseason 0*{n}\b"),
@@ -73,13 +94,58 @@ def _tx(db):
         raise
 
 
+# ---- name normalisation ----------------------------------------------------------------
+
+_APOSTROPHES = re.compile("['\u2018\u2019\u201b\u02bc\u02b9\u2032`\u00b4]")
+_MOJIBAKE_MARKS = "\u00c3\u00c2\u00e2"        # A-tilde, A-circumflex, a-circumflex lead most UTF-8 mojibake
+
+
+def _fold(text: str) -> str:
+    """Drop accents from Latin letters only (kana voicing marks and the like stay)."""
+    out = []
+    for ch in text:
+        if ch.isascii():
+            out.append(ch)
+            continue
+        base = unicodedata.normalize("NFD", ch)[0]
+        out.append(base if base.isascii() else ch)
+    return "".join(out)
+
+
+def norm_words(value: str) -> str:
+    """Words of a title for comparison: see the module docstring ("Name variants")."""
+    text = _fold(unicodedata.normalize("NFKC", value).casefold())
+    text = _APOSTROPHES.sub("", text).replace("\u00d7", "x").replace("&", " and ")
+    return " ".join(re.findall(r"\w+", text))
+
+
+def repair_mojibake(text: str) -> str:
+    """``text`` with UTF-8-read-as-cp1252/latin-1 mojibake undone, or ``text`` itself unless the
+    repair round-trips cleanly into printable text with fewer marker characters."""
+    def marks(t):
+        return sum(t.count(c) for c in _MOJIBAKE_MARKS)
+    if not marks(text):
+        return text
+    for encoding in ("cp1252", "latin-1"):
+        try:
+            fixed = text.encode(encoding).decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            continue
+        if (fixed != text and marks(fixed) < marks(text)
+                and all(unicodedata.category(c) not in ("Cc", "Cf", "Cs", "Co", "Cn") for c in fixed)):
+            return fixed
+    return text
+
+
 # ---- title and season parsing ----------------------------------------------------------
 
 def folder_terms(key: str) -> tuple[str, int | None, bool]:
     """``(base title, season, undecidable)`` for a title key. Undecidable means a season range,
     several season markers or season 0: the folder cannot bind to one AniList entry."""
-    entry = key.partition("/")[2] or key
-    base = resolve.derive_terms(entry).base
+    entry = repair_mojibake(key.partition("/")[2] or key)
+    # A loose video file: the episode marker is not part of the title.
+    head = names.series(entry) if entry.lower().endswith(MEDIA_EXT) else None
+    base = resolve.derive_terms(head or entry).base
     # Markers inside brackets count too ("Title (Season 2)", "Title [S02]"): the title cleaner drops
     # bracketed text, so look at the name with only the bracket characters removed as well.
     plain = resolve._EXT.sub("", unicodedata.normalize("NFKC", entry.strip()))
@@ -155,7 +221,8 @@ def list_snapshot(db) -> list[dict]:
 
 def match(rows: list[dict], base: str, season: int | None) -> dict:
     """Match a folder title against ``rows`` with ``anilist.choose`` semantics plus the season rule."""
-    wanted = normalize(base)
+    wanted = norm_words(base)
+    squashed = wanted.replace(" ", "")
     tokens = set(wanted.split())
     scored = []
     for row in rows:
@@ -163,10 +230,12 @@ def match(rows: list[dict], base: str, season: int | None) -> dict:
         for title in row["titles"]:
             if not _title_ok(title, season, base):
                 continue
-            candidate = normalize(title)
+            candidate = norm_words(title)
             words = set(candidate.split())
             if candidate == wanted:
                 key = (0, 0)
+            elif squashed and candidate.replace(" ", "") == squashed:
+                key = (0, 1)                # same letters, different spacing or punctuation
             elif tokens and tokens <= words:
                 key = (1, len(words - tokens))
             else:
@@ -351,6 +420,69 @@ def _manifest_titles(store, library: str) -> list[str]:
     return keys
 
 
+def _title_rows(store, library: str) -> dict[str, dict]:
+    """Manifest titles by key, in key order."""
+    rows = {r["rel_path"]: r for r in ManifestRepo(store.db).titles(library)}
+    if not rows:
+        raise KuraError("not_found", "No manifest for that library; run manifest build first")
+    return rows
+
+
+def has_media(kind: str, entry: str, files: list[str]) -> bool:
+    """False for a root entry that cannot be an anime title: a loose file that is not a video, or
+    a folder that holds files but no video. With nothing to look at, a folder counts as media
+    (fail toward identifying it)."""
+    if files:
+        return any(f.lower().endswith(MEDIA_EXT) for f in files)
+    return kind != "file" or entry.lower().endswith(MEDIA_EXT)
+
+
+def _local_files(repo: ManifestRepo, title: dict) -> list[str]:
+    """File paths of a title relative to it, as the audit reads them."""
+    prefix = title["rel_path"].partition("/")[2] + "/"
+    return [f["rel_path"][len(prefix):] if title["kind"] == "dir" and f["rel_path"].startswith(prefix)
+            else f["rel_path"].rsplit("/", 1)[-1] for f in repo.title_files(title["id"])]
+
+
+def file_terms(files: list[str], folder_base: str, folder_season: int | None):
+    """``(base, season)`` read from the video file names of a title, or None.
+
+    Used only when the folder name matched nothing. Every video file (extras ignored) must yield
+    a series name and the files must agree on name and season; a season the folder marks must not
+    contradict the files'. Returns None when the result adds nothing over the folder name."""
+    found: dict[tuple, str] = {}
+    for path in files:
+        if not path.lower().endswith(MEDIA_EXT):
+            continue
+        parsed = names.parse(path)
+        if parsed["extra"]:
+            continue
+        head = names.series(path)
+        if head is None:
+            return None
+        base, season = resolve._name(head)
+        season = season if season is not None else parsed["season"]
+        if not norm_words(base):
+            return None
+        found.setdefault((norm_words(base).replace(" ", ""), season), base)
+    if len(found) != 1:
+        return None
+    (squashed, season), base = next(iter(found.items()))
+    if season is not None and folder_season is not None and season != folder_season:
+        return None
+    season = season if season is not None else folder_season
+    if squashed == norm_words(folder_base).replace(" ", "") and season == folder_season:
+        return None
+    return base, season
+
+
+def _media_titles(store, titles: list[dict]) -> set[str]:
+    """Keys of the titles that can be anime titles (see ``has_media``)."""
+    repo = ManifestRepo(store.db)
+    return {t["rel_path"] for t in titles
+            if has_media(t["kind"], t["rel_path"].partition("/")[2], _local_files(repo, t))}
+
+
 def _counts(rows: dict[str, dict], wanted: list[str]) -> dict:
     counts = {s: 0 for s in STATUSES}
     by_source = {"list": 0, "alias": 0}
@@ -368,17 +500,30 @@ def sync(store, *, library: str, titles: list[str] | None = None, aliases=None,
          max_lookups: int = 60, refresh: bool = False, now=time.time) -> dict:
     """Identify titles. ``aliases`` is an AniList resolver or None (offline only)."""
     check_sync_args(library, titles, max_lookups)
-    manifest = _manifest_titles(store, library)
-    wanted = sorted(set(titles)) if titles is not None else manifest
-    missing = sorted(set(wanted) - set(manifest))
+    by_key = _title_rows(store, library)
+    wanted = sorted(set(titles)) if titles is not None else list(by_key)
+    missing = sorted(set(wanted) - set(by_key))
     if missing:
         raise KuraError("not_found", "Title not in the manifest", titles=missing[:20])
+    repo = ManifestRepo(store.db)
+    local, skipped = {}, []
+    for key in wanted:
+        local[key] = _local_files(repo, by_key[key])
+        if not has_media(by_key[key]["kind"], key.partition("/")[2], local[key]):
+            skipped.append(key)
+    wanted = [k for k in wanted if k not in set(skipped)]
     moment = now()
     existing = load(store.db, library)
     before = dict(existing)
     seen = _fingerprints(store.db, library)
     snapshot = list_snapshot(store.db)
     offline, need = {}, []
+    if skipped:             # an old row of a non-owner source for such an entry is noise
+        with _tx(store.db):
+            store.db.executemany("DELETE FROM title_identities WHERE library=? AND title=? AND source<>'owner'",
+                                 [(library, k) for k in skipped])
+        existing, seen = load(store.db, library), _fingerprints(store.db, library)
+        before = dict(existing)
     for key in wanted:
         current = existing.get(key)
         if current is not None and current["source"] == "owner":
@@ -388,11 +533,18 @@ def sync(store, *, library: str, titles: list[str] | None = None, aliases=None,
         base, season, undecidable = folder_terms(key)
         found = ({"status": "ambiguous", "anilist_id": None, "matched": None, "candidates": []}
                  if undecidable else match(snapshot, base, season))
+        query, alt = base, None
+        if found["status"] == "unresolved" and not undecidable:
+            alt = file_terms(local[key], base, season)
+            if alt is not None:
+                again = match(snapshot, *alt)
+                if again["status"] != "unresolved":
+                    found, query, alt = again, alt[0], None
         if found["status"] == "unresolved":
             if _fresh(current, moment) and not refresh:
                 continue                    # asked recently and nothing new offline
-            need.append((key, base, season))    # a refresh drops what it cannot reconfirm
-        record = _carry(_record(found, "list", base), current)
+            need.append((key, base, season, alt))   # a refresh drops what it cannot reconfirm
+        record = _carry(_record(found, "list", query), current)
         if not _same(current, record):
             offline[key] = record
     _store(store.db, library, offline, seen, moment)
@@ -402,13 +554,18 @@ def sync(store, *, library: str, titles: list[str] | None = None, aliases=None,
     if counter is not None:
         found_now, stop = {}, False
         try:
-            for key, base, season in need:
+            for key, base, season, alt in need:
                 if stop:
                     pending += 1
                     continue
                 if not normalize(base):
                     continue
                 record, stop, exhausted = _alias(counter, base, season, max_lookups)
+                if not exhausted and not stop and alt is not None and record["status"] == "unresolved":
+                    second, stop, exhausted = _alias(counter, alt[0], alt[1], max_lookups)
+                    if not exhausted:       # the file-name query settles it, or adds what it rejected
+                        record = (second if second["status"] != "unresolved" else
+                                  {**record, "candidates": sorted(set(record["candidates"]) | set(second["candidates"]))})
                 if exhausted:
                     stop = True
                     pending += 1
@@ -423,7 +580,7 @@ def sync(store, *, library: str, titles: list[str] | None = None, aliases=None,
     return {"library": library, "titles": len(wanted),
             "resolved": by_source, "pinned": counts["pinned"], "ambiguous": counts["ambiguous"],
             "unresolved": counts["unresolved"], "unavailable": counts["unavailable"],
-            "not_anime": counts["not_anime"],
+            "not_anime": counts["not_anime"], "non_media": len(skipped),
             "lookups": {"made": counter.made if counter else 0, "budget": max_lookups if counter else 0},
             "pending": pending}
 
@@ -502,12 +659,13 @@ def show(store, library: str, status: str | None = None) -> dict:
     if status is not None and status not in STATUSES:
         raise _bad("Unknown status filter", allowed=list(STATUSES))
     rows = load(store.db, library)
-    keys = [r["rel_path"] for r in ManifestRepo(store.db).titles(library)]
+    manifest = ManifestRepo(store.db).titles(library)
+    present = {r["rel_path"] for r in manifest}     # identities of absent or pruned titles stay out of sight
+    keys = sorted(_media_titles(store, manifest))
     counts = {s: 0 for s in STATUSES}
     for key in keys:
         if key in rows:
             counts[rows[key]["status"]] += 1
-    present = set(keys)         # identities of absent or pruned titles stay out of sight
     listed = [{"title": k, **v} for k, v in sorted(rows.items())
               if k in present and (status is None or v["status"] == status)]
     out = {"library": library, "counts": {k: v for k, v in counts.items() if v},
@@ -537,12 +695,13 @@ def retain_reasons(key: str, identities: dict[str, dict], retain) -> list[str]:
 def retain_check(store, library: str, retain) -> dict:
     """What a retain list would protect in this library. Read-only."""
     keys = _manifest_titles(store, library)
+    media = _media_titles(store, ManifestRepo(store.db).titles(library))
     rows = load(store.db, library)
     retained, possible, unidentified, bound = [], [], 0, set()
     for key in keys:
         row = rows.get(key)
         if row is None or row["status"] not in IDENTIFIED:
-            unidentified += 1
+            unidentified += key in media
         elif row["anilist_id"] in retain:
             bound.add(row["anilist_id"])
             retained.append({"title": key, "anilist_id": row["anilist_id"], "source": row["source"]})

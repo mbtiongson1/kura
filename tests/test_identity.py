@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -11,6 +12,7 @@ import kura.cli as cli
 from kura import identity
 from kura.anilist import AniList, choose
 from kura.idlist import parse, parse_pins
+from kura.manifest_store import ManifestRepo
 from kura.models import KuraError
 from test_manifest import GOOD, Lab
 
@@ -340,6 +342,258 @@ class AliasFallback(Base):
         out = self.sync(aliases=None)
         self.assertEqual(self.row("Kura Alpha")["anilist_id"], A)
         self.assertEqual(out["lookups"], {"made": 0, "budget": 0})
+
+
+class Tree(Base):
+    """A library made of plain files: ``{entry: None | {relative path: bytes}}``; a string entry is a loose file."""
+    TREE: dict = {}
+
+    def setUp(self):
+        self.lab = Lab(self)
+        for entry, content in self.TREE.items():
+            if content is None:
+                (self.lab.lib / entry).write_bytes(b"x" * 100)
+                continue
+            for rel in content:
+                path = self.lab.lib / entry / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"x" * 100)
+        self.lab.build()
+        self.store = self.lab.store
+
+
+def parse_ids(text):
+    path = Path(tempfile.mkdtemp()) / "ids.txt"
+    path.write_text(text)
+    return parse(path)
+
+
+def eps(group, series, *numbers, tags="[1080p HEVC][A7801AD7]", ext="mkv"):
+    return {f"[{group}] {series} - {n:02d} {tags}.{ext}": None for n in numbers}
+
+
+class NameVariants(unittest.TestCase):
+    ROWS = [{"id": A, "titles": ["SPY×FAMILY"]}, {"id": B, "titles": ["Carole & Tuesday"]},
+            {"id": C, "titles": ["Toaru Kagaku no Railgun"]}, {"id": D, "titles": ["Howl‘s Moving Castle"]},
+            {"id": E, "titles": ["Kokoro ga Sakebitagatterun da."]}]
+
+    def one(self, folder, rows=None, season=None):
+        got = identity.match(rows or self.ROWS, identity.folder_terms(f"main/{folder}")[0], season)
+        return got["anilist_id"], got["status"]
+
+    def test_spelling_variants_compare_equal(self):
+        for folder, wanted in (("SPYxFAMILY", A), ("Spy x Family", A), ("Carole and Tuesday", B),
+                               ("To Aru Kagaku no Railgun", C), ("Howl's Moving Castle", D),
+                               ("Howl’s Moving Castle", D), ("Howls Moving Castle", D),
+                               ("Kokoro ga Sakebitagatterunda", E)):
+            with self.subTest(folder=folder):
+                self.assertEqual(self.one(folder), (wanted, "resolved"))
+        spaced = [{"id": A, "titles": ["Tatteiru"]}]
+        self.assertEqual(self.one("Tatte Iru", spaced), (A, "resolved"))
+
+    def test_a_word_for_word_title_beats_a_respaced_one(self):
+        rows = [{"id": A, "titles": ["Tatteiru"]}, {"id": B, "titles": ["Tatte Iru"]}]
+        got = identity.match(rows, "Tatte Iru", None)
+        self.assertEqual((got["status"], got["anilist_id"], got["candidates"]), ("resolved", B, [A]))
+        both = identity.match([{"id": A, "titles": ["Tatteiru"]}, {"id": B, "titles": ["Tat teiru"]}], "Tatte Iru", None)
+        self.assertEqual((both["status"], both["candidates"]), ("ambiguous", [A, B]))
+
+    def test_variants_do_not_loosen_what_is_not_a_variant(self):
+        for folder in ("Russia-go", "Spy Family Extra Words", "Carole Tuesday Zero"):
+            self.assertEqual(self.one(folder)[0], None, folder)
+        self.assertEqual(self.one("SPYxFAMILY", season=2)[1], "unresolved")      # the season rule still applies
+        self.assertEqual(identity.match([{"id": A, "titles": ["Rossiya-go"]}], "Russia-go", None)["status"], "unresolved")
+
+    def test_accents_fold_on_latin_letters_only(self):
+        self.assertEqual(identity.norm_words("ChäoS;HEAd"), "chaos head")
+        self.assertEqual(identity.norm_words("がっこう"), "がっこう")   # kana voicing stays
+        self.assertNotEqual(identity.norm_words("か"), identity.norm_words("が"))
+
+
+class Mojibake(unittest.TestCase):
+    def test_repairs_utf8_read_as_cp1252_or_latin1(self):
+        for broken, fixed in (("ChÃ¤oS;HEAd", "ChäoS;HEAd"),
+                              ("DameÃ—Prince", "Dame×Prince"),
+                              ("Shouâ˜†Kageki", "Shou☆Kageki"),
+                              ("Eyeâ€™s", "Eye’s"),
+                              ("Waitâ€¦", "Wait…"),
+                              ("ChÃ¤os".encode("utf-8").decode("latin-1"), "ChÃ¤os")):
+            if broken.startswith("ChÃ\u0083"):          # a double encoding is not undone twice
+                continue
+            with self.subTest(broken=broken):
+                self.assertEqual(identity.repair_mojibake(broken), fixed)
+
+    def test_never_applied_when_it_would_not_round_trip(self):
+        for text in ("Plain Title", "Café", "Chäos", "Ãne",               # clean or not UTF-8 bytes
+                     "ChÃ¤os あ",                                          # kana cannot be encoded back
+                     "â€", "DameÃ", "Ã¤\u0001"):                # truncated or control result
+            with self.subTest(text=text):
+                self.assertEqual(identity.repair_mojibake(text), text)
+
+    def test_a_repaired_folder_name_matches(self):
+        for folder, title in (("ChÃ¤oS;HEAd", "ChäoS;HEAd"), ("DameÃ—Prince", "Dame x Prince"),
+                              ("Shouâ˜†Kageki", "Shou☆Kageki")):
+            with self.subTest(folder=folder):
+                base = identity.folder_terms(f"main/{folder}")[0]
+                self.assertEqual(identity.match([{"id": A, "titles": [title]}], base, None)["anilist_id"], A)
+        self.assertNotIn("Ã", identity.folder_terms("main/ChÃ¤oS;HEAd")[0])
+
+
+class FileNames(Tree):
+    TREE = {
+        "Dead Mouth Dead Play": eps("ASW", "Dead Mount Death Play", 1, 2, 3),
+        "Hibike! Euphoneum": {**eps("ASW", "Hibike! Euphonium S3", 1, 2),
+                              "NC/[ASW] Hibike! Euphonium NCOP.mkv": None},
+        "Dragon Meshi": {"[Lazy] Dungeon Meshi - 01v2 (1080p).mkv": None, "[Lazy] Dungeon Meshi - 02 (1080p).mkv": None},
+        "Mixed Names": {**eps("ASW", "Show One", 1), **eps("ASW", "Show Two", 2)},
+        "Mixed Years": {**eps("ASW", "Show Three S2", 1), **eps("ASW", "Show Three", 2)},
+        "Odd Folder": {**eps("ASW", "Show Four", 1), "Specials/Behind The Scenes.mkv": None},
+        "Season Clash S2": eps("ASW", "Show Five S3", 1, 2),
+        "Misc Folder": eps("ASW", "Show Six", 1, 2),
+        "Scene Folder": {"Show.Seven.S02E01.1080p.WEB.x265-Grp.mkv": None, "Show.Seven.S02E02.1080p.WEB.x265-Grp.mkv": None},
+    }
+
+    def setUp(self):
+        super().setUp()
+        seed(self.store.db, [(A, "Dead Mount Death Play", None, []), (B, "Hibike! Euphonium 3", None, []),
+                             (C, "Dungeon Meshi", None, []), (D, "Show One", None, []), (E, "Show Two", None, []),
+                             (999000006, "Show Three", None, []), (999000007, "Show Five Season 3", None, []),
+                             (999000008, "Show Seven Season 2", None, [])])
+
+    def test_a_misspelled_folder_is_read_from_its_files(self):
+        self.sync(aliases=None)
+        dead = self.row("Dead Mouth Dead Play")
+        self.assertEqual((dead["status"], dead["anilist_id"], dead["source"], dead["query"]),
+                         ("resolved", A, "list", "Dead Mount Death Play"))
+        meshi = self.row("Dragon Meshi")
+        self.assertEqual((meshi["anilist_id"], meshi["query"], meshi["matched"]), (C, "Dungeon Meshi", "Dungeon Meshi"))
+
+    def test_season_and_extras_come_from_the_files(self):
+        self.sync(aliases=None)
+        hibike = self.row("Hibike! Euphoneum")           # the NC folder's file is an extra and is ignored
+        self.assertEqual((hibike["status"], hibike["anilist_id"]), ("resolved", B))
+        scene = self.row("Scene Folder")
+        self.assertEqual((scene["anilist_id"], scene["query"]), (999000008, "Show Seven"))
+
+    def test_disagreeing_files_keep_the_folder_result(self):
+        self.sync(aliases=None)
+        for name in ("Mixed Names", "Mixed Years", "Odd Folder", "Season Clash S2"):
+            with self.subTest(name=name):
+                self.assertEqual((self.row(name)["status"], self.row(name)["anilist_id"]), ("unresolved", None))
+        self.assertEqual(self.row("Mixed Names")["query"], "Mixed Names")
+
+    def test_file_names_that_match_nothing_stay_unresolved(self):
+        self.sync(aliases=None)
+        self.assertEqual(self.row("Misc Folder")["status"], "unresolved")
+
+    def test_the_folder_name_wins_when_it_matches(self):
+        seed(self.store.db, [(999000009, "Misc Folder", None, [])])
+        self.sync(aliases=None)
+        row = self.row("Misc Folder")
+        self.assertEqual((row["anilist_id"], row["query"]), (999000009, "Misc Folder"))
+
+    def test_the_alias_pass_asks_for_the_folder_then_the_file_name(self):
+        resolver = Resolver({"Dragon Meshi": [], "Dungeon Meshi": (999000010, ["Dungeon Meshi Alias"]),
+                             "Show Six": (999000011, ["Show Six"])})
+        self.store.db.execute("DELETE FROM anilist_list_entries")
+        self.store.db.commit()
+        out = self.sync(aliases=resolver, max_lookups=50, titles=["main/Dragon Meshi", "main/Misc Folder"])
+        self.assertEqual(resolver.queries, ["Dragon Meshi", "Dungeon Meshi", "Misc Folder", "Show Six"])
+        meshi = self.row("Dragon Meshi")
+        self.assertEqual((meshi["status"], meshi["anilist_id"], meshi["source"], meshi["query"]),
+                         ("resolved", 999000010, "alias", "Dungeon Meshi"))
+        six = self.row("Misc Folder")
+        self.assertEqual((six["anilist_id"], six["source"], six["query"]), (999000011, "alias", "Show Six"))
+        self.assertEqual(out["lookups"]["made"], 4)
+
+    def test_the_file_name_lookup_respects_the_budget(self):
+        resolver = Resolver({})
+        out = self.sync(aliases=resolver, max_lookups=1, titles=["main/Misc Folder"])
+        self.assertEqual((resolver.queries, out["pending"]), (["Misc Folder"], 1))
+        self.assertEqual(self.row("Misc Folder")["source"], "list")      # no alias answer recorded: retried next run
+        out = self.sync(aliases=resolver, max_lookups=5, titles=["main/Misc Folder"])
+        self.assertEqual((resolver.queries, out["pending"]), (["Misc Folder", "Misc Folder", "Show Six"], 0))
+
+    def test_file_terms_rules(self):
+        self.assertEqual(identity.file_terms(["[G] Show - 01.mkv", "[G] Show - 02.mkv"], "Other", None), ("Show", None))
+        self.assertIsNone(identity.file_terms(["[G] Show - 01.mkv", "[G] Show - 02.mkv"], "Show", None))   # adds nothing
+        self.assertEqual(identity.file_terms(["[G] Show - 01.mkv"], "Show", 2), None)                        # same name and season
+        self.assertEqual(identity.file_terms(["[G] Show - 01.mkv"], "Other", 2), ("Show", 2))
+        self.assertIsNone(identity.file_terms(["[G] Show S3 - 01.mkv"], "Other", 2))                       # season clash
+        self.assertIsNone(identity.file_terms(["[G] Show - 01.mkv", "Movie.mkv"], "Other", None))          # one file has no episode
+        self.assertIsNone(identity.file_terms(["notes.txt", "poster.jpg"], "Other", None))                 # no video at all
+        self.assertEqual(identity.file_terms(["Extras/[G] Other - 01.mkv", "[G] Show - 01.mkv"], "X", None), ("Show", None))
+
+
+class NonMedia(Tree):
+    TREE = {
+        "[ASW] Bocchi the Rock! - 04 [1080p HEVC][A7801AD7].mkv": None,
+        "[ASW] Bocchi the Rock! - 04 [1080p HEVC][A7801AD7]-poster.jpg": None,
+        "[ASW] Bocchi the Rock! - 04 [1080p HEVC][A7801AD7]-logo.png": None,
+        "[ASW] Bocchi the Rock! - 04 [1080p HEVC][A7801AD7].nfo": None,
+        ".DS_Store": None,
+        "sync.ffs_db": None,
+        "fonts": {"a.ttf": None, "b.otf": None},
+        "Real Show": {"ep01.mkv": None, "poster.jpg": None},
+        "Subs Only": {"ep01.srt": None},
+    }
+
+    def setUp(self):
+        super().setUp()
+        seed(self.store.db, [(A, "Bocchi the Rock!", None, []), (B, "Real Show", None, [])])
+
+    def keys(self):
+        return {r["rel_path"] for r in ManifestRepo(self.store.db).titles("home")}
+
+    def test_loose_video_has_its_episode_stripped(self):
+        key = "main/[ASW] Bocchi the Rock! - 04 [1080p HEVC][A7801AD7].mkv"
+        self.assertEqual(identity.folder_terms(key), ("Bocchi the Rock", None, False))
+        self.assertEqual(identity.folder_terms("main/[G] Show - 05 [S01E05].mkv"), ("Show", None, False))
+        self.assertEqual(identity.folder_terms("main/Show S02E05.mkv")[1], None)       # nothing to strip without a marker
+        self.assertEqual(identity.folder_terms("main/Movie Name.mkv")[0], "Movie Name")
+        self.sync(aliases=None)
+        row = identity.load(self.store.db, "home")[key]
+        self.assertEqual((row["status"], row["anilist_id"], row["query"]), ("resolved", A, "Bocchi the Rock"))
+
+    def test_sidecars_dotfiles_and_media_free_folders_are_not_titles(self):
+        out = self.sync(aliases=None)
+        rows = identity.load(self.store.db, "home")
+        self.assertEqual(sorted(k.partition("/")[2] for k in rows),
+                         ["Real Show", "[ASW] Bocchi the Rock! - 04 [1080p HEVC][A7801AD7].mkv"])
+        self.assertEqual(out["non_media"], len(self.keys()) - 2)
+        self.assertEqual(out["titles"], 2)
+        self.assertEqual((out["resolved"], out["unresolved"]), ({"list": 2, "alias": 0}, 0))
+        self.assertTrue(identity.has_media("dir", "x", ["a/b.MKV"]))
+        self.assertTrue(identity.has_media("dir", "x", []))
+        self.assertFalse(identity.has_media("file", "x.jpg", []))
+        self.assertFalse(identity.has_media("file", "x.jpg", ["x.jpg"]))
+
+    def test_show_and_retain_check_do_not_count_them_as_unidentified(self):
+        shown = identity.show(self.store, "home")
+        self.assertEqual(shown["unrecorded"], 2)
+        self.sync(aliases=None)
+        self.assertEqual(identity.show(self.store, "home")["unrecorded"], 0)
+        retain = parse_ids(f"{B}\n")
+        out = identity.retain_check(self.store, "home", retain)
+        self.assertEqual((out["unidentified_titles"], [t["title"] for t in out["retained_titles"]]), (0, ["main/Real Show"]))
+
+    def test_an_explicit_non_media_title_is_skipped_and_an_old_row_is_dropped(self):
+        key = "main/fonts"
+        self.store.db.execute("INSERT INTO title_identities(library, title, status, source, candidates, updated_at)"
+                              " VALUES ('home', ?, 'unresolved', 'list', '[]', 1.0)", (key,))
+        self.store.db.execute("INSERT INTO title_identities(library, title, status, source, candidates, updated_at)"
+                              " VALUES ('home', 'main/sync.ffs_db', 'not_anime', 'owner', '[]', 1.0)")
+        self.store.db.commit()
+        out = self.sync(aliases=None, titles=[key, "main/sync.ffs_db", "main/Real Show"])
+        rows = identity.load(self.store.db, "home")
+        self.assertNotIn(key, rows)
+        self.assertEqual(rows["main/sync.ffs_db"]["status"], "not_anime")        # owner rows stay
+        self.assertEqual((out["titles"], out["non_media"]), (1, 2))
+
+    def test_they_stay_unidentified_for_a_retain_plan(self):
+        self.sync(aliases=None)
+        rows = identity.load(self.store.db, "home")
+        self.assertEqual(identity.retain_reasons("main/fonts", rows, parse_ids(f"{B}\n")), ["identity_unknown"])
 
 
 class Owner(Base):

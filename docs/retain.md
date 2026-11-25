@@ -46,6 +46,32 @@ Titles are matched in two passes, cheapest first.
    failure stops the run's lookups.
    `--offline` skips this pass.
 
+Name variants. Folder and AniList titles are compared after one normalisation: case,
+compatibility forms, accents on Latin letters, every apostrophe variant dropped, `×` read
+as `x` and `&` as "and". A title that differs only in spacing or punctuation
+(`Tatte Iru` / `Tatteiru`, `To Aru` / `Toaru`) is an exact match too, ranked just below a
+word-for-word one, so a word-for-word title wins a tie. Different spellings of a word
+(`Russia-go` / `Rossiya-go`) are still not matched: use `identity pin`. A folder name that is
+mojibake (UTF-8 read as cp1252 or latin-1, e.g. `ChÃ¤oS`) is repaired in memory for matching,
+only when the repair round-trips cleanly and has fewer marker characters; nothing on disk is
+renamed. A loose video file at a root has its episode marker removed first.
+
+File names as a second opinion. When the folder name matches nothing, the series name and
+season are read from the video files inside (the release-name parser; `Extras`/`NC`
+folders and OP/ED/PV-style files are ignored). They are used only when every video file
+yields a series name and all agree on name and season, and a season the folder marks does
+not contradict them; any disagreement keeps the folder result. The name goes through the
+same offline matching, then (after the folder name) the alias pass, which costs one more
+lookup from the budget; the `query` column records the name that matched. A title whose
+file-name lookup does not fit the budget is left for the next run.
+
+Root entries that are not titles. A loose file that is not a video (poster or logo images,
+`.nfo`, dotfiles, `*.ffs_db`) and a folder that holds files but no video (a `fonts` folder)
+are skipped by `identity sync` (reported as `non_media`, not counted as unresolved; an old
+non-owner row for one is dropped), by `identity show`'s `unrecorded`, by the retain check's
+`unidentified_titles` and by the audit's `identity_unknown` flag. They get no identity, so a
+retain plan still refuses to touch them (`identity_unknown`), and an owner row for one is kept.
+
 Season rule. A folder marked season 2 or higher binds only to an entry whose matched title
 carries that season (`Season N`, `Nth Season`, `SN`, or a trailing `N`); the season-1 entry
 is never accepted for it. A folder marked season 1 never binds to an entry titled for a

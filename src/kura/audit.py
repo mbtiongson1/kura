@@ -390,7 +390,8 @@ def _audit_title(ctx, title):
 
     # identity and retain
     status = ident["status"] if ident else "unrecorded"
-    if not known and status != "not_anime":
+    media = identity.has_media(title["kind"], key.partition("/")[2], [f["local"] for f in files])
+    if not known and status != "not_anime" and media:      # sidecars and the like are not titles
         flags.add("identity_unknown", "warn" if ctx["retain"] is not None else "info", status=status)
     retained = False
     if ctx["retain"] is not None:
