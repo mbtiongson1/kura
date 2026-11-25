@@ -182,8 +182,8 @@ def _number(value, default=None):
 class AniList:
     """Alias resolver port. One bounded request per uncached query, paced.
 
-    Defaults assume AniList's degraded limit of 30 requests per minute unless its
-    ``X-RateLimit-Limit`` header says more (capped at 90). A 429 honours ``Retry-After``
+    Defaults assume AniList's degraded limit of 30 requests per minute until its
+    ``X-RateLimit-Limit`` header says otherwise (higher or lower, capped at 90). A 429 honours ``Retry-After``
     and ``X-RateLimit-Remaining`` / ``Reset`` are respected, but the total wait for one
     lookup never exceeds ``max_wait`` seconds: past that the resolver raises
     ``alias_unavailable`` immediately (and keeps doing so, without any request, until the
@@ -219,7 +219,7 @@ class AniList:
     def _observe(self, headers: dict):
         limit = _number(headers.get("X-RateLimit-Limit"))
         if limit and limit > 0:
-            self.interval = 60.0 / min(max(limit, self.per_minute), 90)
+            self.interval = 60.0 / min(limit, 90)   # an advertised limit binds in both directions
         remaining = _number(headers.get("X-RateLimit-Remaining"))
         if remaining is not None and remaining <= 1:
             reset = _number(headers.get("X-RateLimit-Reset"))

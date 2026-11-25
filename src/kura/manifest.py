@@ -356,6 +356,15 @@ def _title_row(key: str, title, identity: dict) -> dict:
             "identity": identity}
 
 
+def _protected_elsewhere(repo: ManifestRepo, db, library: str, infohash: str) -> bool:
+    row = repo.torrent(infohash)
+    if not row or not isinstance(row["protection"], dict) or not row["protection"].get("protected"):
+        return False
+    return db.execute(
+        "SELECT 1 FROM manifest_links l JOIN library_titles t ON t.id=l.title_id"
+        " WHERE l.infohash=? AND t.library<>? LIMIT 1", (infohash, library)).fetchone() is not None
+
+
 def _identity(anilist: dict | None, assessment: dict) -> dict:
     return {"anilist": anilist, "assessment": assessment}
 
@@ -420,6 +429,11 @@ def build(store, *, roots: dict[str, Path], library: str, torrents_dir: Path,
         # Record every torrent's current protection before anything else can expose an old
         # link: an interrupted build must never leave a stale "public" classification live.
         for meta, protection in parsed.values():
+            if not (protection.protected or meta.private) and _protected_elsewhere(
+                    repo, store.db, library, meta.infohash):
+                # The record is shared by infohash across libraries. Another library already
+                # holds this torrent under a protected descriptor: never silently clear it.
+                protection = Protection(True, (*protection.reasons, "conflicting_descriptor"))
             repo.upsert_torrent(_torrent_row(meta, protection, policy))
 
         # 2. Inventory every root (metadata only) and match.

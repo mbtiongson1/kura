@@ -443,6 +443,22 @@ class Build(unittest.TestCase):
         self.assertEqual(row["status"], "protected")
         self.assertIn("tracker_denylist", row["reasons"])
 
+    def test_protection_shared_across_libraries_is_never_silently_cleared(self):
+        mirror = torrentgen.build("Kura Sample Series", GOOD, announce="http://tracker.blocked.example/announce")
+        (self.lab.torrents / "Kura Sample Series.torrent").write_bytes(mirror.data)
+        self.lab.build()                                       # library "home": protected descriptor
+        other_lib, other_torrents = self.lab.tmp / "lib2", self.lab.tmp / "torrents2"
+        other_lib.mkdir()
+        other_torrents.mkdir()
+        self.public.write_tree(other_lib)
+        (other_torrents / "x.torrent").write_bytes(self.public.data)    # public copy, same infohash
+        manifest.build(self.lab.store, roots={"main": other_lib}, library="second",
+                       torrents_dir=other_torrents, policy=self.lab.policy())
+        row = {t["title"]: t for t in manifest.show(self.lab.store, "second")["titles"]}["main/Kura Sample Series"]
+        self.assertEqual(row["status"], "protected")
+        self.assertIn("conflicting_descriptor", row["reasons"])
+        self.assertEqual(self.lab.status("Kura Sample Series")["status"], "protected")
+
     def test_only_a_complete_torrent_makes_its_files_reacquirable(self):
         pack = self.lab.add("Kura Pad Pack", GOOD, pad=True)
         (self.lab.lib / "Kura Pad Pack" / "ep02.mkv").unlink()    # title now holds ep01 only
@@ -604,6 +620,14 @@ class AniListPacing(unittest.TestCase):
         client.resolve("Kura Sample Series")
         client.resolve("Kura Sample Series")
         self.assertEqual(clock.slept, [10.0])
+
+    def test_lower_advertised_limit_slows_the_pace(self):
+        transport = Mock(return_value=(BODY, {"X-RateLimit-Limit": "10", "X-RateLimit-Remaining": "9"}))
+        client, clock = self.make(transport)
+        client.resolve("Kura Sample Series")
+        client.resolve("Kura Sample Series")
+        client.resolve("Kura Sample Series")
+        self.assertAlmostEqual(clock.slept[-1], 6.0)
 
     def test_header_limit_widens_pace_but_is_capped(self):
         transport = Mock(return_value=(BODY, {"X-RateLimit-Limit": "90", "X-RateLimit-Remaining": "80"}))
