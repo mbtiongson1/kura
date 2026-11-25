@@ -12,7 +12,8 @@ from unittest.mock import patch
 
 import torrentgen
 import kura.cli as cli
-from kura import manifest, quarantine
+from kura import identity, manifest, quarantine
+from kura.idlist import parse
 from kura.manifest_store import ManifestRepo
 from kura.models import KuraError
 from kura.protect import load_policy
@@ -473,6 +474,150 @@ class CommandLine(Base):
             self.assertEqual((code, out["error"]["code"]), (2, expected), extra)
         code, out = self.cli("manifest", "plan")
         self.assertEqual((code, out["error"]["code"]), (2, "invalid_arguments"))
+
+
+A, B, C, D, E = 999000001, 999000002, 999000003, 999000004, 999000005
+
+
+class RetainPlan(Base):
+    """``--retain``: a retained title never moves and an unidentified one is refused."""
+
+    def setUp(self):
+        super().setUp()
+        for name in ("Kura Alpha", "Kura Beta", "Kura Gamma", "Kura Delta", "Kura Epsilon"):
+            self.add(name)
+        self.lab.build()
+        self.ids = {"Kura Alpha": A, "Kura Beta": B, "Kura Gamma": C}
+        for name, anilist_id in self.ids.items():
+            identity.pin(self.lab.store, "home", f"main/{name}", anilist_id)
+        identity.pin(self.lab.store, "home", "main/Kura Delta", not_anime=True)   # Epsilon: no row at all
+
+    def retain(self, *ids):
+        path = self.lab.tmp / "retain.txt"
+        path.write_text("# Kura retain list\n" + "".join(f"{i}  # keep\n" for i in ids))
+        return parse(path)
+
+    def moved(self, doc):
+        return [m["from"] for m in doc["moves"]]
+
+    def test_without_a_list_the_plan_only_gains_a_null_retain_key(self):
+        doc = self.plan()
+        self.assertIn("retain", doc)
+        self.assertIsNone(doc["retain"])
+        self.assertEqual(self.moved(doc), ["Kura Alpha", "Kura Beta", "Kura Delta", "Kura Epsilon", "Kura Gamma"])
+        self.assertEqual(doc["plan_version"], 1)
+
+    def test_retained_unknown_and_ambiguous_titles_are_refused(self):
+        self.lab.store.db.execute(
+            "INSERT INTO title_identities(library, title, status, source, candidates, updated_at)"
+            " VALUES ('home', 'main/Kura Epsilon', 'ambiguous', 'list', ?, 1.0)", (json.dumps([D, E]),))
+        self.lab.store.db.commit()
+        doc = self.plan(retain=self.retain(A))
+        self.assertEqual(self.moved(doc), ["Kura Beta", "Kura Gamma"])
+        refused = self.refused(doc)
+        self.assertEqual(refused["main/Kura Alpha"]["reasons"], ["retained"])
+        self.assertEqual(refused["main/Kura Alpha"]["status"], "reacquirable")
+        self.assertEqual(refused["main/Kura Delta"]["reasons"], ["identity_unknown"])   # not_anime is not an identity
+        self.assertEqual(refused["main/Kura Epsilon"]["reasons"], ["identity_unknown"])
+        self.assertEqual(doc["retain"], {"sha256": self.retain(A).sha256, "ids": 1})
+
+    def test_recorded_candidates_in_the_list_refuse_the_title(self):
+        self.lab.store.db.execute(
+            "INSERT INTO title_identities(library, title, anilist_id, status, source, candidates, updated_at)"
+            " VALUES ('home', 'main/Kura Epsilon', ?, 'resolved', 'list', ?, 1.0)", (E, json.dumps([D])))
+        self.lab.store.db.commit()
+        doc = self.plan(retain=self.retain(D))
+        self.assertEqual(self.refused(doc)["main/Kura Epsilon"]["reasons"], ["retain_possible"])
+        self.assertNotIn("Kura Epsilon", self.moved(doc))
+        self.assertIn("Kura Epsilon", self.moved(self.plan(retain=self.retain(999000099))))
+
+    def test_an_empty_list_still_requires_identities(self):
+        doc = self.plan(retain=self.retain())
+        self.assertEqual(self.moved(doc), ["Kura Alpha", "Kura Beta", "Kura Gamma"])
+        self.assertEqual(doc["retain"]["ids"], 0)
+
+    def test_retained_titles_never_move_for_any_list(self):
+        everything = (A, B, C, D, E, 999000099)
+        for size in range(len(everything) + 1):
+            for start in range(len(everything) - size + 1):
+                retain = everything[start:start + size]
+                doc = self.plan(retain=self.retain(*retain))
+                for name in self.moved(doc):
+                    self.assertIn(name, self.ids)
+                    self.assertNotIn(self.ids[name], retain, retain)
+
+    def test_plan_records_the_digest_and_count_never_the_ids(self):
+        retain = self.retain(A, 999000099)
+        doc = quarantine.plan(self.lab.store, library="home", skip_swarm=True, retain=retain)["plan"]
+        self.assertEqual(doc["retain"], retain.summary())
+        self.assertNotIn(str(A), json.dumps(doc))
+        self.assertNotIn("999000099", json.dumps(doc))
+        self.assertEqual(quarantine.plan_hash_of(doc), doc["plan_hash"])
+        stored = self.repo.plan(doc["plan_hash"])["plan"]
+        self.assertEqual(stored["retain"], retain.summary())
+
+    def test_the_list_changes_the_plan_hash_and_the_batch_folder(self):
+        t = int(time.time()) + 3
+        plain = self.plan(now=lambda: t)
+        a = self.plan(now=lambda: t, retain=self.retain(A))
+        b = self.plan(now=lambda: t, retain=self.retain(B))
+        self.assertEqual(len({plain["plan_hash"], a["plan_hash"], b["plan_hash"]}), 3)
+        self.assertEqual(self.plan(now=lambda: t, retain=self.retain(A))["plan_hash"], a["plan_hash"])
+        for move in a["moves"]:
+            self.assertIn(a["batch_id"], move["to"])
+
+    def test_final_guard_rechecks_the_move_list(self):
+        real = identity.retain_reasons
+        calls = []
+
+        def lying_once(key, rows, retain):
+            calls.append(key)
+            return [] if len(calls) <= 5 else real(key, rows, retain)
+        with patch.object(identity, "retain_reasons", lying_once):
+            with self.assertRaises(KuraError) as caught:
+                quarantine.plan(self.lab.store, library="home", skip_swarm=True, retain=self.retain(A))
+        self.assertEqual(caught.exception.code, "retain_violation")
+        self.assertFalse(self.repo.plan("0" * 64))
+
+    def test_retain_must_be_a_parsed_list(self):
+        for bad in ({A}, [A], "x", {A: None}):
+            with self.assertRaises(KuraError):
+                quarantine.plan(self.lab.store, library="home", skip_swarm=True, retain=bad)
+
+    def test_other_refusals_are_unchanged_by_a_list(self):
+        fresh = self.add("Kura Fresh", old=False)
+        self.lab.build()
+        identity.pin(self.lab.store, "home", "main/Kura Fresh", D)
+        doc = self.plan(retain=self.retain(999000099))
+        self.assertIn("recently_modified", self.refused(doc)["main/Kura Fresh"]["reasons"])
+        self.assertNotIn("retained", self.refused(doc)["main/Kura Fresh"]["reasons"])
+        self.assertNotIn("Kura Fresh", self.moved(doc))
+        del fresh
+
+    def test_cli_plan_retain(self):
+        home = self.lab.tmp / "home"
+        home.mkdir()
+        path = self.lab.tmp / "retain.txt"
+        path.write_text(f"{A}\n")
+        buffer = io.StringIO()
+        args = ["kura", "manifest", "plan", "--library", "home", "--skip-swarm", "--retain", str(path)]
+        with patch("kura.cli.private_root", return_value=self.lab.state), patch("sys.argv", args), \
+             contextlib.redirect_stdout(buffer):
+            with self.assertRaises(SystemExit) as exited:
+                cli.main()
+        out = json.loads(buffer.getvalue())
+        self.assertEqual((exited.exception.code, out["success"]), (0, True))
+        plan = out["data"]["plan"]
+        self.assertEqual(plan["retain"], {"sha256": parse(path).sha256, "ids": 1})
+        self.assertNotIn("Kura Alpha", [m["from"] for m in plan["moves"]])
+        path.write_text("junk\n")
+        buffer = io.StringIO()
+        with patch("kura.cli.private_root", return_value=self.lab.state), patch("sys.argv", args), \
+             contextlib.redirect_stdout(buffer):
+            with self.assertRaises(SystemExit):
+                cli.main()
+        out = json.loads(buffer.getvalue())
+        self.assertEqual((out["error"]["code"], out["data"]), ("invalid_policy", {"line": 1}))
 
 
 if __name__ == "__main__":
