@@ -49,6 +49,9 @@ _SEASON_WORDS = (
 _LATER = (re.compile(r"\bseason 0*([2-9]|[1-9][0-9])\b"),
           re.compile(r"\b0*([2-9]|[1-9][0-9])(?:st|nd|rd|th) season\b"),
           re.compile(r"\bs0*([2-9]|[1-9][0-9])\b"))
+_RANGE = re.compile(
+    r"(?i)\bseasons\b|\bseason\s*\d{1,2}\s*(?:[-\u2013\u2014+&,/]|to|and)\s*\d{1,2}\b"
+    r"|\b\d{1,2}(?:st|nd|rd|th)?\s*(?:[-\u2013\u2014+&,/]|to|and)\s*\d{1,2}(?:st|nd|rd|th)\s+season\b")
 
 
 def _bad(message: str, **details):
@@ -82,6 +85,7 @@ def folder_terms(key: str) -> tuple[str, int | None, bool]:
             if pattern.groups > 1 and found.group(2):
                 ranged = True
     season = next(iter(numbers)) if len(numbers) == 1 else None
+    ranged = ranged or bool(_RANGE.search(text))
     return base, season, ranged or len(numbers) > 1 or season == 0
 
 

@@ -550,6 +550,19 @@ class RetainPlan(Base):
         identity.pin(self.lab.store, "home", "main/Kura Zeta", 999000010)   # the owner settles it
         self.assertIn("Kura Zeta", self.moved(self.plan(retain=self.retain(999000011))))
 
+    def test_a_multi_season_folder_is_refused_under_a_list(self):
+        self.add("Kura Pack Season 1-2")
+        self.lab.build()
+        db = self.lab.store.db
+        db.execute("INSERT INTO anilist_users(user_id, name, is_viewer, updated_at) VALUES (1, 'kura-viewer', 1, 1.0)")
+        db.execute("INSERT INTO anilist_media(anilist_id, title_romaji, fetched_at) VALUES (999000010, 'Kura Pack', 1.0)")
+        db.execute("INSERT INTO anilist_list_entries(user_id, anilist_id, status, fetched_at) VALUES (1, 999000010, 'COMPLETED', 1.0)")
+        db.commit()
+        identity.sync(self.lab.store, library="home", titles=["main/Kura Pack Season 1-2"])
+        doc = self.plan(retain=self.retain(999000011))      # season 2 is the retained one
+        self.assertEqual(self.refused(doc)["main/Kura Pack Season 1-2"]["reasons"], ["identity_unknown"])
+        self.assertNotIn("Kura Pack Season 1-2", self.moved(doc))
+
     def test_an_empty_list_still_requires_identities(self):
         doc = self.plan(retain=self.retain())
         self.assertEqual(self.moved(doc), ["Kura Alpha", "Kura Beta", "Kura Gamma"])

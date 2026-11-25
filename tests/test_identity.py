@@ -132,6 +132,17 @@ class OfflineMatch(Base):
         pack = self.row("Kura Pack S01-S03")
         self.assertEqual((pack["status"], pack["anilist_id"]), ("ambiguous", None))
 
+    def test_season_range_spellings_are_undecidable(self):
+        for name in ("Kura Pack S01-S03", "Kura Pack S1-2", "Kura Pack Season 1-2", "Kura Pack Seasons 1+2",
+                     "Kura Pack Season 1 to 3", "Kura Pack 1st-3rd Season", "Kura Pack S01 S02", "Kura Pack S00",
+                     "Kura Pack Season 1 & 2", "Kura Pack Complete Seasons"):
+            with self.subTest(name=name):
+                self.assertTrue(identity.folder_terms(f"main/{name}")[2], name)
+        for name, season in (("Kura Pack S02", 2), ("Kura Pack Season 2", 2), ("Kura Pack 2nd Season", 2),
+                             ("Kura Pack", None), ("[Kura] Kura Pack - S01 (BD 1080p)", 1)):
+            with self.subTest(name=name):
+                self.assertEqual(identity.folder_terms(f"main/{name}")[1:], (season, False))
+
     def test_matching_agrees_with_anilist_choose(self):
         rows = [{"id": 1, "titles": ["Kura Show Extra Words"]}, {"id": 2, "titles": ["Kura Show Extra"]},
                 {"id": 3, "titles": ["Other"]}]

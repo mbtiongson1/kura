@@ -86,3 +86,12 @@ identities is consulted.
 Because a list requires every candidate to be identified, run `identity sync` and resolve
 ambiguous titles with `identity pin` first; a title that stays unidentified is simply not
 proposed.
+
+## Limits
+
+Matching can only weigh the titles Kura knows: the synced list, and whatever AniList
+returns for an alias lookup. A retained series that is on neither can lose a folder to a
+similarly named entry that is. Two guards help: every resolved row records the weaker
+candidates it passed over (`retain_possible`), and `retain check` lists the retain IDs no
+folder is bound to (`unmatched_ids`). Review that list before approving a plan, and
+`identity pin` any folder the matcher got wrong.
