@@ -130,7 +130,7 @@ else `review` when it has any `warn` or `action` flag, else `none`.
 | `size_above_band`, `size_below_band` | warn | efficient title with a resolved or pinned identity; median episode size outside the band (an unidentified title might be archival, so it is not judged) |
 | `identity_unknown` | info, warn under `--retain` | no resolved or pinned identity (not for `not_anime`, nor for a root entry that is not media: a loose non-video file, or a folder with files but no video) |
 | `probe_missing` | info | the title has video files and no usable probe result |
-| `unsupported_container` | info | a sampled file is not Matroska |
+| `unsupported_container` | info | a sampled file is neither Matroska/WebM nor MP4 (other containers, e.g. AVI or TS, are not probed) |
 | `retained` | info | on the retain list (`detail.reason` is `retained` or `retain_possible`) |
 
 `seadex.held_matches` is `best`, `alt`, `none` or `unknown` (no entry, unknown identity, or

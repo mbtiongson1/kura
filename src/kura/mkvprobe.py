@@ -27,7 +27,7 @@ import math
 import re
 import struct
 
-PROBE_VERSION = 2
+PROBE_VERSION = 3                    # 3: MP4 files are probed (earlier unsupported_container rows are stale)
 SCHEMA = "kura.probe/1"
 
 MAX_ELEMENTS = 20_000

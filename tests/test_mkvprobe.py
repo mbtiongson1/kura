@@ -620,7 +620,7 @@ class Limits(unittest.TestCase):
     def test_the_module_is_pure(self):
         for name in ("os", "sys", "socket", "subprocess", "open", "io"):
             self.assertFalse(hasattr(mkvprobe, name), name)
-        self.assertEqual(mkvprobe.PROBE_VERSION, 2)
+        self.assertEqual(mkvprobe.PROBE_VERSION, 3)
 
 
 if __name__ == "__main__":

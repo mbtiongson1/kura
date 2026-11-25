@@ -8,7 +8,8 @@ import unittest
 from unittest.mock import patch
 
 import mkvgen
-from kura import cli_probe, mkvprobe, probe as probe_mod, rofs
+import mp4gen
+from kura import cli_probe, mkvprobe, mp4probe, probe as probe_mod, rofs
 from kura.inventory import scan
 from kura.manifest_store import ManifestRepo
 from kura.models import KuraError
@@ -153,13 +154,43 @@ class Sampling(Lib):
         again = self.probe(roots={"elsewhere": self.lib})
         self.assertEqual((again["cached"], again["failed"]), (0, {"no_root": 4}))
 
-    def test_mp4_is_recorded_as_unsupported_container(self):
-        self.write("Kura Other Show/Kura Other Show - 01 [1080p].mp4", b"\x00\x00\x00\x18ftypisom" + bytes(64))
+    def test_mp4_is_probed_by_its_magic_not_its_extension(self):
+        self.write("Kura Other Show/Kura Other Show - 01 [1080p].mp4", mp4gen.build())
+        self.write("Kura Other Show/Kura Other Show - 02 [720p].m4v", mp4gen.build(codec="hevc", sei="private",
+                                                                                 settings=mkvgen.X265_TEXT))
+        self.write("Kura Other Show/Kura Other Show - 03 [480p].mp4", mkvgen.build())      # Matroska inside
+        self.write("Kura Other Show/Kura Other Show - 04 [360p].mkv", mp4gen.build())      # MP4 inside
+        self.inventory()
+        out = self.probe(titles=["main/Kura Other Show"], sample="all")
+        self.assertEqual((out["probed"], out["failed"]), (4, {}))
+        rows = {name.rsplit(" - ", 1)[1][:2]: row for name, row in self.rows().items()}
+        self.assertEqual({k: (v[0], v[1]["container"]) for k, v in rows.items()},
+                         {"01": ("ok", "mp4"), "02": ("ok", "mp4"), "03": ("ok", "matroska"),
+                          "04": ("ok", "mp4")})
+        self.assertEqual(rows["01"][1]["encoder"]["library"], "x264")
+        self.assertEqual(rows["02"][1]["encoder"]["library"], "x265")
+
+    def test_a_file_that_is_neither_matroska_nor_mp4_stays_unsupported(self):
+        self.write("Kura Other Show/Kura Other Show - 01 [1080p].avi", b"RIFF" + bytes(60))
         self.inventory()
         out = self.probe(titles=["main/Kura Other Show"])
         self.assertEqual(out["probed"], 1)
         (status, result), = self.rows().values()
-        self.assertEqual((status, result["container"]), ("unsupported_container", "mp4"))
+        self.assertEqual((status, result["container"]), ("unsupported_container", "unknown"))
+
+    def test_mp4_rows_stored_as_unsupported_by_probe_version_2_are_probed_again(self):
+        self.write("Kura Other Show/Kura Other Show - 01 [1080p].mp4", mp4gen.build())
+        self.inventory()
+        self.probe(titles=["main/Kura Other Show"])
+        stale = {"schema": "kura.probe/1", "status": "unsupported_container", "container": "mp4", "video": None,
+                 "warnings": []}
+        self.store.db.execute("UPDATE probe_results SET probe_version=2, status='unsupported_container', result=?"
+                              " WHERE rel_path LIKE '%.mp4'", (json.dumps(stale),))
+        self.store.db.commit()
+        out = self.probe(titles=["main/Kura Other Show"])
+        self.assertEqual((out["probed"], out["cached"]), (1, 0))
+        (status, result), = self.rows().values()
+        self.assertEqual((status, result["container"], result["video"]["codec"]), ("ok", "mp4", "h264"))
 
     def test_signature_clusters(self):
         sig = probe_mod.signature
@@ -415,7 +446,7 @@ class ReadOnly(Lib):
         self.assertTrue(calls)
 
     def test_no_network_modules_are_loaded_by_the_probe_modules(self):
-        for module in (mkvprobe, probe_mod, cli_probe):
+        for module in (mkvprobe, mp4probe, probe_mod, cli_probe):
             for name in ("socket", "http", "urllib", "ssl", "subprocess"):
                 self.assertFalse(hasattr(module, name), (module.__name__, name))
 
@@ -429,6 +460,20 @@ class Commands(Lib):
         self.assertEqual((out["data"]["schema"], out["data"]["status"], out["data"]["duration_s"]),
                          ("kura.probe/1", "ok", 5400.0))
         self.assertEqual({p: p.read_bytes() for p in self.lib.rglob("*") if p.is_file()}, before)
+        code, out = run("probe", "file", str(target), "--max-read-kib", "1", store=False)
+        self.assertEqual(code, 0)
+        self.assertLessEqual(out["data"]["bytes_read"], 1024)
+
+    def test_probe_file_reads_an_mp4(self):
+        target = self.write("Kura Loose Clip.mp4", mp4gen.build(duration_s=600))
+        before = target.read_bytes()
+        code, out = run("probe", "file", str(target), store=False)
+        self.assertEqual((code, out["success"]), (0, True))
+        data = out["data"]
+        self.assertEqual((data["status"], data["container"], data["duration_s"], data["video"]["codec"]),
+                         ("ok", "mp4", 600.0, "h264"))
+        self.assertEqual(data["encoder"]["library"], "x264")
+        self.assertEqual(target.read_bytes(), before)
         code, out = run("probe", "file", str(target), "--max-read-kib", "1", store=False)
         self.assertEqual(code, 0)
         self.assertLessEqual(out["data"]["bytes_read"], 1024)
