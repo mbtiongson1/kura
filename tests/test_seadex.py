@@ -147,7 +147,7 @@ class Sync(Case):
 
         def transport(url):
             name = urlsplit(url).path.split("/")[3]
-            return json.dumps({"page": 1, "perPage": 500, "totalItems": 0, "totalPages": 1,
+            return json.dumps({"page": 1, "perPage": 500, "totalItems": len(pages[name]), "totalPages": 1,
                                "items": pages[name]}).encode()
         out = self.sync(transport=transport)
         self.assertEqual((out["entries"]["total"], out["torrents"]["total"]), (1, 1))
@@ -248,8 +248,29 @@ class Sync(Case):
             self.sync(transport=transport)
         self.assertEqual(self.state()[0], "ok")
 
+    def test_listing_that_changes_while_paging_is_refused(self):
+        fake = FakeSeaDex([entry(n, AL + n) for n in range(1, 6)], [torrent(21)])
+
+        def shrinking(url):
+            body = json.loads(fake.transport(url))
+            if body["page"] == 2 and "/entries/" in url:
+                fake.entries.pop(rid(1))             # an earlier record vanishes between pages
+                body = json.loads(fake.transport(url))
+            return json.dumps(body).encode()
+        with patch.object(seadex, "PER_PAGE", 2):
+            with self.assertRaises(KuraError) as caught:
+                self.sync(transport=shrinking)
+        self.assertEqual(caught.exception.code, "seadex_unstable")
+        self.assertEqual(self.rows("SELECT COUNT(*) FROM seadex_entries"), [(0,)])
+        # a page that lies about the total is refused as well
+        pages = [{"items": [entry(1, AL)], "totalItems": 3, "totalPages": 2},
+                 {"items": [entry(2, AL)], "totalItems": 3, "totalPages": 2}]
+        with self.assertRaises(KuraError) as caught:
+            self.sync(transport=lambda url: json.dumps(pages[int(parse_qs(urlsplit(url).query)["page"][0]) - 1]).encode())
+        self.assertEqual(caught.exception.code, "seadex_unstable")
+
     def test_run_byte_budget(self):
-        body = json.dumps({"items": [], "totalPages": 3}).encode()
+        body = json.dumps({"items": [], "totalItems": 0, "totalPages": 3}).encode()
         with patch.object(seadex, "RUN_LIMIT", len(body) * 2 - 1):
             with self.assertRaises(KuraError) as caught:
                 self.sync(transport=lambda url: body)
@@ -359,6 +380,7 @@ class Builders(unittest.TestCase):
         self.assertEqual(seadex.parse_files([f("Show - 01.mkv", 1), f("Show - 02.mkv", 2)])["median_video_bytes"], 1)
         huge = [f(f"Show - {i}.mkv", 2**50) for i in range(8200)]     # sums past SQLite's 64-bit integers
         self.assertIsNone(seadex.parse_files(huge))
+        self.assertIsNone(seadex.parse_files([f("a.mkv", 1)] * (seadex.MAX_FILES_SCANNED + 1)))
 
 
 class Transport(unittest.TestCase):

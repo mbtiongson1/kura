@@ -289,8 +289,10 @@ def parse_files(value) -> dict | None:
     """A torrent's ``files`` list -> bounded stored list plus size statistics, or None."""
     if not isinstance(value, list):
         return None
+    if len(value) > MAX_FILES_SCANNED:
+        return None             # statistics over a truncated list would pass as the whole torrent's
     stored, total, videos = [], 0, []
-    for f in value[:MAX_FILES_SCANNED]:
+    for f in value:
         name = clean_text(f.get("name"), MAX_NAME + 1) if isinstance(f, dict) else None
         size = f.get("length") if isinstance(f, dict) else None
         if (not name or len(name) > MAX_NAME or not isinstance(size, int) or isinstance(size, bool) or
@@ -363,21 +365,26 @@ class Client:
             raise KuraError("seadex_invalid", "SeaDex response must be bounded UTF-8 JSON") from e
         items = doc.get("items") if isinstance(doc, dict) else None
         pages = doc.get("totalPages") if isinstance(doc, dict) else None
+        total = doc.get("totalItems") if isinstance(doc, dict) else None
         if (not isinstance(items, list) or not isinstance(pages, int) or isinstance(pages, bool) or
-                not 0 <= pages <= MAX_PAGES):
+                not 0 <= pages <= MAX_PAGES or not isinstance(total, int) or isinstance(total, bool) or
+                not 0 <= total <= MAX_PAGES * PER_PAGE):
             raise KuraError("seadex_invalid", "SeaDex response has an unexpected shape or too many pages")
-        return {"items": items, "pages": pages}
+        return {"items": items, "pages": pages, "total": total}
 
     def pages(self, collection: str, fields, parser, skipped, filter_=None) -> dict:
         """Parsed rows (by id) of a collection or filtered subset, at most MAX_PAGES pages.
 
         Each page is parsed and dropped before the next one is read, so memory holds rows only."""
-        rows, page = {}, 1
+        rows, page, seen, total = {}, 1, 0, None
         while True:
             body = self.get(build_url(collection, page=page, per_page=PER_PAGE, fields=fields,
                                       filter_=filter_))
             if len(body["items"]) > PER_PAGE:
                 raise KuraError("seadex_invalid", "SeaDex page exceeds the requested size")
+            if total is not None and body["total"] != total:
+                raise KuraError("seadex_unstable", "SeaDex changed while it was being read; run it again")
+            total, seen = body["total"], seen + len(body["items"])
             for item in body["items"]:
                 row = parser(item)
                 if row is None:
@@ -385,6 +392,8 @@ class Client:
                 else:
                     rows[row["id"]] = row
             if page >= body["pages"]:
+                if seen != total:       # offset paging skips records when earlier ones vanish mid-read
+                    raise KuraError("seadex_unstable", "SeaDex changed while it was being read; run it again")
                 return rows
             page += 1
 
