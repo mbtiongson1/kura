@@ -25,7 +25,7 @@ Python is an MVP decision for portability, not a requirement for future clients.
   equal-best candidates are refused. Results are cached with a TTL in local state.
 - **Library handover** (read-only): `inventory`/`rofs` read a library as metadata only,
   `torrentmeta`/`protect` parse descriptors and classify protection, `match` links torrents
-  to titles, `pieceverify` hashes local files against the piece list, and `manifest`
+  to titles (by name, else by file name and size; piece verification is the proof), `pieceverify` hashes local files against the piece list, and `manifest`
   records and classifies the result (`manifest_store` is its repository). `cli_handover`
   is the thin command layer; its inventory/inspect/verify commands never open state.
   None of it writes to a library or descriptor directory.

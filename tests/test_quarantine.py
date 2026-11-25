@@ -209,7 +209,7 @@ class Refusals(Base):
     def test_title_assessed_under_an_older_policy_is_refused(self):
         other = self.lab.tmp / "second"
         other.mkdir()
-        self.add("Kura Old Policy", where=other)
+        self.add("Kura Old Policy", [("o1.mkv", torrentgen.payload("o1", 30000)), ("o2.mkv", torrentgen.payload("o2", 20000))], where=other)
         self.add("Kura New Policy")
         both = {"main": self.lab.lib, "second": other}
         kw = dict(roots=both, library="home", torrents_dir=self.lab.torrents)

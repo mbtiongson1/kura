@@ -103,7 +103,8 @@ class Matching(unittest.TestCase):
     def test_ambiguity_and_no_match(self):
         self.lab.add("Kura Pack", GOOD)
         built = self.lab.add("Kura Pack", GOOD, where=self.lab.lib / "Kura Other")
-        other = self.lab.add("Kura Missing", GOOD, torrent=False)
+        other = self.lab.add("Kura Missing", [("m1.mkv", P("m1", 30000)), ("m2.mkv", P("m2", 20000))],
+                             torrent=False)
         shutil.rmtree(self.lab.lib / "Kura Missing")
         matches, unmatched = match(self.inv(), [parse(built.data)])
         self.assertEqual(matches, [])
