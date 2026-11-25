@@ -436,7 +436,8 @@ def _audit_title(ctx, title):
         # The bitrate of an untouched stream belongs to the service, not to a re-encoder: informational.
         severity = "info" if not reencodes else "action" if worst["bpp"] < BPP_ACTION else "warn"
         flags.add("low_bpp_8bit", severity, files=len(low), min_bpp=worst["bpp"],
-                  bitrate_kbps=worst["video"]["bitrate_kbps"], style=style)
+                  bitrate_kbps=worst["video"]["bitrate_kbps"],
+                  bitrate_source=worst["video"]["bitrate_source"], style=style)
     nofonts = [s for s in samples if s["has_ass"] and s["fonts"] == 0 and s["complete_attachments"]]
     if nofonts and not sidecar:
         flags.add("ass_missing_fonts", "warn", files=len(nofonts))
