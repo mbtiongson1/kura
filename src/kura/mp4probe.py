@@ -36,6 +36,7 @@ STSD_CAP = 64 << 10
 LEAF_CAP = 128                       # mvhd, tkhd, mdhd, hdlr, elng, the stsz/stco headers
 STTS_CAP = 8 + 8 * 64
 TOOL_CAP = 512
+MAX_DURATION_S = 7 * 86400          # a longer duration is a corrupt or hostile header
 
 _VIDEO = {b"avc1": "h264", b"avc3": "h264", b"dvav": "h264", b"dva1": "h264",
           b"hvc1": "hevc", b"hev1": "hevc", b"dvh1": "hevc", b"dvhe": "hevc",
@@ -56,6 +57,11 @@ def _u(buf, pos, n):
     if pos < 0 or pos + n > len(buf):
         return None
     return int.from_bytes(buf[pos:pos + n], "big")
+
+
+def _ticks(value, width):
+    """A duration in ticks; all ones in its width (32 or 64 bits by box version) means unknown."""
+    return None if value is None or value == (1 << (8 * width)) - 1 else value
 
 
 def _language(code):
@@ -234,19 +240,22 @@ class _Probe:
                     if k2 == b"mehd":
                         d = self.leaf(b2, e2, 16)
                         if d[:1] == b"\x01":
-                            self.movie["fragment"] = _u(d, 4, 8)
+                            self.movie["fragment"] = _ticks(_u(d, 4, 8), 8)
                         elif d[:1] == b"\x00":
-                            self.movie["fragment"] = _u(d, 4, 4)
+                            self.movie["fragment"] = _ticks(_u(d, 4, 4), 4)
                         break
 
     def mvhd(self, d):
         if d[:1] == b"\x01":
-            scale, dur = _u(d, 20, 4), _u(d, 24, 8)
+            scale, dur = _u(d, 20, 4), _ticks(_u(d, 24, 8), 8)
+            ok = len(d) >= 32
         elif d[:1] == b"\x00":
-            scale, dur = _u(d, 12, 4), _u(d, 16, 4)
+            scale, dur = _u(d, 12, 4), _ticks(_u(d, 16, 4), 4)
+            ok = len(d) >= 20
         else:
             scale = dur = None
-        if scale is None or dur is None:
+            ok = False
+        if scale is None or not ok:
             self.warn("invalid_box", partial=True)
             return
         self.movie.setdefault("timescale", scale)
@@ -331,9 +340,9 @@ class _Probe:
             if kind == b"mdhd":
                 d = self.leaf(b, e, LEAF_CAP)
                 if d[:1] == b"\x01":
-                    t["timescale"], t["duration"], code = _u(d, 20, 4), _u(d, 24, 8), _u(d, 32, 2)
+                    t["timescale"], t["duration"], code = _u(d, 20, 4), _ticks(_u(d, 24, 8), 8), _u(d, 32, 2)
                 elif d[:1] == b"\x00":
-                    t["timescale"], t["duration"], code = _u(d, 12, 4), _u(d, 16, 4), _u(d, 20, 2)
+                    t["timescale"], t["duration"], code = _u(d, 12, 4), _ticks(_u(d, 16, 4), 4), _u(d, 20, 2)
                 else:
                     code = None
                 if t["timescale"] is None:
@@ -492,15 +501,26 @@ class _Probe:
 
     # -- output --------------------------------------------------------------------------
 
+    def seconds(self, ticks, scale):
+        """Seconds for a duration, or None when it is absent, zero or implausible (over a week)."""
+        if not scale or not ticks:
+            return None
+        value = ticks / scale
+        if value > MAX_DURATION_S:
+            self.warn("duration_implausible")
+            return None
+        return round(value, 3)
+
     def duration(self):
-        scale, ticks = self.movie.get("timescale"), self.movie.get("duration")
-        if scale and ticks and ticks != 0xFFFFFFFF:
-            return round(ticks / scale, 3)
-        if scale and self.movie.get("fragment"):
-            return round(self.movie["fragment"] / scale, 3)
-        spans = [t["duration"] / t["timescale"] for t in self.tracks
-                 if t["timescale"] and t["duration"] and t["duration"] != 0xFFFFFFFF]
-        return round(max(spans), 3) if spans else None
+        """The movie duration, else the fragment duration (mehd), else the longest track's."""
+        scale = self.movie.get("timescale")
+        found = self.seconds(self.movie.get("duration"), scale)
+        if found is None:
+            found = self.seconds(self.movie.get("fragment"), scale)
+        if found is None:
+            spans = [self.seconds(t["duration"], t["timescale"]) for t in self.tracks]
+            found = max((x for x in spans if x), default=None)
+        return found
 
     def video_doc(self, v, duration):
         fourcc = v.get("fourcc")

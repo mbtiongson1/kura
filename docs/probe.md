@@ -59,7 +59,7 @@ It walks box headers only (8 bytes, 16 with a 64-bit `largesize`; size 0 means "
 file"), so `mdat` is never read and a `moov` at the end of a non-faststart file is found by its
 header alone. It descends along `moov / trak / mdia / minf / stbl` and reads a body only for:
 
-- `mvhd` (timescale, duration), `mvex/mehd` (the duration of a fragmented file);
+- `mvhd` (timescale, duration), `mvex/mehd` (the duration of a fragmented file). A duration of all ones in its box version's width (32 bits in version 0, 64 in version 1) is unknown, as is zero. The movie duration is tried first, then `mehd`, then the longest track (`mdhd`) duration; one over seven days is treated as unknown with the `duration_implausible` warning. With no duration the video bitrate is null;
 - per track: `tkhd` (track id, enabled flag, width and height as a fallback), `mdhd` (timescale,
   duration, language as packed ISO-639-2; `und` when it is not three letters), `elng`, `hdlr`
   (`vide`, `soun`, `sbtl`/`text`/`subt`), the first sample entry of `stsd` (at most 64 KiB), the
@@ -146,7 +146,7 @@ Warnings: `truncated`, `budget_exhausted`, `element_limit`, `depth_limit`, `inva
 `stale_statistics_tags`, `bitrate_unverified`, `internal_error` (a bug; never expected).
 
 MP4-only warnings: `invalid_box` (a box size below its header), `no_moov`, `fragmented_mp4`,
-`stsd_truncated`, `no_video_sample`, `bad_sample_offset` (the first chunk offset lies beyond the
+`stsd_truncated`, `duration_implausible`, `no_video_sample`, `bad_sample_offset` (the first chunk offset lies beyond the
 file), `video_track_disabled`. `tracks_truncated`, `truncated`, `budget_exhausted`, `element_limit`,
 `too_short`, `multiple_video_tracks`, `frame_prefix_only` and `no_encoder_settings` mean the same as above.
 

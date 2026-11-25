@@ -318,6 +318,83 @@ class Tracks(unittest.TestCase):
         self.assertEqual(len(result["audio"]), 1)
 
 
+def patch(data, tag, offset, value, width, nth=0):
+    """Overwrite `width` bytes at `offset` into the body of the nth box called `tag`."""
+    at = -1
+    for _ in range(nth + 1):
+        at = data.index(tag, at + 1)
+    at += 4 + offset
+    return data[:at] + value.to_bytes(width, "big") + data[at + width:]
+
+
+class Durations(unittest.TestCase):
+    """Unknown (all ones) and implausible durations, for both box versions."""
+
+    def test_unknown_movie_duration_falls_back_to_the_longest_track(self):
+        for v1, off, width in ((False, 16, 4), (True, 24, 8)):
+            with self.subTest(v1=v1):
+                data = patch(mp4gen.build(v1=v1), b"mvhd", off, (1 << 8 * width) - 1, width)
+                r, _ = run(data)
+                self.assertEqual(r["duration_s"], 1420.0)          # video mdhd 1420 s; audio mdhd 1420 s
+                self.assertEqual(r["video"]["bitrate_source"], "size_over_duration")
+                self.assertLess(r["video"]["bitrate_kbps"], 100)
+
+    def test_zero_movie_duration_falls_back(self):
+        for v1, off, width in ((False, 16, 4), (True, 24, 8)):
+            data = patch(mp4gen.build(v1=v1), b"mvhd", off, 0, width)
+            self.assertEqual(run(data)[0]["duration_s"], 1420.0)
+
+    def test_the_v1_sentinel_is_all_ones_of_64_bits_not_32(self):
+        data = patch(mp4gen.build(v1=True), b"mvhd", 24, 0xFFFFFFFF, 8)          # a real, huge-but-32-bit value
+        r, _ = run(data)
+        self.assertEqual(r["duration_s"], 1420.0)                                 # 49 days: implausible, so the tracks answer
+        self.assertIn("duration_implausible", r["warnings"])
+
+    def test_mehd_comes_before_the_tracks(self):
+        data = mp4gen.build(fragmented=True)                                       # mvhd 0, mehd 1420 s
+        self.assertEqual(run(data)[0]["duration_s"], 1420.0)
+        data = patch(data, b"mehd", 4, 0xFFFFFFFF, 4)                              # unknown: the tracks answer
+        self.assertEqual(run(data)[0]["duration_s"], 1420.0)
+        data = patch(mp4gen.build(fragmented=True, v1=True), b"mvhd", 24, 0, 8)
+        self.assertEqual(run(data)[0]["duration_s"], 1420.0)
+
+    def test_track_sentinels_are_ignored_for_both_versions(self):
+        for v1, off, width in ((False, 16, 4), (True, 24, 8)):
+            with self.subTest(v1=v1):
+                data = mp4gen.build(v1=v1)
+                data = patch(data, b"mvhd", off, 0, width)
+                data = patch(data, b"mdhd", off, (1 << 8 * width) - 1, width)          # video: unknown
+                # only the video track follows `v1` in the generator; audio and subtitles are version 0
+                data = patch(data, b"mdhd", 16, 600 * 48000, 4, nth=1)                # audio: 600 s
+                data = patch(data, b"mdhd", 16, 0, 4, nth=2)                          # subtitles: none
+                r, _ = run(data)
+                self.assertEqual(r["duration_s"], 600.0)
+
+    def test_nothing_known_is_null_and_the_bitrate_too(self):
+        data = mp4gen.build()
+        data = patch(data, b"mvhd", 16, 0xFFFFFFFF, 4)
+        for n in range(3):
+            data = patch(data, b"mdhd", 16, 0xFFFFFFFF, 4, nth=n)
+        r, _ = run(data)
+        self.assertIsNone(r["duration_s"])
+        self.assertEqual((r["video"]["bitrate_kbps"], r["video"]["bitrate_source"]), (None, None))
+        self.assertEqual(r["status"], "ok")
+
+    def test_an_implausible_duration_is_unknown_with_a_warning(self):
+        data = patch(mp4gen.build(), b"mvhd", 16, 8 * 86400 * 1000, 4)       # 8 days
+        r, _ = run(data)
+        self.assertEqual(r["duration_s"], 1420.0)                              # the fallback track says 1420
+        self.assertIn("duration_implausible", r["warnings"])
+        data = patch(mp4gen.build(), b"mvhd", 16, 6 * 86400 * 1000, 4)       # 6 days is accepted
+        r, _ = run(data)
+        self.assertEqual(r["duration_s"], 6 * 86400.0)
+        self.assertNotIn("duration_implausible", r["warnings"])
+        data = patch(mp4gen.build(v1=True), b"mvhd", 24, 10**12, 8)
+        r, _ = run(data)
+        self.assertIn("duration_implausible", r["warnings"])
+        self.assertNotIn("internal_error", r["warnings"])
+
+
 class Fragmented(unittest.TestCase):
     def test_fragmented_file_reports_moov_and_warns(self):
         data = mp4gen.build(fragmented=True) + box(b"moof", bytes(40)) + box(b"mdat", bytes(50))
