@@ -137,11 +137,14 @@ class OfflineMatch(Base):
     def test_season_range_spellings_are_undecidable(self):
         for name in ("Kura Pack S01-S03", "Kura Pack S1-2", "Kura Pack Season 1-2", "Kura Pack Seasons 1+2",
                      "Kura Pack Season 1 to 3", "Kura Pack 1st-3rd Season", "Kura Pack S01 S02", "Kura Pack S00",
-                     "Kura Pack Season 1 & 2", "Kura Pack Complete Seasons"):
+                     "Kura Pack Season 1 & 2", "Kura Pack Complete Seasons", "Kura Pack (Season 1-2)",
+                     "Kura Pack [S01-S03]", "Kura Pack (S1) [S2]"):
             with self.subTest(name=name):
                 self.assertTrue(identity.folder_terms(f"main/{name}")[2], name)
         for name, season in (("Kura Pack S02", 2), ("Kura Pack Season 2", 2), ("Kura Pack 2nd Season", 2),
-                             ("Kura Pack", None), ("[Kura] Kura Pack - S01 (BD 1080p)", 1)):
+                             ("Kura Pack", None), ("[Kura] Kura Pack - S01 (BD 1080p)", 1),
+                             ("Kura Pack (Season 2)", 2), ("Kura Pack [S02]", 2), ("Kura_Pack_S02", 2),
+                             ("[Kura] Kura Pack - 05 [S01E05].mkv", None)):
             with self.subTest(name=name):
                 self.assertEqual(identity.folder_terms(f"main/{name}")[1:], (season, False))
 

@@ -29,6 +29,7 @@ from contextlib import contextmanager
 import json
 import re
 import time
+import unicodedata
 
 from .anilist import clean, parse_response
 from .core import ALIAS_FAILURE_TTL, ALIAS_TTL
@@ -79,15 +80,20 @@ def folder_terms(key: str) -> tuple[str, int | None, bool]:
     several season markers or season 0: the folder cannot bind to one AniList entry."""
     entry = key.partition("/")[2] or key
     base = resolve.derive_terms(entry).base
-    text = resolve._PAIRS.sub(" ", resolve._flatten(resolve._EXT.sub("", entry.strip())))
+    # Markers inside brackets count too ("Title (Season 2)", "Title [S02]"): the title cleaner drops
+    # bracketed text, so look at the name with only the bracket characters removed as well.
+    plain = resolve._EXT.sub("", unicodedata.normalize("NFKC", entry.strip()))
+    texts = [resolve._PAIRS.sub(" ", resolve._flatten(resolve._EXT.sub("", entry.strip()))),
+             re.sub(r"[\[\](){}_]", " ", plain)]
     numbers, ranged = set(), False
-    for pattern in resolve._SEASONS:
-        for found in pattern.finditer(text):
-            numbers.add(int(found.group(1)))
-            if pattern.groups > 1 and found.group(2):
-                ranged = True
+    for text in texts:
+        for pattern in resolve._SEASONS:
+            for found in pattern.finditer(text):
+                numbers.add(int(found.group(1)))
+                if pattern.groups > 1 and found.group(2):
+                    ranged = True
+        ranged = ranged or bool(_RANGE.search(text))
     season = next(iter(numbers)) if len(numbers) == 1 else None
-    ranged = ranged or bool(_RANGE.search(text))
     return base, season, ranged or len(numbers) > 1 or season == 0
 
 
