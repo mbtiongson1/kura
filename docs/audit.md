@@ -103,8 +103,13 @@ view of the encoder settings plus the track facts:
 x265 option keys are hyphenated and x264's use underscores (`psy-rd` versus `psy_rd`); the
 summary reads both. `writing_app` is not used: remuxers rewrite it.
 
-Bits per pixel is `bitrate / (width x height x fps)`, from the probe's video bitrate (track tags,
-else file size over duration) and is null when any input is missing.
+Bits per pixel is `bitrate / (width x height x fps)`, from the probe's video bitrate and is null when
+any input is missing. The probe keeps the track's `BPS` tag only when it is plausible for the file;
+a tag copied from a source stream is replaced by file size over duration (less the audio tracks'
+plausible rates), see [probe.md](probe.md). Such an estimate still includes subtitles and attachments,
+so it can only overstate bits per pixel slightly. The `low_bpp_8bit` flag reports `bitrate_source`
+(`tags` or `size_over_duration`) beside `bitrate_kbps`. Results probed by an older `PROBE_VERSION`
+are ignored until `kura probe` runs again, so a stale tag from version 1 never feeds the audit.
 
 ## Flags
 

@@ -235,6 +235,15 @@ class Flags(Lab):
                 self.assertAlmostEqual(flag["detail"]["min_bpp"], target, places=3)
                 self.assertEqual(flag["detail"]["style"], "crf")
 
+    def test_low_bpp_reads_the_corrected_bitrate_and_names_its_source(self):
+        self.eps(1)
+        kbps = round(0.03 * 1920 * 1080 * 23.976 / 1000)      # what size over duration gives once the tag is stale
+        self.probe(ep(1), result(bits=8, kbps=kbps, source="size_over_duration", warnings=("stale_statistics_tags",),
+                                 settings={"rc": "crf", "crf": "23"}, library="x264"))
+        flag = self.codes()["low_bpp_8bit"]
+        self.assertEqual((flag["severity"], flag["detail"]["bitrate_source"]), ("action", "size_over_duration"))
+        self.assertEqual(flag["detail"]["bitrate_kbps"], kbps)
+
     def test_low_bpp_8bit_negatives(self):
         self.eps(1)
         for res in (result(bits=10, kbps=500),                                        # 10-bit is never flagged
