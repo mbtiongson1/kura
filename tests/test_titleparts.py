@@ -243,6 +243,24 @@ class Review(unittest.TestCase):
         self.assertEqual(got, {"Season 1/Example Show - 01.mkv": 1, "Example Show - 01.mkv": None})
 
 
+class Review2(unittest.TestCase):
+    def test_part_directory_in_a_split_cour_group_is_not_guessed(self):
+        files = ["Season 3/Part 2/" + f for f in eps("", 1, 12)]
+        got, _ = run(files)                         # the part's own title says "Part 2": the name decides
+        self.assertEqual(set(got.values()), {4})
+        media = {**MEDIA, 4: info(["Example Show Season 3 Final Chapters"])}
+        got, out = run(files, media=media)          # nothing names it: numbering restarts, so no guess
+        self.assertEqual(set(got.values()), {None})
+        self.assertEqual(out["reasons"], {"part_marker": 12})
+
+    def test_name_and_season_evidence_must_agree(self):
+        media = {**MEDIA, 6: info(["Example Show: Despair Arc"])}
+        parts = [part(1, chain=1), part(2, chain=2), part(6)]
+        got, out = run(["Season 2/Despair Arc/a - 01.mkv", "Season 2/a - 02.mkv"], parts, media)
+        self.assertEqual(got, {"Season 2/Despair Arc/a - 01.mkv": None, "Season 2/a - 02.mkv": 2})
+        self.assertEqual(out["files"]["Season 2/Despair Arc/a - 01.mkv"]["reason"], "marker_conflict")
+
+
 class Invariants(unittest.TestCase):
     def test_single_part_assigns_everything(self):
         files = ["a - 01.mkv", "x/b.mkv", "Extras/NCOP.mkv", "notes.txt"]

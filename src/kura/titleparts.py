@@ -27,6 +27,7 @@ MAX_RELPATH = 500
 # Formats that are not a season of the main line: matched by file name, never by season marker.
 SIDE_FORMATS = ("MOVIE", "OVA", "ONA", "SPECIAL", "TV_SHORT", "MUSIC")
 MAX_SAMPLE = 10
+_PART_MARKER = re.compile(r"(?i)(?<![a-z])(?:part|cour|cours)[ ._-]*[0-9]")
 
 
 def _relpath(text: str) -> str:
@@ -282,14 +283,21 @@ def _by_rules(pending, info, auto, media, result, put):
         if reason:
             put(path, None, rule, reason)
             continue
-        if found is None:
-            for component in reversed(comps[:-1]):          # a directory that names exactly one part
-                season, bad = season_markers([component])
-                if season is None and not bad and not names.parse(component + "/x.mkv")["extra"]:
-                    named = _dir_name_part(component, auto, media)
-                    if named:
-                        found, rule = named, "dir_name"
-                        break
+        named = None
+        for component in reversed(comps[:-1]):              # a directory that names exactly one part
+            season, bad = season_markers([component])
+            if season is None and not bad and not names.parse(component + "/x.mkv")["extra"]:
+                named = _dir_name_part(component, auto, media)
+                if named:
+                    break
+        if named and found is not None:
+            if named == found or (isinstance(found, list) and named in found):
+                found = named
+            else:
+                put(path, None, "marker", "marker_conflict")      # name and season evidence disagree
+                continue
+        elif named:
+            found, rule = named, "dir_name"
         if isinstance(found, list):
             grouped.setdefault(tuple(found), []).append(path)       # a split cour: decide by numbering
         elif found is not None:
@@ -303,7 +311,9 @@ def _by_rules(pending, info, auto, media, result, put):
                                    if info[p]["episode"] is not None and not info[p]["extra"]},
                                   [p for p in auto if p["anilist_id"] in ids], media)
         for path in members:
-            if path in done:
+            if _PART_MARKER.search(path):
+                put(path, None, "cumulative", "part_marker")      # "Part 2" restarts numbering: not read here
+            elif path in done:
                 put(path, done[path][0], "cumulative")
             else:
                 put(path, None, "cumulative", reason or "no_marker")
