@@ -39,7 +39,9 @@ def parse_item(item, wanted):
     for edge in edges:
         node = edge.get("node") if isinstance(edge, dict) else None
         kind = edge.get("relationType") if isinstance(edge, dict) else None
-        if not isinstance(node, dict) or node.get("type") != "ANIME":
+        if not isinstance(node, dict) or not isinstance(node.get("type"), str):
+            return None                                 # a malformed edge makes the whole item unreadable
+        if node["type"] != "ANIME":
             continue                                    # manga and light novels are not part of a library
         if not anilist_list._enum(kind) or not valid_id(node.get("id")) or node["id"] == item["id"]:
             return None
@@ -120,11 +122,15 @@ def relations_sync(store, ani, *, ids=None, library=None, max_age_d=30.0, refres
         return known is not None and known[0] >= floor
 
     seeds = sorted(set(ids)) if ids is not None else seed_ids(store, library)
+    total = len(seeds)
+    seeds.sort(key=fresh)                   # stale first: repeated runs make progress through a large set
+    truncated = len(seeds) > MAX_NODES
+    seeds = seeds[:MAX_NODES]
     req = Requester(ani, max_requests=max_requests)
-    seen, frontier = set(seeds), list(seeds)
+    seen, frontier = set(seeds), sorted(seeds)
     fetched = cached = 0
     absent: list[int] = []
-    error, truncated, size = None, False, BATCH
+    error, size = None, BATCH
     while frontier and error is None:
         pending = [i for i in frontier if not fresh(i)]
         cached += len(frontier) - len(pending)
@@ -172,7 +178,7 @@ def relations_sync(store, ani, *, ids=None, library=None, max_age_d=30.0, refres
     if error is not None and not (fetched or absent or cached):
         raise KuraError(error, "AniList returned unreadable relation data", requests=req.info())
     remaining = sum(1 for i in frontier if not fresh(i)) if error else 0
-    return {"seeds": len(seeds), "visited": len(seen), "fetched": fetched, "cached": cached,
+    return {"seeds": total, "visited": len(seen), "fetched": fetched, "cached": cached,
             "not_found": sorted(absent)[:100], "remaining": remaining,
             "complete": error is None and not truncated, "truncated": truncated, "error": error,
             "requests": req.info(), "rate_limit": anilist_list._limiter_state(ani), "warnings": []}

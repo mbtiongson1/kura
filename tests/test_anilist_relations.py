@@ -126,6 +126,23 @@ class Relations(Lab):
         self.addCleanup(setattr, rel, "MAX_NODES", old)
         out = self.sync()
         self.assertEqual((out["truncated"], out["complete"]), (True, False))
+        self.assertEqual(out["visited"], 2)
+
+    def test_malformed_edge_makes_the_item_unreadable(self):
+        self.fake.queue.append(({"data": {"Page": {"media": [{"id": A, "relations": {"edges": [{}]}}]}}}, {}))
+        with self.assertRaises(KuraError):
+            self.sync()
+        self.assertEqual(self.rows("SELECT COUNT(*) FROM anilist_relation_fetches")[0][0], 0)
+
+    def test_many_seeds_are_bounded_and_stale_ones_go_first(self):
+        old = rel.MAX_NODES
+        rel.MAX_NODES = 2
+        self.addCleanup(setattr, rel, "MAX_NODES", old)
+        self.fake.relations = {}
+        first = self.sync(ids=[A, B, C])
+        self.assertEqual((first["truncated"], first["fetched"], first["seeds"]), (True, 2, 3))
+        second = self.sync(ids=[A, B, C])
+        self.assertEqual((second["fetched"], second["cached"]), (1, 1))
 
     def test_arguments(self):
         for kw in ({"ids": None}, {"ids": [0]}, {"ids": [A], "library": "x"}, {"max_age_d": -1},

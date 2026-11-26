@@ -58,7 +58,7 @@ budget and `--max-requests` bound as the other commands) and caches the edges in
 one `anilist_relation_fetches` row per media (`fetched_at`, `status` `ok` or `not_found`). It
 starts from the given IDs, or with `--library` from the library's media titles that Kura resolved
 itself (never an owner decision), and follows only `SEQUEL` and `PREQUEL` edges breadth first, up
-to 300 media per command, ten media per request (a rejected batch is halved down to one). Media
+to 300 media per command (seeds not yet cached first, so repeated runs get through a large library), ten media per request (a rejected batch is halved down to one). Media
 reached through an edge also have their title, format, episode count and status stored in
 `anilist_media`, which is what part assignment needs. A fetch replaces the cached edges of the
 media it covers; entries fetched within `--max-age-d` days are served from the cache (`--refresh`
