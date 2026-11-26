@@ -134,6 +134,13 @@ class AutoParts(Parted):
         self.identity_row(S2, status="resolved")
         self.assertEqual(self.reasons(OTHER)[1], ["identity_unknown"])
 
+    def test_an_owner_not_anime_decision_makes_derived_parts_stale(self):
+        self.identity_row(None, status="ambiguous", candidates=[OTHER])
+        self.assertEqual(self.reasons(OTHER)[1], ["retain_possible"])
+        self.lab.store.db.execute("UPDATE title_identities SET status='not_anime', anilist_id=NULL, candidates='[]'")
+        self.lab.store.db.commit()
+        self.assertEqual(self.reasons(OTHER)[1], ["identity_unknown"])
+
     def test_unreadable_candidates_fail_closed(self):
         self.lab.store.db.execute("UPDATE title_identities SET candidates='not json'")
         self.lab.store.db.commit()

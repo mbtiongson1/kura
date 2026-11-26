@@ -433,7 +433,8 @@ def effective(db, library: str) -> dict[str, dict]:
         elif derived:
             seeds = {p["seed_id"] for p in derived}
             moved = (row is not None and row["status"] in identity.IDENTIFIED
-                     and seeds != {row["anilist_id"]}) or key in unreadable
+                     and seeds != {row["anilist_id"]}) or key in unreadable or (
+                         row is not None and row["status"] == "not_anime")
             views[key] = {"mode": "auto", "status": "parts_stale" if moved or row is None else "parted",
                           "anilist_id": derived[0]["anilist_id"],
                           "candidates": list(row["candidates"]) if row else [], "parts": derived, "row": row}
