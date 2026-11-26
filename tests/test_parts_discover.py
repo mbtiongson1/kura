@@ -239,7 +239,7 @@ class CommandLine(Discover):
 
     def test_discover_command(self):
         code, out = self.cli("identity", "discover", "--library", "home", "--dry-run")
-        self.assertEqual((code, out.get("dry_run"), out.get("written")), (0, True, [pr.TITLE]))
+        self.assertEqual((code, out["data"]["dry_run"], out["data"]["written"]), (0, True, [pr.TITLE]))
         self.assertEqual(self.stored(), [])
         code, out = self.cli("identity", "discover", "--library", "home")
         self.assertEqual(code, 0)
