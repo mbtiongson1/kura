@@ -6,7 +6,7 @@ private state database; nothing opens a library root.
 """
 from pathlib import Path
 
-from . import identity, idlist
+from . import identity, idlist, titleparts
 from .anilist import AniList
 from .ratelimit import SharedLimiter
 
@@ -35,11 +35,17 @@ def register(sub, parser_class):
     what.add_argument("--anilist-id", type=int, help="Bind the title to this AniList ID")
     what.add_argument("--not-anime", action="store_true", help="Record that the title is not anime")
     what.add_argument("--clear", action="store_true", help="Remove the owner decision")
+    q.add_argument("--part", metavar="SELECTOR",
+                   help="Make the ID one part of a multi-part title (all, auto, rest, season:N, ep:A-B, "
+                        "dir:PATH, file:PATH); with --clear remove that one part")
     q = leaf(group, "pins")
     q.add_argument("--from", dest="pins_file", required=True, metavar="FILE",
-                   help="Pins file: <AniList ID or not-anime><TAB><title key> per line")
+                   help="Pins file: <AniList ID[@selector] or not-anime><TAB><title key> per line")
     q = leaf(group, "show")
     q.add_argument("--status", choices=identity.STATUSES)
+    q = leaf(group, "parts")
+    q.add_argument("--title", required=True, metavar="KEY",
+                   help="Show the parts of this title and which part each video file belongs to")
 
     retain = sub.add_parser("retain").add_subparsers(dest="operation", required=True,
                                                      parser_class=parser_class)
@@ -75,7 +81,9 @@ def dispatch(args, open_store):
         try:
             if args.operation == "pin":
                 return True, identity.pin(store, args.library, args.title, args.anilist_id,
-                                          not_anime=args.not_anime, clear=args.clear)
+                                          not_anime=args.not_anime, clear=args.clear, part=args.part)
+            if args.operation == "parts":
+                return True, titleparts.show_assignment(store, args.library, args.title)
             return True, identity.show(store, args.library, args.status)
         finally:
             store.db.close()

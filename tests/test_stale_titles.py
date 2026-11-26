@@ -273,7 +273,7 @@ class Prune(Base):
         torrents = snapshot(self.lab.torrents)
         out = manifest.prune(self.lab.store, "home", dry_run=False)
         self.assertEqual(out["deleted"], {"titles": 2, "files": 4, "links": 2, "verifications": 2,
-                                          "probe_results": 0, "marks": 2, "identities": 0})
+                                          "probe_results": 0, "marks": 2, "identities": 0, "parts": 0})
         after = self.counts()
         self.assertEqual((after["library_titles"], after["library_files"], after["manifest_links"],
                           after["verifications"], after["library_absent"]), (2, 4, 2, 2, 0))
@@ -327,7 +327,7 @@ class Prune(Base):
                                  "library_absent"})
         deleted = manifest.prune(self.lab.store, "home")["would_delete"]
         self.assertEqual(set(deleted), {"titles", "files", "links", "verifications", "probe_results", "marks",
-                                  "identities"})
+                                  "identities", "parts"})
 
     def test_pruned_titles_identities_stay_out_of_media_and_seadex_ids(self):
         from kura import anilist_list

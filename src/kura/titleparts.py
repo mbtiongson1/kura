@@ -471,3 +471,34 @@ def retain_reasons(db, key: str, views: dict[str, dict], retain, files) -> list[
     if not result["complete"]:
         reasons.append("parts_incomplete")
     return reasons
+
+
+MAX_SHOWN_FILES = 2000
+
+
+def show_assignment(store, library: str, title: str) -> dict:
+    """Read-only: the parts of one title and where each of its video files goes, with the rule or
+    the reason it stays unassigned. Bounded to ``MAX_SHOWN_FILES`` files."""
+    from . import identity
+    from .manifest_store import ManifestRepo
+    from .models import KuraError
+    repo = ManifestRepo(store.db)
+    row = next((t for t in repo.titles(library) if t["rel_path"] == title), None)
+    if row is None:
+        raise KuraError("not_found", "Title not in the manifest", title=title)
+    views = effective(store.db, library)
+    view = views.get(title)
+    if view is None or view["mode"] == "single":
+        return {"library": library, "title": title, "mode": "single", "status": view["status"] if view else None,
+                "parts": [], "files": []}
+    found = assign(identity._local_files(repo, row), view["parts"],
+                   media_info(store.db, [p["anilist_id"] for p in view["parts"]]))
+    files = [{"local": path, **v} for path, v in found["files"].items()]
+    out = {"library": library, "title": title, "mode": view["mode"], "status": view["status"],
+           "parts": [{k: p[k] for k in ("anilist_id", "selector", "source", "ordinal", "chain_pos")}
+                     for p in view["parts"]],
+           "assigned_video": found["assigned_video"], "unassigned_video": found["unassigned_video"],
+           "complete": found["complete"], "reasons": found["reasons"], "files": files[:MAX_SHOWN_FILES]}
+    if len(files) > MAX_SHOWN_FILES:
+        out["files_truncated"] = len(files) - MAX_SHOWN_FILES
+    return out

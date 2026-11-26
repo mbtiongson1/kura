@@ -17,8 +17,14 @@ A pins file (``parse_pins``) holds the owner's title identity decisions, one per
 verbatim up to the newline (spaces, tabs, trailing whitespace and ``#`` included; a trailing CR
 is dropped), so only whole-line comments are allowed. A title listed twice is refused, even
 with the same value.
+
+A pins line may also name one part of a multi-part title: ``<ID>@<selector><TAB><title key>`` (selectors
+in ``titleparts.canonical_selector``: ``all``, ``auto``, ``rest``, ``season:N``, ``ep:A-B``,
+``dir:PATH``, ``file:PATH``). A title may then repeat, but only with selector lines: a plain line plus a
+selector line, a repeated selector (``auto`` repeats with different IDs: those IDs are the parts), ``all`` beside other selectors, a second ``rest`` and
+``not-anime@...`` are all refused. A file without selector lines keeps the digest it always had.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import json
 import os
@@ -27,6 +33,7 @@ import re
 import stat
 
 from .models import KuraError
+from .titleparts import canonical_selector
 
 MAX_LINES = 10_000
 MAX_BYTES = 1024**2
@@ -115,9 +122,10 @@ NOT_ANIME = "not-anime"
 class Pins:
     entries: dict[str, int | None]      # title key -> AniList ID, or None for not-anime
     sha256: str
+    parts: dict[str, list[tuple[int, str]]] = field(default_factory=dict)   # title key -> [(ID, selector)] in line order
 
     def summary(self) -> dict:
-        return {"sha256": self.sha256, "pins": len(self.entries)}
+        return {"sha256": self.sha256, "pins": len(self.entries) + len(self.parts)}
 
 
 def parse_pins(path: Path) -> Pins:
@@ -135,6 +143,7 @@ def parse_pins(path: Path) -> Pins:
     if len(lines) > MAX_LINES:
         _error(None, f"Pins file exceeds {MAX_LINES} lines")
     entries: dict[str, int | None] = {}
+    parts: dict[str, list[tuple[int, str]]] = {}
     for number, line in enumerate(lines, 1):
         if not line.strip() or line.lstrip().startswith("#"):
             continue
@@ -143,16 +152,37 @@ def parse_pins(path: Path) -> Pins:
         value = value.strip()
         if not sep or not title:
             _error(number, "Expected <AniList ID or not-anime>, a tab, then the title key")
+        value, at, selector = value.partition("@")
         if value == NOT_ANIME:
+            if at:
+                _error(number, "A not-anime line has no selector")
             target = None
         elif _ID.fullmatch(value):
             target = int(value)
         else:
             _error(number, "Expected a positive AniList ID below 1000000000 or not-anime")
-        if title in entries:
+        if at:
+            try:
+                selector = canonical_selector(selector)
+            except ValueError as e:
+                _error(number, str(e))
+            if title in entries:
+                _error(number, "A title with a plain line cannot also have selector lines")
+            listed = parts.setdefault(title, [])
+            if any(sel == selector and (selector != "auto" or i == target) for i, sel in listed):
+                _error(number, "The same title and selector are listed twice")
+            if "all" in (selector, *(sel for _, sel in listed)) and listed:
+                _error(number, "The selector all cannot be combined with other selectors")
+            listed.append((target, selector))
+            continue
+        if title in entries or title in parts:
             _error(number, "The same title is listed twice")
         entries[title] = target
-    body = sorted(entries.items(), key=lambda kv: kv[0])
+    if not parts:
+        body = sorted(entries.items(), key=lambda kv: kv[0])
+    else:
+        body = sorted([*([t, v] for t, v in entries.items()), *([t, [[i, s] for i, s in listed]]
+                                                                 for t, listed in parts.items())])
     digest = hashlib.sha256(json.dumps(body, separators=(",", ":"), ensure_ascii=False)
                             .encode("utf-8")).hexdigest()
-    return Pins(entries, digest)
+    return Pins(entries, digest, parts)

@@ -94,9 +94,6 @@ class Tags(Case):
                 self.assertEqual(self.refused(self.write(text), tags=self.TAGS), {"line": line})
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 class Pins(Case):
     def refused_pins(self, path):
         with self.assertRaises(KuraError) as caught:
@@ -129,3 +126,51 @@ class Pins(Case):
         self.assertEqual(self.refused_pins(self.write("", "bin.tsv", raw=b"\xff\tmain/x\n")), {})
         self.assertEqual(self.refused_pins(self.write("", "big.tsv", raw=b"#" * (MAX_BYTES + 1))), {})
 
+
+class PinsWithParts(Case):
+    def parse(self, text):
+        return parse_pins(self.write(text, "pins.tsv"))
+
+    def refused_at(self, text):
+        with self.assertRaises(KuraError) as caught:
+            self.parse(text)
+        self.assertEqual(caught.exception.code, "invalid_policy")
+        return caught.exception.details
+
+    def test_old_files_keep_their_digest(self):
+        plain = self.parse("999000001\tmain/Kura Alpha\nnot-anime\tmain/Kura Beta\n")
+        import hashlib, json
+        legacy = hashlib.sha256(json.dumps(sorted(plain.entries.items()), separators=(",", ":"),
+                                           ensure_ascii=False).encode()).hexdigest()
+        self.assertEqual((plain.sha256, plain.parts), (legacy, {}))
+
+    def test_selector_lines(self):
+        pins = self.parse("999000001@auto\tmain/Kura Saga\n999000002@auto\tmain/Kura Saga\n"
+                          "999000003@season:02\tmain/Kura Other\n999000004@dir:Season 2\tmain/Kura Other\n"
+                          "999000005\tmain/Kura Plain\n")
+        self.assertEqual(pins.parts, {"main/Kura Saga": [(999000001, "auto"), (999000002, "auto")],
+                                      "main/Kura Other": [(999000003, "season:2"), (999000004, "dir:Season 2")]})
+        self.assertEqual(pins.entries, {"main/Kura Plain": 999000005})
+        self.assertEqual(pins.summary()["pins"], 3)
+        other = self.parse("999000005\tmain/Kura Plain\n999000004@dir:Season 2\tmain/Kura Other\n"
+                           "999000003@season:2\tmain/Kura Other\n999000002@auto\tmain/Kura Saga\n"
+                           "999000001@auto\tmain/Kura Saga\n")
+        self.assertNotEqual(other.sha256, pins.sha256)            # part order is meaningful (ordinals)
+
+    def test_refusals_carry_the_line_number(self):
+        for text, line in [("999000001\tmain/A\n999000002@auto\tmain/A\n", 2),
+                           ("999000002@auto\tmain/A\n999000001\tmain/A\n", 2),
+                           ("1@auto\tmain/A\n2@auto\tmain/A\n3@rest\tmain/A\n4@rest\tmain/A\n", 4),
+                           ("1@season:1\tmain/A\n2@season:1\tmain/A\n", 2),
+                           ("1@auto\tmain/A\n1@auto\tmain/A\n", 2),
+                           ("1@all\tmain/A\n2@auto\tmain/A\n", 2),
+                           ("1@auto\tmain/A\n2@all\tmain/A\n", 2),
+                           ("not-anime@auto\tmain/A\n", 1),
+                           ("1@guess\tmain/A\n", 1), ("1@dir:../x\tmain/A\n", 1), ("1@dir:/x\tmain/A\n", 1),
+                           ("1@dir:a\x01b\tmain/A\n", 1), ("1@ep:5-3\tmain/A\n", 1), ("1@\tmain/A\n", 1)]:
+            with self.subTest(text=text):
+                self.assertEqual(self.refused_at(text).get("line"), line)
+
+
+if __name__ == "__main__":
+    unittest.main()
