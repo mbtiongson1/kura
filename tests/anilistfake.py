@@ -61,6 +61,7 @@ class FakeAniList:
         self.bad_request_over = None            # media batches larger than this get HTTP 400
         self.list_entries: dict[int, dict] = {}  # the viewer's entries as seen by Media.mediaListEntry
         self.search_results: list[int] = []
+        self.relations: dict[int, list[tuple]] = {}   # id -> [(related id, relationType[, node type])]
         self.saves: list[dict] = []
         self.headers = headers or {"X-RateLimit-Limit": "90", "X-RateLimit-Remaining": "89"}
 
@@ -122,6 +123,17 @@ class FakeAniList:
             return {"User": {"favourites": {"anime": {
                 "pageInfo": {"hasNextPage": page * 25 < len(self.favourites)},
                 "nodes": [{"id": i} for i in ids]}}}}
+        if "relations{" in query:
+            ids = variables["ids"]
+            out = []
+            for i in ids:
+                if i in self.missing_media:
+                    continue
+                edges = [{"relationType": kind, "node": {**self.media_overrides.get(rid, media(rid)),
+                                                         "type": (rest[0] if rest else "ANIME")}}
+                         for rid, kind, *rest in self.relations.get(i, [])]
+                out.append({"id": i, "relations": {"edges": edges}})
+            return {"Page": {"media": out}}
         if "id_in" in query:
             ids = variables["ids"]
             if self.bad_request_over is not None and len(ids) > self.bad_request_over:

@@ -39,6 +39,7 @@ also revoke the app in your AniList settings.
 | `anilist logout` | 0 | deletes the token file |
 | `anilist list [--user NAME] [--max-age-h 12] [--refresh] [--entries] [--max-requests 10]` | 0 if cached | `--user` is anonymous (no Authorization header) |
 | `anilist media (--id N ... \| --library NAME [--missing]) [--max-requests 10]` | 1 per 50 IDs | public metadata, halves a batch AniList rejects (minimum 5) |
+| `anilist relations (--id N ... \| --library NAME) [--max-age-d 30] [--refresh] [--max-requests 10]` | 1 per 10 media not cached | public, token-less; caches SEQUEL/PREQUEL relations for multi-part titles (see below) |
 | `anilist limits` | exactly 1 | reports `X-RateLimit-*` and the shared limiter state |
 | `anilist update (--id N \| --title T [--search]) [--progress N] [--status S] [--score X] [--allow-decrease] [--dry-run]` | 1 read, plus 1 save when something changes (none with `--dry-run`), plus 1 with `--search` | the only write; see below |
 
@@ -48,6 +49,23 @@ visible only through a custom list is kept. Scores are requested as `POINT_10_DE
 (unscored) is stored as NULL. The snapshot is replaced in one transaction only after every chunk
 arrived; on a transient failure the previous snapshot is returned with `stale: true` and the
 error code. Authentication errors, unknown or private users and bad arguments raise instead.
+
+## Relations cache (multi-part titles)
+
+`anilist relations` fetches the `relations` of media (public query, no token, the same shared rate
+budget and `--max-requests` bound as the other commands) and caches the edges in
+`anilist_relations` (`relation` is AniList's `relationType`, verbatim; only anime entries) with
+one `anilist_relation_fetches` row per media (`fetched_at`, `status` `ok` or `not_found`). It
+starts from the given IDs, or with `--library` from the library's media titles that Kura resolved
+itself (never an owner decision), and follows only `SEQUEL` and `PREQUEL` edges breadth first, up
+to 300 media per command (seeds not yet cached first, so repeated runs get through a large library), ten media per request (a rejected batch is halved down to one). Media
+reached through an edge also have their title, format, episode count and status stored in
+`anilist_media`, which is what part assignment needs. A fetch replaces the cached edges of the
+media it covers; entries fetched within `--max-age-d` days are served from the cache (`--refresh`
+fetches again). A budget stop, a rate limit or an unreadable response ends the command with
+`complete: false`, the `error` code and `remaining`, and changes nothing for the media it did not
+reach; run it again to continue. Media AniList does not know are recorded `not_found`. The command
+only fills the cache; it never changes a title.
 
 ## Updating your list
 

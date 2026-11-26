@@ -1,4 +1,4 @@
-"""`kura anilist`: login (PIN flow), whoami, logout, list, media, limits, update.
+"""`kura anilist`: login (PIN flow), whoami, logout, list, media, relations, limits, update.
 
 Only `update` writes to AniList (one entry of the token owner's list, see anilist_update). There is deliberately no `--token` option: the access token is typed
 into a hidden prompt or piped on stdin, stored in a private file, and never printed.
@@ -10,7 +10,7 @@ import sys
 import time
 import warnings
 
-from . import anilist_auth, anilist_list, anilist_update
+from . import anilist_auth, anilist_list, anilist_relations, anilist_update
 from .anilist import AniList
 from .models import KuraError
 from .ratelimit import SharedLimiter
@@ -45,6 +45,13 @@ def register(sub, parser_class):
     what.add_argument("--id", type=int, action="append", metavar="N", help="AniList media ID (repeatable)")
     what.add_argument("--library", help="Media IDs of this library's resolved identities")
     q.add_argument("--missing", action="store_true", help="Only IDs not already stored")
+    q.add_argument("--max-requests", type=int, default=10)
+    q = leaf("relations")
+    what = q.add_mutually_exclusive_group(required=True)
+    what.add_argument("--id", type=int, action="append", metavar="N", help="Seed AniList media ID (repeatable)")
+    what.add_argument("--library", help="Seed with this library's resolved identities")
+    q.add_argument("--max-age-d", type=float, default=30.0, help="Serve cached relations younger than this")
+    q.add_argument("--refresh", action="store_true", help="Fetch again even if the cache is fresh")
     q.add_argument("--max-requests", type=int, default=10)
     leaf("limits")
     q = leaf("update")
@@ -240,6 +247,17 @@ def _media(args, open_store) -> dict:
         store.db.close()
 
 
+def _relations(args, open_store) -> dict:
+    anilist_relations.check_args(args.id, args.library, args.max_age_d, args.max_requests)
+    store = open_store()
+    try:
+        return anilist_relations.relations_sync(store, _ani(store), ids=args.id, library=args.library,
+                                                max_age_d=args.max_age_d, refresh=args.refresh,
+                                                max_requests=args.max_requests)
+    finally:
+        store.db.close()
+
+
 def _limits(args, open_store) -> dict:
     store = open_store()
     try:
@@ -274,6 +292,8 @@ def dispatch(args, open_store):
         return True, _list(args, open_store)
     if args.operation == "media":
         return True, _media(args, open_store)
+    if args.operation == "relations":
+        return True, _relations(args, open_store)
     if args.operation == "update":
         return True, _update(args, open_store)
     return True, _limits(args, open_store)
