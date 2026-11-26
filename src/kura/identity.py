@@ -186,6 +186,32 @@ def carries_season(title: str, season: int) -> bool:
     return len(tokens) > 1 and tokens[-1] == str(season)
 
 
+_ORDINALS = {w: n for n, w in enumerate(
+    ("second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"), 2)}
+_ORDINAL_SEASON = re.compile(r"\b(" + "|".join(_ORDINALS) + r") season\b")
+
+
+def explicit_seasons(title: str) -> set[int]:
+    """Season numbers a title names with an explicit marker: ``Season N``, ``Nth Season``, ``SN`` or a
+    spelled ordinal (``Second Season``). A trailing bare number is *not* a marker here."""
+    text = normalize(title)
+    found = {int(m.group(1)) for p in _LATER for m in p.finditer(text)}
+    return found | {_ORDINALS[m.group(1)] for m in _ORDINAL_SEASON.finditer(text)}
+
+
+def carries_season_strict(title: str, season: int) -> bool:
+    """Like ``carries_season`` but safe for choosing between parts of one title: only explicit
+    markers count, so "... Season 3 Part 2" carries season 3 and not season 2. A trailing bare
+    number counts only when the title has no explicit marker at all and the number does not
+    follow "part" or "cour" ("Title 2" is season 2, "Title Part 2" is not)."""
+    if season in explicit_seasons(title):
+        return True
+    if explicit_seasons(title):
+        return False
+    tokens = normalize(title).split()
+    return len(tokens) > 1 and tokens[-1] == str(season) and tokens[-2] not in ("part", "cour")
+
+
 def names_later_season(title: str, base: str = "") -> bool:
     """True when a title names season 2 or later: an explicit marker, or a trailing number
     (unless the folder title itself ends in that same number, as in a title like "... 100")."""

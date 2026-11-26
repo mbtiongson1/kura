@@ -1,0 +1,333 @@
+"""Multi-part titles: which AniList media a file of one library folder belongs to.
+
+One Kura title is one top-level folder. It may hold several AniList media (seasons, cours,
+split-cour parts, movies). ``assign`` decides, for each video file, the one part it belongs to
+by deterministic rules, or leaves it unassigned with a reason. Pure: no I/O, no state, no
+network. Assignment is never stored; every reader recomputes it from the files, the parts and
+the media metadata.
+
+Fail-safe by construction: any doubt (a contradiction, a missing count, an ambiguous marker,
+numbering that does not land on a season boundary) leaves the file unassigned, and callers
+refuse an unassigned episode file under a retain list. Kura never guesses "the third TV entry
+is season 3": a season marker must be carried by the part's own titles, or the owner says so.
+
+A part is ``{"anilist_id", "selector", "source", "ordinal", "chain_pos"}``; ``media`` maps an
+AniList ID to ``{"titles": [...], "format", "episodes", "status"}`` (every field optional).
+"""
+import re
+import unicodedata
+
+from . import names
+from .identity import (MEDIA_EXT, carries_season_strict, explicit_seasons, norm_words,
+                       season_markers)
+
+KEYWORD_SELECTORS = ("all", "auto", "rest")
+MAX_SELECTOR = 512
+MAX_RELPATH = 500
+# Formats that are not a season of the main line: matched by file name, never by season marker.
+SIDE_FORMATS = ("MOVIE", "OVA", "ONA", "SPECIAL", "TV_SHORT", "MUSIC")
+MAX_SAMPLE = 10
+
+
+def _relpath(text: str) -> str:
+    value = unicodedata.normalize("NFC", text)
+    parts = value.split("/")
+    if (not value or len(value) > MAX_RELPATH or value.startswith("/")
+            or any(p in ("", ".", "..") for p in parts) or any(ord(c) < 32 or ord(c) == 127 for c in value)):
+        raise ValueError("selector path must be a relative, '/'-separated path without empty, '.' or '..' parts")
+    return value
+
+
+def canonical_selector(text: str) -> str:
+    """The canonical form of a part selector, or ValueError. Shared by the pins parser, the
+    database and the CLI so every writer stores the same text.
+
+    ``all`` (whole title), ``auto`` (Kura assigns by the rules), ``rest`` (every file no other
+    selector claims), ``season:N`` (0-99), ``ep:A-B`` (1 <= A <= B <= 9999), ``dir:<relpath>``,
+    ``file:<relpath>``."""
+    if not isinstance(text, str):
+        raise ValueError("selector must be text")
+    text = text.strip()
+    if text in KEYWORD_SELECTORS:
+        return text
+    kind, sep, value = text.partition(":")
+    if sep and kind == "season" and re.fullmatch(r"[0-9]{1,2}", value):
+        return f"season:{int(value)}"
+    if sep and kind == "ep":
+        m = re.fullmatch(r"([0-9]{1,4})-([0-9]{1,4})", value)
+        if m and 1 <= int(m[1]) <= int(m[2]) <= 9999:
+            return f"ep:{int(m[1])}-{int(m[2])}"
+    elif sep and kind in ("dir", "file"):
+        return f"{kind}:{_relpath(value)}"
+    raise ValueError("selector must be all, auto, rest, season:N, ep:A-B, dir:PATH or file:PATH")
+
+
+def _kind(selector: str) -> str:
+    return selector.partition(":")[0]
+
+
+def _titles(media: dict, anilist_id: int) -> list[str]:
+    return list((media.get(anilist_id) or {}).get("titles") or [])
+
+
+def _tv_like(part: dict, media: dict) -> bool:
+    return (media.get(part["anilist_id"]) or {}).get("format") not in SIDE_FORMATS
+
+
+def season_part(season: int, parts: list[dict], media: dict) -> tuple[list[int], str | None]:
+    """``(part IDs, reason)`` for a season number among ``parts``: one ID when decisive, several
+    when more than one part carries it (a split cour), none with a reason otherwise. Never
+    positional: a part carries a season only through its own titles or (season 1) the absence of
+    any later-season marker on the first main-line entry."""
+    tv = [p for p in parts if _tv_like(p, media)]
+    if season >= 2:
+        ids = sorted(p["anilist_id"] for p in tv
+                     if any(carries_season_strict(t, season) for t in _titles(media, p["anilist_id"])))
+    elif season == 1:
+        first = [p for p in tv if p.get("chain_pos") == 1]
+        pool = first or tv
+        ids = sorted(p["anilist_id"] for p in pool
+                     if not any(explicit_seasons(t) for t in _titles(media, p["anilist_id"])))
+    else:
+        return [], "season_unmatched"
+    return ids, (None if ids else "season_unmatched")
+
+
+def _order(parts: list[dict]) -> list[dict]:
+    return sorted(parts, key=lambda p: (p.get("chain_pos") is None, p.get("chain_pos") or 0,
+                                        p.get("ordinal", 0), p["anilist_id"]))
+
+
+def cumulative(episodes: dict[str, tuple[int, int | None]], parts: list[dict], media: dict
+               ) -> tuple[dict[str, tuple[int, int]], str | None]:
+    """Map absolute episode numbers onto consecutive parts. ``episodes`` is ``{path: (episode,
+    version)}`` for the non-extra videos in scope; ``parts`` are tried in main-line order.
+
+    Returns ``({path: (part ID, episode within the part)}, None)`` or ``({}, reason)``. All of
+    these must hold, else nothing in scope is assigned: numbers are unique per episode (v1/v2 of
+    one episode collapse), contiguous from 1 to M, the parts form a finished run with known
+    episode counts, and M lands exactly on a cumulative boundary."""
+    if not episodes:
+        return {}, "no_marker"
+    by_number: dict[int, list[tuple[str, int | None]]] = {}
+    for path, (number, version) in episodes.items():
+        by_number.setdefault(number, []).append((path, version))
+    for copies in by_number.values():
+        versions = [v for _, v in copies]
+        if len(copies) > 1 and (len(set(versions)) != len(versions)):
+            return {}, "absolute_mismatch"          # the same number twice: two seasons numbered alike
+    top = max(by_number)
+    if sorted(by_number) != list(range(1, top + 1)):
+        return {}, "absolute_mismatch"
+    run = [p for p in _order(parts) if _tv_like(p, media)]
+    if not run:
+        return {}, "absolute_mismatch"
+    bounds, total = [], 0
+    for index, part in enumerate(run):
+        info = media.get(part["anilist_id"]) or {}
+        count = info.get("episodes")
+        if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+            return {}, "count_unknown"
+        if info.get("status") not in ("FINISHED", "RELEASING") or (
+                info.get("status") == "RELEASING" and index != len(run) - 1):
+            return {}, "absolute_mismatch"
+        total += count
+        bounds.append((part["anilist_id"], total - count, total))
+        if top == total:
+            break
+    else:
+        return {}, "absolute_mismatch"          # ran out of parts before the numbering ended on a boundary
+    out = {}
+    for number, copies in by_number.items():
+        part_id, offset, _ = next(b for b in bounds if number <= b[2])
+        for path, _version in copies:
+            out[path] = (part_id, number - offset)
+    return out, None
+
+
+def _stem_words(path: str) -> set[str]:
+    return set(norm_words(re.sub(r"\.[A-Za-z0-9]{2,4}$", "", path.rsplit("/", 1)[-1])).split())
+
+
+def _name_part(words: set[str], parts: list[dict], media: dict) -> tuple[int | None, str]:
+    """The one part whose title (or synonym) words are all present in ``words``, preferring the
+    longest title; a tie between different parts is ambiguous."""
+    best: dict[int, int] = {}
+    for part in parts:
+        for title in _titles(media, part["anilist_id"]):
+            tokens = set(norm_words(title).split())
+            if tokens and tokens <= words:
+                best[part["anilist_id"]] = max(best.get(part["anilist_id"], 0), len(tokens))
+    if not best:
+        return None, "no_match"
+    top = max(best.values())
+    winners = sorted(i for i, n in best.items() if n == top)
+    return (winners[0], "") if len(winners) == 1 else (None, "name_ambiguous")
+
+
+def _dir_name_part(component: str, parts: list[dict], media: dict) -> int | None:
+    """A directory that names exactly one part: its words equal one title's words, or are
+    contained in one part's titles only. A folder that every part contains (the franchise name)
+    decides nothing."""
+    wanted = set(norm_words(component).split())
+    if not wanted:
+        return None
+    hits = set()
+    for part in parts:
+        if any(wanted <= set(norm_words(t).split()) for t in _titles(media, part["anilist_id"])):
+            hits.add(part["anilist_id"])
+    return next(iter(hits)) if len(hits) == 1 else None
+
+
+def _owner_match(selector: str, path: str, season, episode) -> tuple | None:
+    """Specificity key when an owner selector claims ``path``, else None. file > deeper dir >
+    shallower dir > season > ep > rest."""
+    kind, _, value = selector.partition(":")
+    if kind == "file":
+        return (5, 0) if path == value else None
+    if kind == "dir":
+        return (4, value.count("/") + 1) if path.startswith(value + "/") else None
+    if kind == "season":
+        return (3, 0) if season is not None and season == int(value) else None
+    if kind == "ep":
+        low, high = (int(x) for x in value.split("-"))
+        return (2, 0) if episode is not None and low <= episode <= high else None
+    return (1, 0) if selector == "rest" else None
+
+
+def assign(files: list[str], parts: list[dict], media: dict) -> dict:
+    """Assign each video file (local paths relative to the title) to a part.
+
+    Returns ``{"files": {path: {"part": id|None, "rule": str, "reason": str|None}},
+    "assigned_video", "unassigned_video", "unassigned_sample", "reasons", "complete"}``.
+    Non-video files are ignored. ``complete`` is true when no non-extra video is unassigned;
+    unassigned extras (a root-level NCOP) never block it. Deterministic under file order."""
+    paths = sorted({f for f in files if f.lower().endswith(MEDIA_EXT)})
+    parts = _order(parts)
+    result: dict[str, dict] = {}
+
+    def put(path, part, rule, reason=None):
+        result[path] = {"part": part, "rule": rule, "reason": reason}
+
+    if len(parts) == 1:
+        for path in paths:
+            put(path, parts[0]["anilist_id"], "single")
+        return _summary(result, paths)
+    info = {p: names.parse(p) for p in paths}
+    auto = [p for p in parts if p["selector"] in ("auto", "all") or p["source"] == "relations"]
+    explicit = [p for p in parts if p not in auto]
+    pending = []
+    for path in paths:
+        parsed = info[path]
+        season, _ = season_markers(path.split("/"), episode_marker=True)
+        if explicit:
+            hits = []
+            for part in explicit:
+                key = _owner_match(part["selector"], path, season, None if parsed["extra"] else parsed["episode"])
+                if key:
+                    hits.append((key, part["anilist_id"]))
+            if hits:
+                top = max(k for k, _ in hits)
+                ids = sorted({i for k, i in hits if k == top})
+                if len(ids) == 1:
+                    put(path, ids[0], "owner_" + {5: "file", 4: "dir", 3: "season", 2: "ep", 1: "rest"}[top[0]])
+                else:
+                    put(path, None, "owner", "selector_conflict")
+                continue
+        if not auto:
+            put(path, None, "owner", "no_selector")
+            continue
+        pending.append(path)
+    _by_rules(pending, info, auto, media, result, put)
+    return _summary(result, paths, info)
+
+
+def _marker_part(path, components, auto, media, parsed):
+    """``(part id, rule, None)``, ``(ids, rule, None)`` when several parts carry the season,
+    or ``(None, rule, reason)``; ``(None, None, None)`` when the path has no marker at all."""
+    decisions = []
+    for depth in range(len(components) - 1, -1, -1):
+        season, bad = season_markers([components[depth]], episode_marker=depth == len(components) - 1)
+        if bad:
+            return None, "dir_season" if depth < len(components) - 1 else "file_season", "dir_ambiguous"
+        if season is not None:
+            decisions.append(("dir_season" if depth < len(components) - 1 else "file_season", season))
+            if depth < len(components) - 1:
+                break
+    seasons = {s for _, s in decisions}
+    if len(seasons) > 1:
+        return None, "marker", "marker_conflict"
+    if not seasons:
+        return None, None, None
+    season, rule = next(iter(seasons)), decisions[0][0]
+    ids, reason = season_part(season, auto, media)
+    if reason:
+        return None, rule, reason
+    return (ids[0], rule, None) if len(ids) == 1 else (ids, rule, None)
+
+
+def _by_rules(pending, info, auto, media, result, put):
+    undecided, grouped = [], {}
+    for path in pending:
+        parsed, comps = info[path], path.split("/")
+        found, rule, reason = _marker_part(path, comps, auto, media, parsed)
+        if reason:
+            put(path, None, rule, reason)
+            continue
+        if found is None:
+            for component in reversed(comps[:-1]):          # a directory that names exactly one part
+                season, bad = season_markers([component])
+                if season is None and not bad and not names.parse(component + "/x.mkv")["extra"]:
+                    named = _dir_name_part(component, auto, media)
+                    if named:
+                        found, rule = named, "dir_name"
+                        break
+        if isinstance(found, list):
+            grouped.setdefault(tuple(found), []).append(path)       # a split cour: decide by numbering
+        elif found is not None:
+            put(path, found, rule)
+        elif parsed["extra"]:
+            put(path, None, "extra", "no_marker")
+        else:
+            undecided.append(path)
+    for ids, members in sorted(grouped.items()):
+        done, reason = cumulative({p: (info[p]["episode"], info[p]["version"]) for p in members
+                                   if info[p]["episode"] is not None and not info[p]["extra"]},
+                                  [p for p in auto if p["anilist_id"] in ids], media)
+        for path in members:
+            if path in done:
+                put(path, done[path][0], "cumulative")
+            else:
+                put(path, None, "cumulative", reason or "no_marker")
+    numbered = {p: (info[p]["episode"], info[p]["version"]) for p in undecided
+                if info[p]["episode"] is not None and not info[p]["extra"]}
+    done, reason = cumulative(numbered, auto, media) if numbered else ({}, None)
+    for path in numbered:
+        if path in done:
+            put(path, done[path][0], "cumulative")
+        else:
+            put(path, None, "cumulative", reason)
+    undecided = [p for p in undecided if p not in numbered]
+    for path in undecided:
+        parsed = info[path]
+        if parsed["episode"] is None:
+            side = [p for p in auto if not _tv_like(p, media)] + [p for p in auto if _tv_like(p, media)]
+            chosen, why = _name_part(_stem_words(path), side, media)
+            if chosen is not None:
+                put(path, chosen, "title_match")
+            else:
+                put(path, None, "title_match", why)
+        else:
+            put(path, None, "no_marker", "no_marker")
+
+
+def _summary(result, paths, info=None):
+    unassigned = [p for p in paths if result[p]["part"] is None]
+    blocking = [p for p in unassigned if not (info and info[p]["extra"])]
+    reasons: dict[str, int] = {}
+    for path in blocking:
+        reason = result[path]["reason"] or "unassigned"
+        reasons[reason] = reasons.get(reason, 0) + 1
+    return {"files": {p: result[p] for p in paths}, "assigned_video": len(paths) - len(unassigned),
+            "unassigned_video": len(blocking), "unassigned_sample": blocking[:MAX_SAMPLE],
+            "reasons": dict(sorted(reasons.items())), "complete": not blocking}
