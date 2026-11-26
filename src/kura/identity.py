@@ -832,12 +832,46 @@ def retain_reasons(key: str, identities: dict[str, dict], retain) -> list[str]:
 
 
 def retain_check(store, library: str, retain) -> dict:
-    """What a retain list would protect in this library. Read-only."""
+    """What a retain list would protect in this library. Read-only.
+
+    Multi-part titles (see ``titleparts``) list each part under ``parts`` and report an episode
+    file no part owns under ``incomplete_titles``; ``possible`` entries say whether the listed ID
+    is a recorded ``candidate`` or a ``relative`` (a derived part that owns no file)."""
+    from . import titleparts
+    repo = ManifestRepo(store.db)
+    titles = {t["rel_path"]: t for t in repo.titles(library)}
     keys = _manifest_titles(store, library)
-    media = _media_titles(store, ManifestRepo(store.db).titles(library))
+    media = _media_titles(store, list(titles.values()))
     rows = load(store.db, library)
-    retained, possible, unidentified, bound = [], [], 0, set()
+    views = titleparts.effective(store.db, library)
+    retained, possible, incomplete, unidentified, bound = [], [], [], 0, set()
     for key in keys:
+        view = views.get(key)
+        if view is not None and view["mode"] != "single":
+            if view["status"] != "parted":
+                unidentified += key in media
+                continue
+            found = titleparts.assign(_local_files(repo, titles[key]), view["parts"],
+                                      titleparts.media_info(store.db, [p["anilist_id"] for p in view["parts"]]))
+            owning = {v["part"] for v in found["files"].values() if v["part"] is not None}
+            declared = {p["anilist_id"] for p in view["parts"]}
+            counted = declared if view["mode"] == "owner" else owning      # the owner's parts count even without files
+            listed_parts = [{"anilist_id": p["anilist_id"], "selector": p["selector"],
+                             "retained": p["anilist_id"] in retain} for p in view["parts"]]
+            if counted & set(retain.ids):
+                bound |= counted & set(retain.ids)
+                retained.append({"title": key, "anilist_id": view["anilist_id"], "source": view["mode"],
+                                 "parts": listed_parts})
+            hits = sorted(c for c in view["candidates"] if c in retain)
+            relatives = sorted(i for i in declared - owning if i in retain) if view["mode"] == "auto" else []
+            if hits:
+                possible.append({"title": key, "candidates": hits, "via": "candidate"})
+            if relatives:
+                possible.append({"title": key, "candidates": relatives, "via": "relative"})
+            if not found["complete"]:
+                incomplete.append({"title": key, "unassigned_video": found["unassigned_video"],
+                                   "reasons": found["reasons"]})
+            continue
         row = rows.get(key)
         if row is None or row["status"] not in IDENTIFIED:
             unidentified += key in media
@@ -847,6 +881,9 @@ def retain_check(store, library: str, retain) -> dict:
         hits = sorted(c for c in (row["candidates"] if row else []) if c in retain)
         if hits and not (row["status"] in IDENTIFIED and row["anilist_id"] in retain):
             possible.append({"title": key, "candidates": hits})
-    return {"library": library, "retain": retain.summary(), "retained_titles": retained,
-            "unmatched_ids": sorted(set(retain.ids) - bound), "possible": possible,
-            "unidentified_titles": unidentified}
+    out = {"library": library, "retain": retain.summary(), "retained_titles": retained,
+           "unmatched_ids": sorted(set(retain.ids) - bound), "possible": possible,
+           "unidentified_titles": unidentified}
+    if incomplete:
+        out["incomplete_titles"] = incomplete
+    return out

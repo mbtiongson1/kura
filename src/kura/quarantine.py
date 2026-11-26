@@ -45,7 +45,7 @@ import re
 import time
 from typing import Callable
 
-from . import identity
+from . import identity, titleparts
 from .idlist import IdList
 from .manifest import show
 from .manifest_store import ManifestRepo, canonical
@@ -169,7 +169,7 @@ def plan(store, *, library: str, titles: list[str] | None = None,
         manifest = show(store, library)
         shown = {t["title"]: t for t in manifest["titles"]}
         rows = {r["rel_path"]: r for r in repo.titles(library)}
-        identities = identity.load(store.db, library) if retain is not None else {}
+        views = titleparts.effective(store.db, library) if retain is not None else {}
         wanted = sorted(set(titles)) if titles is not None else sorted(rows)
         moves, refused = [], []
         for key in wanted:
@@ -181,14 +181,17 @@ def plan(store, *, library: str, titles: list[str] | None = None,
                                 skip_swarm=skip_swarm, max_inventory_age_h=max_inventory_age_h,
                                 min_quiet_days=min_quiet_days, max_swarm_age_h=max_swarm_age_h)
             if not isinstance(reasons, list) and retain is not None:
-                reasons = identity.retain_reasons(key, identities, retain) or reasons
+                reasons = titleparts.retain_reasons(store.db, key, views, retain,
+                                                    lambda: identity._local_files(repo, row)) or reasons
             if isinstance(reasons, list):
                 refused.append({"title": key, "status": info["status"], "reasons": reasons})
             else:
                 moves.append(reasons)
         if retain is not None:      # defence in depth: re-check the finished list
             for move in moves:
-                if identity.retain_reasons(f"{move['root']}/{move['from']}", identities, retain):
+                moved = f"{move['root']}/{move['from']}"
+                if titleparts.retain_reasons(store.db, moved, views, retain,
+                                             lambda: identity._local_files(repo, rows[moved])):
                     raise KuraError("retain_violation", "A retained or unidentified title reached the move list")
         body = _document(library, moves, refused, created_at, quarantine_dir, skip_swarm,
                          {"min_seeders": min_seeders, "min_quiet_days": min_quiet_days,
