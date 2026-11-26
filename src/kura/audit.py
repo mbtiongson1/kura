@@ -29,7 +29,7 @@ import re
 import statistics
 import time
 
-from . import idlist, identity, manifest, mkvprobe, names, policy
+from . import idlist, identity, manifest, mkvprobe, names, policy, titleparts
 from . import probe as probe_mod
 from .manifest_store import ManifestRepo, canonical
 from .models import KuraError
@@ -39,7 +39,7 @@ MB = 1_000_000
 FLAGS = ("mixed_groups", "superseded_version_present", "v2_known_upstream", "low_bpp_8bit",
          "ass_missing_fonts", "seadex_best_differs", "seadex_alt_held", "seadex_no_public_pick",
          "seadex_best_outside_band", "size_above_band", "size_below_band", "identity_unknown",
-         "probe_missing", "unsupported_container", "retained")
+         "probe_missing", "unsupported_container", "retained", "part_unassigned", "parts_pending")
 SEVERITIES = ("info", "warn", "action")
 SUGGESTIONS = ("none", "review", "upgrade_candidate")
 BPP_LOW, BPP_ACTION = 0.06, 0.035
@@ -376,37 +376,48 @@ class _Flags:
         return sorted(self.items, key=lambda f: FLAGS.index(f["code"]))
 
 
-def _audit_title(ctx, title):
+def _seadex(ctx, title, anilist_id, pol, videos, flags):
+    """SeaDex comparison for one AniList entry against the files in ``videos``: ``(summary, upgrade)``;
+    adds its flags to ``flags``. ``anilist_id`` None (unidentified) gives the empty summary."""
     db, repo = ctx["db"], ctx["repo"]
-    key = title["rel_path"]
-    files = _files(repo, title)
-    videos, file_doc, groups = _stats(files)
-    ident = ctx["identities"].get(key)
-    known = ident is not None and ident["status"] in identity.IDENTIFIED and type(ident["anilist_id"]) is int
-    anilist_id = ident["anilist_id"] if known else None
-    pol, reasons = policy.classify(anilist_id, favourites=ctx["favourites"], score=ctx["scores"].get(anilist_id),
-                                   overrides=ctx["overrides"].ids if ctx["overrides"] else None)
-    flags = _Flags()
+    known = anilist_id is not None
+    sd = {"entry": None, "incomplete": None, "best": [], "alt": [], "held_matches": "unknown"}
+    upgrade = False
+    if known:
+        entry, torrents = _seadex_rows(db, anilist_id)
+        if entry is not None:
+            held_groups, held_hashes = _held(db, repo, title, videos)
+            matches = _held_matches(torrents, held_groups, held_hashes)
+            best = [t for t in torrents if t["best"]]
+            public_best = [t for t in best if t["public"]]
+            sd = {"entry": entry[0], "incomplete": bool(entry[1]), "best": [_pick(t) for t in best[:MAX_LIST]],
+                  "alt": [_pick(t) for t in torrents if not t["best"]][:MAX_LIST], "held_matches": matches}
+            if not public_best:
+                flags.add("seadex_no_public_pick", "info", best=len(best))
+            if matches == "alt":
+                flags.add("seadex_alt_held", "info")
+            differs = bool(public_best) and matches in ("none", "alt")
+            if differs:
+                flags.add("seadex_best_differs", "warn" if pol == "archival" else "info",
+                          held_matches=matches, best_groups=sorted({t["group"] or "" for t in public_best})[:MAX_LIST])
+            if pol == "archival":
+                upgrade = bool(differs)
+            else:
+                sized = [t for t in public_best if t["median"] is not None]
+                inside = [t for t in sized if policy.band_position(t["median"] / MB) == "within"]
+                if sized and not inside:
+                    flags.add("seadex_best_outside_band", "info",
+                              median_mb=sorted(_mb(t["median"]) for t in sized)[0])
+                upgrade = bool(inside) and matches in ("none", "alt")
+            revised = _upstream_revisions(torrents, videos)
+            if revised:
+                flags.add("v2_known_upstream", "warn", episodes=revised[:20], count=len(revised))
 
-    # identity and retain
-    status = ident["status"] if ident else "unrecorded"
-    media = identity.has_media(title["kind"], key.partition("/")[2], [f["local"] for f in files])
-    if not known and status != "not_anime" and media:      # sidecars and the like are not titles
-        flags.add("identity_unknown", "warn" if ctx["retain"] is not None else "info", status=status)
-    retained = False
-    if ctx["retain"] is not None:
-        why = identity.retain_reasons(key, ctx["identities"], ctx["retain"])
-        retained = any(r in ("retained", "retain_possible") for r in why)
-        if retained:
-            flags.add("retained", "info", reason="retained" if "retained" in why else "retain_possible")
+    return sd, upgrade
 
-    # names: groups, versions, size
-    known_groups = [g for g in groups if _norm(g["group"])]
-    if len(known_groups) >= 2:
-        flags.add("mixed_groups", "warn", groups=[g["group"] for g in known_groups[:MAX_LIST]])
-    stale_eps = _superseded(videos)
-    if stale_eps:
-        flags.add("superseded_version_present", "action", episodes=stale_eps[:20], count=len(stale_eps))
+
+def _band_flags(flags, known, pol, file_doc, videos):
+    """Size-band flags of an efficient-policy entry, from the median size of its episode files."""
     median = file_doc["per_episode_mb"]["median"]
     episodic = file_doc["video"] >= 2 or any(f["n"]["episode"] is not None for f in videos)
     position = policy.band_position(median) if episodic else None
@@ -414,6 +425,124 @@ def _audit_title(ctx, title):
         flags.add("size_above_band", "warn", median_mb=median, max_mb=policy.EFFICIENT["max_mb"])
     if known and pol == "efficient" and position == "below":
         flags.add("size_below_band", "warn", median_mb=median, min_mb=policy.EFFICIENT["min_mb"])
+
+
+def _parts(ctx, title, files, view, flags):
+    """Audit each part of a multi-part title on its own files. Returns ``(extra title keys, policy,
+    policy reasons, upgrade, seadex summary)`` and adds the parts' flags (``detail.part``) to ``flags``.
+
+    The policy of the title is archival when any part is; ``policy_mixed`` says the parts differ.
+    Held SeaDex releases are attributed by group name; a part whose files carry no group name is not
+    compared. The title-level ``held_matches`` is the worst over the parts that have a SeaDex entry and
+    files (best < alt < none), or ``unknown`` when there is none."""
+    db = ctx["db"]
+    parts = view["parts"]
+    media = titleparts.media_info(db, [p["anilist_id"] for p in parts])
+    found = titleparts.assign([f["local"] for f in files], parts, media)
+    docs, pols, reasons, upgrade, matches = [], [], [], False, []
+    for part in parts:
+        pid = part["anilist_id"]
+        mine = [f for f in files if found["files"].get(f["local"], {}).get("part") == pid]
+        videos, file_doc, groups = _stats(mine)
+        pol, why = policy.classify(pid, favourites=ctx["favourites"], score=ctx["scores"].get(pid),
+                                   overrides=ctx["overrides"].ids if ctx["overrides"] else None)
+        pflags = _Flags()
+        known_groups = [g for g in groups if _norm(g["group"])]
+        if len(known_groups) >= 2:
+            pflags.add("mixed_groups", "warn", groups=[g["group"] for g in known_groups[:MAX_LIST]])
+        _band_flags(pflags, True, pol, file_doc, videos)
+        sd = {"entry": None, "incomplete": None, "best": [], "alt": [], "held_matches": "unknown"}
+        part_upgrade = False
+        stale = _superseded(videos)
+        if stale:
+            pflags.add("superseded_version_present", "action", episodes=stale[:20], count=len(stale))
+        if any(f["n"]["group"] for f in videos):       # without a group name the comparison would rest on shared links
+            sd, part_upgrade = _seadex(ctx, title, pid, pol, videos, pflags)
+        items = pflags.done()
+        info = media.get(pid) or {}
+        numbers = sorted({f["n"]["episode"] for f in videos if f["n"]["episode"] is not None})
+        docs.append({"anilist_id": pid, "title": (info.get("titles") or [None])[0], "format": info.get("format"),
+                     "selector": part["selector"], "source": part["source"], "chain_pos": part["chain_pos"],
+                     "rule_counts": _tally(found["files"], {f["local"] for f in mine}),
+                     "files": file_doc, "groups": groups,
+                     "episodes": {"held": len(numbers), "expected": info.get("episodes"),
+                                  "local_range": [numbers[0], numbers[-1]] if numbers else None},
+                     "policy": pol, "policy_reasons": why,
+                     "retained": ctx["retain"] is not None and pid in ctx["retain"],
+                     "seadex": sd, "flags": items,
+                     "suggestion": ("upgrade_candidate" if part_upgrade else
+                                    "review" if any(f["severity"] != "info" for f in items) else "none")})
+        for item in items:
+            flags.add(item["code"], item["severity"], **{**item["detail"], "part": pid})
+        pols.append(pol)
+        reasons.append((pol, why))
+        upgrade = upgrade or part_upgrade
+        if sd["entry"] is not None:
+            matches.append(sd["held_matches"])
+    if not found["complete"]:
+        flags.add("part_unassigned", "warn" if ctx["retain"] is not None else "info",
+                  video=found["unassigned_video"], reasons=found["reasons"], sample=found["unassigned_sample"])
+    rank = {"best": 0, "alt": 1, "none": 2, "unknown": 3}
+    worst = max(matches, key=lambda m: rank.get(m, 3)) if matches else "unknown"
+    rollup = {"entry": None, "incomplete": None, "best": [], "alt": [], "held_matches": worst}
+    pol = "archival" if "archival" in pols else "efficient"
+    why = sorted({r for p, rs in reasons for r in rs if p == pol})        # the reasons of the parts that decide
+    return ({"policy_mixed": len(set(pols)) > 1, "parts": docs,
+             "unassigned": {"video": found["unassigned_video"], "reasons": found["reasons"],
+                            "sample": found["unassigned_sample"]}},
+            pol, why, upgrade, rollup)
+
+
+def _tally(assigned, mine):
+    out: dict[str, int] = {}
+    for path in sorted(mine):
+        rule = assigned[path]["rule"]
+        out[rule] = out.get(rule, 0) + 1
+    return out
+
+
+def _audit_title(ctx, title):
+    db, repo = ctx["db"], ctx["repo"]
+    key = title["rel_path"]
+    files = _files(repo, title)
+    videos, file_doc, groups = _stats(files)
+    ident = ctx["identities"].get(key)
+    view = ctx["views"].get(key)
+    multi = view is not None and view["mode"] != "single"        # a title with stored parts (see titleparts)
+    parted = multi and view["status"] == "parted"
+    known = (parted or (not multi and ident is not None and ident["status"] in identity.IDENTIFIED
+                        and type(ident["anilist_id"]) is int))
+    anilist_id = (view["anilist_id"] if parted else ident["anilist_id"]) if known else None
+    pol, reasons = policy.classify(anilist_id, favourites=ctx["favourites"], score=ctx["scores"].get(anilist_id),
+                                   overrides=ctx["overrides"].ids if ctx["overrides"] else None)
+    flags = _Flags()
+
+    # identity and retain
+    status = view["status"] if multi else ident["status"] if ident else "unrecorded"
+    media = identity.has_media(title["kind"], key.partition("/")[2], [f["local"] for f in files])
+    if not known and status != "not_anime" and media:      # sidecars and the like are not titles
+        flags.add("identity_unknown", "warn" if ctx["retain"] is not None else "info", status=status)
+    if multi and not parted:
+        flags.add("parts_pending", "info", reason=status)
+    retained = False
+    if ctx["retain"] is not None:
+        if multi:
+            why = titleparts.retain_reasons(db, key, ctx["views"], ctx["retain"], lambda: [f["local"] for f in files])
+        else:
+            why = identity.retain_reasons(key, ctx["identities"], ctx["retain"])
+        retained = any(r in ("retained", "retain_possible") for r in why)
+        if retained:
+            flags.add("retained", "info", reason="retained" if "retained" in why else "retain_possible")
+
+    # names: groups, versions, size
+    known_groups = [g for g in groups if _norm(g["group"])]
+    if len(known_groups) >= 2 and not parted:         # a parted title is judged part by part
+        flags.add("mixed_groups", "warn", groups=[g["group"] for g in known_groups[:MAX_LIST]])
+    stale_eps = _superseded(videos) if not parted else []        # per part for a parted title
+    if stale_eps:
+        flags.add("superseded_version_present", "action", episodes=stale_eps[:20], count=len(stale_eps))
+    if not parted:
+        _band_flags(flags, known, pol, file_doc, videos)
 
     # probe
     rows, changed = _probe_rows(db, title, files)
@@ -455,46 +584,21 @@ def _audit_title(ctx, title):
                                  "style": s["encoder"]["style"] if s["encoder"] else None}
                                 for s in samples[:probe_mod.MAX_CLUSTERS * 2]]
 
-    # SeaDex
-    sd = {"entry": None, "incomplete": None, "best": [], "alt": [], "held_matches": "unknown"}
-    upgrade = False
-    if known:
-        entry, torrents = _seadex_rows(db, anilist_id)
-        if entry is not None:
-            held_groups, held_hashes = _held(db, repo, title, videos)
-            matches = _held_matches(torrents, held_groups, held_hashes)
-            best = [t for t in torrents if t["best"]]
-            public_best = [t for t in best if t["public"]]
-            sd = {"entry": entry[0], "incomplete": bool(entry[1]), "best": [_pick(t) for t in best[:MAX_LIST]],
-                  "alt": [_pick(t) for t in torrents if not t["best"]][:MAX_LIST], "held_matches": matches}
-            if not public_best:
-                flags.add("seadex_no_public_pick", "info", best=len(best))
-            if matches == "alt":
-                flags.add("seadex_alt_held", "info")
-            differs = bool(public_best) and matches in ("none", "alt")
-            if differs:
-                flags.add("seadex_best_differs", "warn" if pol == "archival" else "info",
-                          held_matches=matches, best_groups=sorted({t["group"] or "" for t in public_best})[:MAX_LIST])
-            if pol == "archival":
-                upgrade = bool(differs)
-            else:
-                sized = [t for t in public_best if t["median"] is not None]
-                inside = [t for t in sized if policy.band_position(t["median"] / MB) == "within"]
-                if sized and not inside:
-                    flags.add("seadex_best_outside_band", "info",
-                              median_mb=sorted(_mb(t["median"]) for t in sized)[0])
-                upgrade = bool(inside) and matches in ("none", "alt")
-            revised = _upstream_revisions(torrents, videos)
-            if revised:
-                flags.add("v2_known_upstream", "warn", episodes=revised[:20], count=len(revised))
+    extra_doc = {}
+    if parted:
+        extra_doc, pol, reasons, upgrade, sd = _parts(ctx, title, files, view, flags)
+    else:
+        sd, upgrade = _seadex(ctx, title, anilist_id if known else None, pol, videos, flags)
 
     items = flags.done()
     suggestion = ("upgrade_candidate" if upgrade
                   else "review" if any(f["severity"] != "info" for f in items) else "none")
     doc = {"title": key, "anilist_id": anilist_id,
-           "identity": {"status": status, "source": ident["source"] if ident else None},
+           "identity": {"status": status, "source": ident["source"] if ident else None,
+                        **({"mode": view["mode"]} if multi else {})},
            "policy": pol, "policy_reasons": reasons, "retained": retained, "files": file_doc,
-           "groups": groups, "probe": probe_doc, "seadex": sd, "flags": items, "suggestion": suggestion}
+           "groups": groups, "probe": probe_doc, "seadex": sd, "flags": items, "suggestion": suggestion,
+           **extra_doc}
     return doc, {"probed": len(rows), "videos": sum(1 for f in files if f["video"]), "changed": changed}
 
 
@@ -521,11 +625,15 @@ def _anilist(db, user, moment):
     return {"user": name, "fetched_at": fetched, "favourites_fetched_at": fav_fetched, "stale": stale}, favourites, scores
 
 
-def _retain_doc(retain, identities, titles):
+def _retain_doc(retain, identities, titles, views=None):
     if retain is None:
         return None
     bound = {identities[t["rel_path"]]["anilist_id"] for t in titles
              if t["rel_path"] in identities and identities[t["rel_path"]]["status"] in identity.IDENTIFIED}
+    for t in titles:      # every part of a trusted multi-part title is bound
+        view = (views or {}).get(t["rel_path"])
+        if view and view["mode"] != "single" and view["status"] == "parted":
+            bound |= {p["anilist_id"] for p in view["parts"]}
     return {**retain.summary(), "unmatched_ids": sorted(set(retain.ids) - bound)}
 
 
@@ -562,9 +670,10 @@ def run(store, *, library, retain=None, overrides=None, user=None, titles=None, 
             wanted = set(titles)
             chosen = [t for t in chosen if t["rel_path"] in wanted]
         identities = identity.load(db, library)
+        views = titleparts.effective(db, library)
         anilist_doc, favourites, scores = _anilist(db, user, moment)
         sd_status = seadex.status(store, now=lambda: moment)
-        ctx = {"db": db, "repo": repo, "identities": identities, "favourites": favourites, "scores": scores,
+        ctx = {"db": db, "repo": repo, "identities": identities, "views": views, "favourites": favourites, "scores": scores,
                "retain": retain, "overrides": overrides}
         docs, probed, videos, changed = [], 0, 0, 0
         for title in chosen:
@@ -575,13 +684,19 @@ def run(store, *, library, retain=None, overrides=None, user=None, titles=None, 
             changed += stats["changed"]
         by_flag: dict[str, int] = {}
         for doc in docs:
-            for f in doc["flags"]:
-                by_flag[f["code"]] = by_flag.get(f["code"], 0) + 1
+            for code in {f["code"] for f in doc["flags"]}:       # titles per code, also for parted titles
+                by_flag[code] = by_flag.get(code, 0) + 1
         counts = {"titles": len(docs),
                   "flagged": sum(1 for d in docs if any(f["severity"] != "info" for f in d["flags"])),
                   "by_flag": dict(sorted(by_flag.items())),
                   "by_policy": {p: sum(1 for d in docs if d["policy"] == p) for p in policy.POLICIES},
                   "by_suggestion": {s: sum(1 for d in docs if d["suggestion"] == s) for s in SUGGESTIONS}}
+        parted = [d for d in docs if "parts" in d]
+        if parted:
+            counts["parts"] = {"titles": len(parted), "parts": sum(len(d["parts"]) for d in parted),
+                               "by_policy": {p: sum(1 for d in parted for x in d["parts"] if x["policy"] == p)
+                                             for p in policy.POLICIES},
+                               "unassigned_video": sum(d["unassigned"]["video"] for d in parted)}
         shown = [d for d in docs if not flags or any(f["code"] in flags for f in d["flags"])]
         shown.sort(key=lambda d: (-_rank(d), d["title"]))
         report = {
@@ -592,7 +707,7 @@ def run(store, *, library, retain=None, overrides=None, user=None, titles=None, 
                           "coverage": round(probed / videos, 4) if videos else None, "changed": changed},
                 "seadex": {"synced_at": sd_status["last_ok"], "stale": sd_status["stale"]},
                 "anilist": anilist_doc,
-                "retain": _retain_doc(retain, identities, present),
+                "retain": _retain_doc(retain, identities, present, views),
                 "policy": {"efficient": dict(policy.EFFICIENT), "archival": dict(policy.ARCHIVAL),
                            "overrides_sha256": overrides.sha256 if overrides else None,
                            "overrides_ids": len(overrides.ids) if overrides else None}},
