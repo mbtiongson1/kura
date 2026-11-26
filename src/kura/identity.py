@@ -187,15 +187,18 @@ def carries_season(title: str, season: int) -> bool:
 
 
 _ORDINALS = {w: n for n, w in enumerate(
-    ("second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"), 2)}
+    ("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"), 1)}
 _ORDINAL_SEASON = re.compile(r"\b(" + "|".join(_ORDINALS) + r") season\b")
+_NUMBERED_SEASON = (re.compile(r"\bseason 0*([1-9][0-9]?)\b"),
+                    re.compile(r"\b0*([1-9][0-9]?)(?:st|nd|rd|th) season\b"),
+                    re.compile(r"\bs0*([1-9][0-9]?)\b"))
 
 
 def explicit_seasons(title: str) -> set[int]:
     """Season numbers a title names with an explicit marker: ``Season N``, ``Nth Season``, ``SN`` or a
-    spelled ordinal (``Second Season``). A trailing bare number is *not* a marker here."""
+    spelled ordinal (``Second Season``), season 1 included. A trailing bare number is *not* a marker."""
     text = normalize(title)
-    found = {int(m.group(1)) for p in _LATER for m in p.finditer(text)}
+    found = {int(m.group(1)) for p in _NUMBERED_SEASON for m in p.finditer(text)}
     return found | {_ORDINALS[m.group(1)] for m in _ORDINAL_SEASON.finditer(text)}
 
 

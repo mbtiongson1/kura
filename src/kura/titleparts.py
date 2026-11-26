@@ -87,7 +87,8 @@ def season_part(season: int, parts: list[dict], media: dict) -> tuple[list[int],
         first = [p for p in tv if p.get("chain_pos") == 1]
         pool = first or tv
         ids = sorted(p["anilist_id"] for p in pool
-                     if not any(explicit_seasons(t) for t in _titles(media, p["anilist_id"])))
+                     if not any(explicit_seasons(t) - {1} or any(carries_season_strict(t, n) for n in range(2, 30))
+                                for t in _titles(media, p["anilist_id"])))
     else:
         return [], "season_unmatched"
     return ids, (None if ids else "season_unmatched")
@@ -179,14 +180,17 @@ def _dir_name_part(component: str, parts: list[dict], media: dict) -> int | None
     return next(iter(hits)) if len(hits) == 1 else None
 
 
-def _owner_match(selector: str, path: str, season, episode) -> tuple | None:
+def _owner_match(selector: str, path: str, season, episode, doubtful=False) -> tuple | None:
     """Specificity key when an owner selector claims ``path``, else None. file > deeper dir >
-    shallower dir > season > ep > rest."""
+    shallower dir > season > ep > rest. ``doubtful`` (contradictory season markers in the path)
+    leaves only the path selectors (file, dir) in force."""
     kind, _, value = selector.partition(":")
     if kind == "file":
         return (5, 0) if path == value else None
     if kind == "dir":
         return (4, value.count("/") + 1) if path.startswith(value + "/") else None
+    if doubtful:
+        return None
     if kind == "season":
         return (3, 0) if season is not None and season == int(value) else None
     if kind == "ep":
@@ -209,21 +213,24 @@ def assign(files: list[str], parts: list[dict], media: dict) -> dict:
     def put(path, part, rule, reason=None):
         result[path] = {"part": part, "rule": rule, "reason": reason}
 
-    if len(parts) == 1:
+    if len(parts) == 1 and parts[0]["selector"] in ("all", "auto", "rest"):
         for path in paths:
             put(path, parts[0]["anilist_id"], "single")
         return _summary(result, paths)
     info = {p: names.parse(p) for p in paths}
     auto = [p for p in parts if p["selector"] in ("auto", "all") or p["source"] == "relations"]
+    if len(parts) == 1:
+        auto = []
     explicit = [p for p in parts if p not in auto]
     pending = []
     for path in paths:
         parsed = info[path]
-        season, _ = season_markers(path.split("/"), episode_marker=True)
+        season, doubtful = season_markers(path.split("/"), episode_marker=True)
         if explicit:
             hits = []
             for part in explicit:
-                key = _owner_match(part["selector"], path, season, None if parsed["extra"] else parsed["episode"])
+                key = _owner_match(part["selector"], path, season, None if parsed["extra"] else parsed["episode"],
+                                   doubtful)
                 if key:
                     hits.append((key, part["anilist_id"]))
             if hits:
@@ -242,24 +249,25 @@ def assign(files: list[str], parts: list[dict], media: dict) -> dict:
     return _summary(result, paths, info)
 
 
-def _marker_part(path, components, auto, media, parsed):
-    """``(part id, rule, None)``, ``(ids, rule, None)`` when several parts carry the season,
-    or ``(None, rule, reason)``; ``(None, None, None)`` when the path has no marker at all."""
-    decisions = []
-    for depth in range(len(components) - 1, -1, -1):
-        season, bad = season_markers([components[depth]], episode_marker=depth == len(components) - 1)
+def _marker_part(components, auto, media):
+    """``(part id | ids, rule, None)`` from the season markers of every path component, or
+    ``(None, rule, reason)`` when they are ambiguous or contradict each other, or
+    ``(None, None, None)`` when the path carries no marker. The deepest directory marker names
+    the rule; every component is checked, so an outer directory cannot be overridden silently."""
+    last = len(components) - 1
+    found = []
+    for depth, component in enumerate(components):
+        season, bad = season_markers([component], episode_marker=depth == last)
         if bad:
-            return None, "dir_season" if depth < len(components) - 1 else "file_season", "dir_ambiguous"
+            return None, "dir_season" if depth < last else "file_season", "dir_ambiguous"
         if season is not None:
-            decisions.append(("dir_season" if depth < len(components) - 1 else "file_season", season))
-            if depth < len(components) - 1:
-                break
-    seasons = {s for _, s in decisions}
-    if len(seasons) > 1:
-        return None, "marker", "marker_conflict"
-    if not seasons:
+            found.append((depth, season))
+    if not found:
         return None, None, None
-    season, rule = next(iter(seasons)), decisions[0][0]
+    if len({s for _, s in found}) > 1:
+        return None, "marker", "marker_conflict"
+    depth, season = found[-1]
+    rule = "dir_season" if depth < last else "file_season"
     ids, reason = season_part(season, auto, media)
     if reason:
         return None, rule, reason
@@ -270,7 +278,7 @@ def _by_rules(pending, info, auto, media, result, put):
     undecided, grouped = [], {}
     for path in pending:
         parsed, comps = info[path], path.split("/")
-        found, rule, reason = _marker_part(path, comps, auto, media, parsed)
+        found, rule, reason = _marker_part(comps, auto, media)
         if reason:
             put(path, None, rule, reason)
             continue
@@ -301,7 +309,11 @@ def _by_rules(pending, info, auto, media, result, put):
                 put(path, None, "cumulative", reason or "no_marker")
     numbered = {p: (info[p]["episode"], info[p]["version"]) for p in undecided
                 if info[p]["episode"] is not None and not info[p]["extra"]}
-    done, reason = cumulative(numbered, auto, media) if numbered else ({}, None)
+    decided_numbered = [p for p in info if p in result and result[p]["part"] is not None
+                        and info[p]["episode"] is not None and not info[p]["extra"]]
+    done, reason = cumulative(numbered, auto, media) if numbered and not decided_numbered else ({}, None)
+    if numbered and decided_numbered:
+        reason = "absolute_mismatch"        # numbering is only trusted when it is the sole evidence
     for path in numbered:
         if path in done:
             put(path, done[path][0], "cumulative")

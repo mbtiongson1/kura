@@ -214,6 +214,35 @@ class Owner(unittest.TestCase):
         self.assertEqual(got, {"Specials/a - 01.mkv": 1, "Season 2/a - 01.mkv": 3})
 
 
+class Review(unittest.TestCase):
+    def test_single_restricted_selector_does_not_claim_everything(self):
+        got, out = run(["A/x - 01.mkv", "B/x - 01.mkv"], [part(7, source="owner", selector="dir:A")], {})
+        self.assertEqual(got, {"A/x - 01.mkv": 7, "B/x - 01.mkv": None})
+
+    def test_contradictory_markers_skip_fallback_owner_selectors(self):
+        parts = [part(1, selector="rest", source="owner"), part(2, selector="season:3", source="owner")]
+        got, _ = run(["Season 2/Example Show S03E01.mkv", "Plain/x - 01.mkv"], parts, {})
+        self.assertEqual(got, {"Season 2/Example Show S03E01.mkv": None, "Plain/x - 01.mkv": 1})
+
+    def test_outer_directory_conflict(self):
+        _, out = run(["Season 2/Season 3/Example Show S03E01.mkv", "Season 2/Season 3/a - 01.mkv"])
+        self.assertEqual({v["reason"] for v in out["files"].values()}, {"marker_conflict"})
+
+    def test_season_one_part_titled_with_a_trailing_number_is_not_season_one(self):
+        media = {1: info(["Example Show 2"]), 2: info(["Example Show 3"])}
+        self.assertEqual(season_part(1, [part(1, chain=1), part(2, chain=2)], media), ([], "season_unmatched"))
+
+    def test_explicit_season_one_marker_blocks_the_trailing_number(self):
+        self.assertFalse(carries_season_strict("Example Show Season 1 Part 2", 2))
+        self.assertTrue(carries_season_strict("Example Show Season 1 Part 2", 1))
+
+    def test_numbering_is_not_trusted_beside_decided_numbered_files(self):
+        files = ["Season 1/Example Show - 01.mkv", "Example Show - 01.mkv"]
+        media = {1: info(["Example Show"], episodes=1), 2: info(["Example Show 2nd Season"], episodes=1)}
+        got, _ = run(files, [part(1, chain=1), part(2, chain=2)], media)
+        self.assertEqual(got, {"Season 1/Example Show - 01.mkv": 1, "Example Show - 01.mkv": None})
+
+
 class Invariants(unittest.TestCase):
     def test_single_part_assigns_everything(self):
         files = ["a - 01.mkv", "x/b.mkv", "Extras/NCOP.mkv", "notes.txt"]
