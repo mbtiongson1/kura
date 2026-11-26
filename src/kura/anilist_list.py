@@ -434,8 +434,10 @@ def list_sync(store, ani, *, user_name=None, max_age_h=12.0, refresh=False, entr
 def media_ids(db, ids, library, missing) -> list[int]:
     if library is not None:
         found = [r[0] for r in db.execute(
-            "SELECT DISTINCT anilist_id FROM title_identities WHERE library=? AND anilist_id IS NOT NULL "
-            "AND " + PRESENT_IDENTITY_SQL + " ORDER BY anilist_id", (library, library, library))]
+            "SELECT anilist_id FROM title_identities WHERE library=? AND anilist_id IS NOT NULL "
+            "AND " + PRESENT_IDENTITY_SQL + " UNION SELECT anilist_id FROM title_parts WHERE library=? "
+            "AND " + PRESENT_IDENTITY_SQL + " ORDER BY anilist_id",
+            (library, library, library, library, library, library))]
     else:
         found = sorted(set(ids))
     if len(found) > MAX_IDS:

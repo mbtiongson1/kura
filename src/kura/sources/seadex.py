@@ -562,9 +562,10 @@ def library_ids(store, library: str) -> list[int]:
     """
     db = store.db
     ids = [r[0] for r in db.execute(
-        "SELECT DISTINCT anilist_id FROM title_identities WHERE library=? AND anilist_id IS NOT NULL "
-        "AND status IN ('resolved','pinned') AND " + PRESENT_IDENTITY_SQL + " ORDER BY anilist_id",
-        (library, library, library))]
+        "SELECT anilist_id FROM title_identities WHERE library=? AND anilist_id IS NOT NULL "
+        "AND status IN ('resolved','pinned') AND " + PRESENT_IDENTITY_SQL + " UNION SELECT anilist_id "
+        "FROM title_parts WHERE library=? AND " + PRESENT_IDENTITY_SQL + " ORDER BY anilist_id",
+        (library, library, library, library, library, library))]
     ids += [r[0] for r in db.execute(
         "SELECT DISTINCT e.anilist_id FROM anilist_list_entries e JOIN anilist_users u "
         "ON u.user_id=e.user_id WHERE u.is_viewer=1 ORDER BY e.anilist_id")]

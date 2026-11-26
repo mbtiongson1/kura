@@ -107,6 +107,38 @@ line keeps the earlier decision until `identity pin --clear`. Keeping the file n
 retain list lets a rebuilt state get the same decisions back.
 `kura identity show --library NAME [--status S]` lists what is recorded.
 
+### Pinning the parts of a title
+
+A pins line may name one part: `<ID>@<selector><TAB><title key>`. Selectors: `auto` (these IDs are the
+parts; Kura assigns files by the rules above), `season:N`, `dir:PATH` and `file:PATH` (relative to the
+title), `ep:A-B` (absolute episode range, for when AniList counts disagree with the release),
+`rest` (every file no other selector claims) and `all` (the whole title; only alone).
+
+```
+20464@auto	main/Example Show
+20992@auto	main/Example Show
+101338@dir:Season 2	main/Other Show
+104578@file:Movies/Some Movie.mkv	main/Other Show
+21827@rest	main/Other Show
+```
+
+A title may repeat only with selector lines (a plain line beside them, a repeated selector, `all` beside
+others and `not-anime@...` are refused with the line number). Files without selector lines keep the same
+digest as before. Applying the file writes the parts (`title_parts`, source `owner`, ordinal = line order)
+and a **safety-net identity row**: pinned to the first part, the others as candidates, `matched` =
+`parts:N`. Any reader that knows nothing about parts therefore still sees every part and fails closed.
+As with plain pins, dropping a line keeps the part (`kept_parts`); a plain line for a title that has parts
+replaces them all (`replaced_parts`).
+
+`kura identity pin --title KEY --anilist-id N --part SELECTOR` adds or replaces one part (a title with a plain
+owner decision must be cleared first); `--clear --part SELECTOR` removes one part and the last removal
+drops the safety-net row; plain `--clear`, a plain pin or `--not-anime` remove every part.
+`kura identity parts --library L --title KEY` shows the parts and, for every video file, the part it
+belongs to with the rule or the reason it is unassigned (bounded to 2,000 files). `identity show` lists
+`mode` and `parts` for parted titles. `manifest prune` drops derived parts like derived identities and
+keeps owner parts until the library empties. Part IDs are included in `anilist media` and SeaDex ID
+selection so their metadata is fetched.
+
 ## Retain check and plans
 
 `kura retain check --library NAME --retain FILE` reports which titles the list protects:

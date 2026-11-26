@@ -253,7 +253,9 @@ class ManifestRepo:
                 ("probe_results", "probe_results", "title_id", ids, ""),
                 ("marks", "library_absent", "title_id", ids, ""),
                 ("identities", "title_identities", "library", [library], "") if empties_library else
-                ("identities", "title_identities", "title", keys, " AND library=? AND source<>'owner'"))
+                ("identities", "title_identities", "title", keys, " AND library=? AND source<>'owner'"),
+                ("parts", "title_parts", "library", [library], "") if empties_library else
+                ("parts", "title_parts", "title", keys, " AND library=? AND source<>'owner'"))
         counts = {name: 0 for name, *_ in plan}
 
         def run(db):

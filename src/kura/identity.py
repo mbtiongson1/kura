@@ -714,9 +714,40 @@ def sync(store, *, library: str, titles: list[str] | None = None, aliases=None,
             "pending": pending}
 
 
+def _owner_parts(db, library: str, title: str) -> list[tuple[int, str, int]]:
+    return [tuple(r) for r in db.execute(
+        "SELECT anilist_id, selector, ordinal FROM title_parts WHERE library=? AND title=? AND source='owner'"
+        " ORDER BY ordinal, anilist_id", (library, title))]
+
+
+def _write_safety_net(db, library: str, title: str, moment: float):
+    """Mirror a title's owner parts into its ``title_identities`` row: pinned to the first part, the others
+    as candidates, so any reader that knows nothing about parts still sees every part (fail closed).
+    No parts left removes the row."""
+    parts = _owner_parts(db, library, title)
+    if not parts:
+        db.execute("DELETE FROM title_identities WHERE library=? AND title=? AND source='owner'", (library, title))
+        return
+    first = parts[0][0]
+    others = sorted({i for i, _, _ in parts} - {first})
+    db.execute(
+        "INSERT INTO title_identities(library, title, anilist_id, status, source, query, matched, candidates,"
+        " updated_at) VALUES (?,?,?,'pinned','owner',NULL,?,?,?)"
+        " ON CONFLICT(library, title) DO UPDATE SET anilist_id=excluded.anilist_id, status='pinned',"
+        " source='owner', query=NULL, matched=excluded.matched, candidates=excluded.candidates,"
+        " updated_at=excluded.updated_at",
+        (library, title, first, f"parts:{len(parts)}", json.dumps(others), moment))
+
+
 def pin(store, library: str, title: str, anilist_id: int | None = None, *,
-        not_anime: bool = False, clear: bool = False, now=time.time) -> dict:
-    """Owner decision for one title: bind it to an AniList ID, mark it not anime, or clear it."""
+        not_anime: bool = False, clear: bool = False, part: str | None = None, now=time.time) -> dict:
+    """Owner decision for one title: bind it to an AniList ID, mark it not anime, or clear it.
+
+    With ``part`` (a ``titleparts`` selector) the ID becomes one part of a multi-part title: the
+    selector's previous part is replaced, the other parts stay; with ``clear`` that one part is
+    removed (the last removal drops the title's owner decision). A plain pin, ``not_anime`` or a
+    plain ``clear`` is a statement about the whole title and removes every owner part."""
+    from .titleparts import canonical_selector
     if not isinstance(library, str) or not library or not isinstance(title, str) or not title:
         raise _bad("A library and a title key are required")
     if (anilist_id is not None) + bool(not_anime) + bool(clear) != 1:
@@ -724,18 +755,60 @@ def pin(store, library: str, title: str, anilist_id: int | None = None, *,
     if anilist_id is not None and (isinstance(anilist_id, bool) or not isinstance(anilist_id, int)
                                    or not 0 < anilist_id < MAX_ID):
         raise _bad("AniList ID must be a positive whole number below 1000000000")
+    if part is not None:
+        if not_anime:
+            raise _bad("not-anime has no part")
+        try:
+            part = canonical_selector(part)
+        except ValueError as e:
+            raise _bad(str(e))
     with store.lock():
         if clear:
             with _tx(store.db):
-                cur = store.db.execute(
-                    "DELETE FROM title_identities WHERE library=? AND title=? AND source='owner'",
-                    (library, title))
-            return {"library": library, "title": title, "status": "cleared" if cur.rowcount else "none",
+                if part is not None:
+                    cur = store.db.execute(
+                        "DELETE FROM title_parts WHERE library=? AND title=? AND source='owner' AND selector=?",
+                        (library, title, part))
+                    _write_safety_net(store.db, library, title, now())
+                    removed = cur.rowcount
+                else:
+                    removed = store.db.execute(
+                        "DELETE FROM title_parts WHERE library=? AND title=? AND source='owner'",
+                        (library, title)).rowcount
+                    removed += store.db.execute(
+                        "DELETE FROM title_identities WHERE library=? AND title=? AND source='owner'",
+                        (library, title)).rowcount
+            return {"library": library, "title": title, "status": "cleared" if removed else "none",
                     "anilist_id": None}
         if title not in _manifest_titles(store, library):
             raise KuraError("not_found", "Title not in the manifest", title=title)
         status = "pinned" if anilist_id is not None else "not_anime"
         with _tx(store.db):
+            if part is not None:
+                existing = store.db.execute(
+                    "SELECT status FROM title_identities WHERE library=? AND title=? AND source='owner'",
+                    (library, title)).fetchone()
+                if existing and not _owner_parts(store.db, library, title):
+                    raise _bad("The title has a plain owner decision; clear it before adding parts", title=title)
+                listed = _owner_parts(store.db, library, title)
+                if part == "all" and any(sel != "all" for _, sel, _ in listed) or (
+                        part != "all" and any(sel == "all" for _, sel, _ in listed)):
+                    raise _bad("The selector all cannot be combined with other selectors", title=title)
+                same = [o for i, sel, o in listed if sel == part and (part != "auto" or i == anilist_id)]
+                ordinal = same[0] if same else max((o for *_, o in listed), default=0) + 1
+                store.db.execute(
+                    "DELETE FROM title_parts WHERE library=? AND title=? AND source='owner' AND selector=?"
+                    + (" AND anilist_id=?" if part == "auto" else ""),
+                    (library, title, part, *((anilist_id,) if part == "auto" else ())))
+                store.db.execute("INSERT INTO title_parts(library, title, anilist_id, selector, source, ordinal,"
+                                 " chain_pos, seed_id, updated_at) VALUES (?,?,?,?,'owner',?,NULL,NULL,?)",
+                                 (library, title, anilist_id, part, ordinal, now()))
+                _write_safety_net(store.db, library, title, now())
+                return {"library": library, "title": title, "status": "pinned", "anilist_id": anilist_id,
+                        "part": part, "parts": [{"anilist_id": i, "selector": sel}
+                                                 for i, sel, _ in _owner_parts(store.db, library, title)]}
+            store.db.execute("DELETE FROM title_parts WHERE library=? AND title=? AND source='owner'",
+                             (library, title))
             store.db.execute(
                 "INSERT INTO title_identities(library, title, anilist_id, status, source, query, matched,"
                 " candidates, updated_at) VALUES (?,?,?,?,'owner',NULL,NULL,'[]',?)"
@@ -751,11 +824,15 @@ def apply_pins(store, library: str, pins, *, now=time.time) -> dict:
     Titles missing from the manifest are reported and skipped (a title can be absent for a
     while); a title whose owner decision already matches is left untouched. Nothing is ever
     cleared here: dropping a line from the file keeps the earlier decision (use ``pin --clear``).
+    A title with selector lines gets those parts (ordinal = line order) and the matching safety-net
+    identity row; owner parts the file no longer lists stay (``kept_parts``). A plain line for a
+    title that has owner parts replaces them all (``replaced_parts``): it states the whole title.
     """
     if not isinstance(library, str) or not library:
         raise _bad("A library is required")
-    applied = {"pinned": 0, "not_anime": 0}
-    unchanged, missing = 0, []
+    applied = {"pinned": 0, "not_anime": 0, "parts": 0}
+    unchanged, unchanged_parts, missing, kept, replaced = 0, 0, [], [], []
+    parts_by_title = getattr(pins, "parts", {})
     with store.lock():
         known = set(_manifest_titles(store, library))
         current = {title: (status, anilist_id) for title, status, anilist_id in store.db.execute(
@@ -768,9 +845,14 @@ def apply_pins(store, library: str, pins, *, now=time.time) -> dict:
                     missing.append(title)
                     continue
                 status = "pinned" if anilist_id is not None else "not_anime"
-                if current.get(title) == (status, anilist_id):
+                had_parts = bool(_owner_parts(store.db, library, title))
+                if current.get(title) == (status, anilist_id) and not had_parts:
                     unchanged += 1
                     continue
+                if had_parts:
+                    store.db.execute("DELETE FROM title_parts WHERE library=? AND title=? AND source='owner'",
+                                     (library, title))
+                    replaced.append(title)
                 store.db.execute(
                     "INSERT INTO title_identities(library, title, anilist_id, status, source, query,"
                     " matched, candidates, updated_at) VALUES (?,?,?,?,'owner',NULL,NULL,'[]',?)"
@@ -779,8 +861,37 @@ def apply_pins(store, library: str, pins, *, now=time.time) -> dict:
                     " candidates='[]', updated_at=excluded.updated_at",
                     (library, title, anilist_id, status, moment))
                 applied[status] += 1
-    return {"library": library, "pins": pins.summary(), "applied": applied, "unchanged": unchanged,
-            "missing": sorted(missing)}
+            for title, listed in parts_by_title.items():
+                if title not in known:
+                    missing.append(title)
+                    continue
+                before = _owner_parts(store.db, library, title)
+                if before and any(sel == "all" for _, sel, _ in before) != any(sel == "all" for _, sel in listed):
+                    raise _bad("The selector all cannot be combined with other selectors", title=title)
+                for ordinal, (anilist_id, selector) in enumerate(listed, 1):
+                    same = [r for r in before if r[0] == anilist_id and r[1] == selector]
+                    if same and same[0][2] == ordinal:
+                        unchanged_parts += 1
+                        continue
+                    store.db.execute("DELETE FROM title_parts WHERE library=? AND title=? AND source='owner'"
+                                     " AND selector=? AND (selector<>'auto' OR anilist_id=?)",
+                                     (library, title, selector, anilist_id))
+                    store.db.execute(
+                        "INSERT INTO title_parts(library, title, anilist_id, selector, source, ordinal,"
+                        " chain_pos, seed_id, updated_at) VALUES (?,?,?,?,'owner',?,NULL,NULL,?)",
+                        (library, title, anilist_id, selector, ordinal, moment))
+                    applied["parts"] += 1
+                listed_keys = {(i, sel) for i, sel in listed}
+                if any((i, sel) not in listed_keys for i, sel, _ in before):
+                    kept.append(title)
+                _write_safety_net(store.db, library, title, moment)
+    out = {"library": library, "pins": pins.summary(), "applied": applied, "unchanged": unchanged,
+           "missing": sorted(missing)}
+    if not parts_by_title and not replaced:
+        del applied["parts"]
+    else:
+        out.update(unchanged_parts=unchanged_parts, kept_parts=sorted(kept), replaced_parts=sorted(replaced))
+    return out
 
 
 def show(store, library: str, status: str | None = None) -> dict:
@@ -799,8 +910,16 @@ def show(store, library: str, status: str | None = None) -> dict:
         if key in rows:
             counts[rows[key]["status"]] += 1
 
+    from . import titleparts
+    stored = titleparts.load_parts(store.db, library)
+
     def listing(wanted):
-        return [{"title": k, **v} for k, v in sorted(rows.items())
+        return [{"title": k, **v, **({"mode": "owner" if any(p["source"] == "owner" for p in stored[k]) else "auto",
+                                      "parts": [{"anilist_id": p["anilist_id"], "selector": p["selector"],
+                                                 "source": p["source"], "ordinal": p["ordinal"],
+                                                 "chain_pos": p["chain_pos"]} for p in stored[k]]}
+                                     if k in stored else {})}
+                for k, v in sorted(rows.items())
                 if k in wanted and (status is None or v["status"] == status)]
     listed = listing(media)
     other = listing({r["rel_path"] for r in manifest} - media)
