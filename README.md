@@ -338,6 +338,8 @@ Schema 5 is forward-only (it only adds the multi-part title tables, see `docs/re
 `state.sqlite3` aside before the first run of a schema 5 build, because older builds will refuse the
 migrated file. Multi-part titles are refused more strictly under `--retain`: a parted title with an
 episode file no part claims is refused `parts_incomplete` rather than proposed.
+Derived parts come from two steps, `kura anilist relations --library L` (public, budgeted relation cache) and
+`kura identity discover --library L` (offline; owner pins and parts always win), described in `docs/retain.md`.
 Default payloads: `~/.local/share/kura/downloads/<infohash>/<validated-name>`.
 No legacy settings, credentials, torrents or media are imported automatically.
 Destination capabilities are `private[/subfolder]` and `shared[/subfolder]` only, not

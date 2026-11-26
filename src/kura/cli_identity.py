@@ -6,7 +6,7 @@ private state database; nothing opens a library root.
 """
 from pathlib import Path
 
-from . import identity, idlist, titleparts
+from . import identity, idlist, partsdiscover, titleparts
 from .anilist import AniList
 from .ratelimit import SharedLimiter
 
@@ -47,6 +47,11 @@ def register(sub, parser_class):
     q.add_argument("--title", required=True, metavar="KEY",
                    help="Show the parts of this title and which part each video file belongs to")
 
+    q = leaf(group, "discover")
+    q.add_argument("--max-age-d", type=float, default=90.0,
+                   help="Refuse a franchise whose relations were fetched longer ago than this (days)")
+    q.add_argument("--dry-run", action="store_true", help="Report what would be written; change nothing")
+
     retain = sub.add_parser("retain").add_subparsers(dest="operation", required=True,
                                                      parser_class=parser_class)
     q = leaf(retain, "check")
@@ -82,6 +87,10 @@ def dispatch(args, open_store):
             if args.operation == "pin":
                 return True, identity.pin(store, args.library, args.title, args.anilist_id,
                                           not_anime=args.not_anime, clear=args.clear, part=args.part)
+            if args.operation == "discover":
+                partsdiscover.check_args(args.library, args.max_age_d)
+                return True, partsdiscover.discover(store, args.library, max_age_d=args.max_age_d,
+                                                    dry_run=args.dry_run)
             if args.operation == "parts":
                 return True, titleparts.show_assignment(store, args.library, args.title)
             return True, identity.show(store, args.library, args.status)

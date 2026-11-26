@@ -182,6 +182,35 @@ finished parts, which must end exactly on a season boundary), then movie file na
 stays unassigned; Kura never guesses "the third TV entry is season 3" (a season must be carried by the
 part's own titles, or the owner pins it).
 
+### Discovering parts automatically
+
+Derived (`relations`) parts are written by two offline-friendly steps. `kura anilist relations
+--library L` (public, budgeted, see `docs/anilist.md`) caches the SEQUEL/PREQUEL franchise of every
+title Kura resolved itself. `kura identity discover --library L [--max-age-d 90] [--dry-run]` then
+reads that cache; it uses no network and opens no library root. For each media title it derives the
+franchise around the resolved ID and writes it as the title's parts (selector `auto`, `chain_pos` along
+the TV main line, movies and other non-TV entries as side entries) only when all of this holds:
+
+- the identity is `resolved`: an owner pin, a `not_anime` decision and any owner parts always win and
+  are never touched;
+- every entry of the franchise has a successful relation fetch no older than `--max-age-d` and cached
+  media metadata, so a partly crawled franchise yields nothing (`relations_incomplete`,
+  `relations_stale`, `media_unknown`);
+- the TV entries form one unbranched chain (`chain_ambiguous` for a branch, a cycle or entries linked
+  only through side entries), the resolved ID is on it, and the franchise has at most 50 entries;
+- `titleparts.assign` places the title's own files into at least two of the parts
+  (`files_do_not_span` otherwise: a folder that holds one season keeps behaving as a single title).
+
+The report lists `written`, `unchanged`, `removed`, a count of `skipped` titles per reason and the
+titles behind the reasons that deserve a look. A rerun with no change writes nothing. Derived parts
+are removed only when their title is no longer a resolved media title or an owner decision now covers
+it. If a title stops qualifying, including when its identity moved to another ID (reported under
+`stale`), its parts are kept: derived parts only ever add protection, and retain planning refuses a
+title whose parts no longer match its identity until discovery writes a replacement or the owner
+decides. An entry with a format Kura does not know is doubtful (`media_unknown`). Discovery decides
+which entries belong to a title, never which file belongs to which part: that stays the job of
+`assign` and fails closed (`parts_incomplete`).
+
 Under `--retain` a parted title is refused with the existing tokens plus one new one:
 
 | reason | meaning for a parted title |
