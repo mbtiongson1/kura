@@ -133,6 +133,36 @@ Because a list requires every candidate to be identified, run `identity sync` an
 ambiguous titles with `identity pin` first; a title that stays unidentified is simply not
 proposed.
 
+## Multi-part titles
+
+One library folder is one Kura title, but it may hold several AniList entries (seasons, cours,
+split-cour parts, movies). Such a title has **parts**: rows in `title_parts` (state schema 5), either
+`owner` parts (written by a pins file or `identity pin`, whole part set, nothing else consulted)
+or `relations` parts (derived from AniList relations, over-protective on purpose). A title with no
+part rows behaves exactly as described above.
+
+Which file belongs to which part is never stored. `titleparts.assign` recomputes it from the files,
+the parts and the cached AniList media each time: owner selectors first (`file:` over `dir:` over
+`season:N` over `ep:A-B` over `rest`), then season directories and file markers (`Season 2/`, `S02E01`),
+then a directory that names exactly one part, then cumulative numbering (1..M over consecutive
+finished parts, which must end exactly on a season boundary), then movie file names. Anything doubtful
+stays unassigned; Kura never guesses "the third TV entry is season 3" (a season must be carried by the
+part's own titles, or the owner pins it).
+
+Under `--retain` a parted title is refused with the existing tokens plus one new one:
+
+| reason | meaning for a parted title |
+| --- | --- |
+| `identity_unknown` | derived parts no longer match the recorded identity (`parts_stale`) |
+| `retained` | owner mode: any declared part is listed; derived mode: a part that owns a file is listed |
+| `retain_possible` | a recorded candidate is listed, or (derived mode) a related entry that owns no file is |
+| `parts_incomplete` | a non-extra video file belongs to no part, so its owner is unknown |
+
+Moves stay whole titles: if any part is protected nothing of the title is proposed. `retain check`
+adds `parts` to `retained_titles`, `via` (`candidate` or `relative`) to `possible`, and
+`incomplete_titles`. This is stricter than before for folders that span seasons: a title whose files
+cannot all be placed is refused where it might once have been proposed.
+
 ## Limits
 
 Matching can only weigh the titles Kura knows: the synced list, and whatever AniList

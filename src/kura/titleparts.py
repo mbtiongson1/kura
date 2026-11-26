@@ -353,3 +353,103 @@ def _summary(result, paths, info=None):
     return {"files": {p: result[p] for p in paths}, "assigned_video": len(paths) - len(unassigned),
             "unassigned_video": len(blocking), "unassigned_sample": blocking[:MAX_SAMPLE],
             "reasons": dict(sorted(reasons.items())), "complete": not blocking}
+
+
+# ---- stored parts, the effective view and retain decisions ------------------------------
+
+def load_parts(db, library: str) -> dict[str, list[dict]]:
+    """Stored parts by title key, in display order. A malformed row is skipped here and the
+    title then reads as ``parts_stale`` or single, never as a part set that was not recorded."""
+    out: dict[str, list[dict]] = {}
+    for title, anilist_id, selector, source, ordinal, chain_pos, seed_id in db.execute(
+            "SELECT title, anilist_id, selector, source, ordinal, chain_pos, seed_id FROM title_parts"
+            " WHERE library=? ORDER BY title, ordinal, anilist_id", (library,)):
+        out.setdefault(title, []).append({"anilist_id": anilist_id, "selector": selector, "source": source,
+                                          "ordinal": ordinal, "chain_pos": chain_pos, "seed_id": seed_id})
+    return out
+
+
+def media_info(db, ids) -> dict[int, dict]:
+    """``{id: {"titles", "format", "episodes", "status"}}`` from the cached AniList media rows."""
+    import json
+    ids = sorted(set(ids))
+    out = {}
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        for (i, romaji, english, native, synonyms, fmt, episodes, status) in db.execute(
+                "SELECT anilist_id, title_romaji, title_english, title_native, synonyms, format, episodes, status"
+                f" FROM anilist_media WHERE anilist_id IN ({','.join('?' * len(chunk))})", chunk):
+            try:
+                extra = [s for s in json.loads(synonyms) if isinstance(s, str)]
+            except ValueError:
+                extra = []
+            out[i] = {"titles": [t for t in (romaji, english, native, *extra) if t], "format": fmt,
+                      "episodes": episodes, "status": status}
+    return out
+
+
+def effective(db, library: str) -> dict[str, dict]:
+    """The identity of each title as retain planning must read it, by title key.
+
+    Each view has ``mode`` (``single``, ``owner`` or ``auto``), ``status`` (the identity row's
+    status; ``parted`` for a multi-part title that can be trusted; ``parts_stale`` when
+    derived parts no longer match the recorded identity), ``anilist_id``, ``candidates``,
+    ``parts`` and ``row`` (the recorded identity row, or None).
+
+    * ``single``: no part rows; the identity row, unchanged.
+    * ``owner``: owner part rows are the whole part set, whatever else is recorded. The owner
+      stated it, so no candidates are consulted.
+    * ``auto``: parts derived from AniList relations. Trusted only while the identity row has
+      not moved to a different resolved ID than the one the parts were derived from.
+    """
+    from . import identity
+    rows = identity.load(db, library)
+    stored = load_parts(db, library)
+    views = {}
+    for key in sorted(set(rows) | set(stored)):
+        row, parts = rows.get(key), stored.get(key, [])
+        owner = [p for p in parts if p["source"] == "owner"]
+        derived = [p for p in parts if p["source"] == "relations"]
+        if owner:
+            views[key] = {"mode": "owner", "status": "parted", "anilist_id": owner[0]["anilist_id"],
+                          "candidates": [], "parts": owner, "row": row}
+        elif derived:
+            seeds = {p["seed_id"] for p in derived}
+            moved = (row is not None and row["status"] in identity.IDENTIFIED
+                     and seeds != {row["anilist_id"]})
+            views[key] = {"mode": "auto", "status": "parts_stale" if moved or row is None else "parted",
+                          "anilist_id": derived[0]["anilist_id"],
+                          "candidates": list(row["candidates"]) if row else [], "parts": derived, "row": row}
+        else:
+            views[key] = {"mode": "single", "status": row["status"], "anilist_id": row["anilist_id"],
+                          "candidates": row["candidates"], "parts": [], "row": row}
+    return views
+
+
+def retain_reasons(db, key: str, views: dict[str, dict], retain, files) -> list[str]:
+    """Why a title must not be proposed under a retain list (empty when it may be).
+
+    ``files`` is a callable returning the title's local file paths, read only for multi-part
+    titles. Single-part titles go through ``identity.retain_reasons`` unchanged. A parted title
+    is refused ``identity_unknown`` unless trusted; ``retained`` when a part that owns a file
+    (auto) or any declared part (owner) is listed; ``retain_possible`` for a listed candidate
+    or (auto) a listed relative that owns no file; and ``parts_incomplete`` when an episode
+    file belongs to no part, because then the owner of that file is unknown."""
+    from . import identity
+    view = views.get(key)
+    if view is None or view["mode"] == "single":
+        return identity.retain_reasons(key, {key: view["row"]} if view and view["row"] else {}, retain)
+    if view["status"] != "parted":
+        return ["identity_unknown"]
+    result = assign(files(), view["parts"], media_info(db, [p["anilist_id"] for p in view["parts"]]))
+    declared = {p["anilist_id"] for p in view["parts"]}
+    owning = {v["part"] for v in result["files"].values() if v["part"] is not None}
+    listed = lambda ids: any(i in retain for i in ids)
+    reasons = []
+    if listed(declared if view["mode"] == "owner" else owning):
+        reasons.append("retained")
+    if listed(view["candidates"]) or (view["mode"] == "auto" and listed(declared - owning)):
+        reasons.append("retain_possible")
+    if not result["complete"]:
+        reasons.append("parts_incomplete")
+    return reasons
