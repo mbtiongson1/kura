@@ -334,6 +334,10 @@ not an export to Git or a public torrent archive.
 The state database is schema version 5 (library manifest tables, the library-quality
 tables, absent-title marks, multi-part title tables). Kura migrates an existing older database on first open; older Kura
 builds refuse a newer database, so keep one build per state directory after upgrading.
+Schema 5 is forward-only (it only adds the multi-part title tables, see `docs/retain.md`); copy
+`state.sqlite3` aside before the first run of a schema 5 build, because older builds will refuse the
+migrated file. Multi-part titles are refused more strictly under `--retain`: a parted title with an
+episode file no part claims is refused `parts_incomplete` rather than proposed.
 Default payloads: `~/.local/share/kura/downloads/<infohash>/<validated-name>`.
 No legacy settings, credentials, torrents or media are imported automatically.
 Destination capabilities are `private[/subfolder]` and `shared[/subfolder]` only, not
