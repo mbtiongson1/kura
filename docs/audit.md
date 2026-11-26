@@ -111,6 +111,25 @@ so it can only overstate bits per pixel slightly. The `low_bpp_8bit` flag report
 (`tags` or `size_over_duration`) beside `bitrate_kbps`. Results probed by an older `PROBE_VERSION`
 are ignored until `kura probe` runs again, so a stale tag from version 1 never feeds the audit.
 
+### Multi-part titles
+
+A title with stored parts (see `docs/retain.md`, "Multi-part titles") is audited **per part**. The title
+document keeps its usual keys (`anilist_id` is the first part, so old consumers still read an int) and adds:
+
+- `identity.status` `"parted"` and `identity.mode` (`owner` or `auto`);
+- `policy_mixed` and `parts[]`: per part `anilist_id`, `title`, `format`, `selector`, `source`, `chain_pos`,
+  `rule_counts` (how its files were assigned), `files`, `groups`, `episodes` (`held`, `expected`, `local_range`),
+  `policy`/`policy_reasons`, `retained`, `seadex`, `flags`, `suggestion`;
+- `unassigned`: `video` count, `reasons` and a `sample` of at most 10 paths.
+
+Each part gets its own policy (a part scored 9 or more is archival while its sibling may be efficient), its
+own size band and mixed-group check on its own files, and its own SeaDex comparison. The title policy is
+`archival` when any part is, `policy_reasons` are those of the deciding parts, and the title `suggestion` is
+the strongest of the title and its parts. Part flags are also copied to the title's `flags` with
+`detail.part`. `files`, `groups` and `probe` stay title-wide. SeaDex held releases are attributed by group
+name; the title's links are shared by every part, which can only suppress a suggestion. `counts.parts`
+appears only when a parted title exists. Single-part titles are unchanged: none of these keys appear.
+
 ## Flags
 
 Severity is `info`, `warn` or `action`. A title's `suggestion` is `upgrade_candidate` (see below),
@@ -132,6 +151,8 @@ else `review` when it has any `warn` or `action` flag, else `none`.
 | `probe_missing` | info | the title has video files and no usable probe result |
 | `unsupported_container` | info | a sampled file is neither Matroska/WebM nor MP4 (other containers, e.g. AVI or TS, are not probed) |
 | `retained` | info | on the retain list (`detail.reason` is `retained` or `retain_possible`) |
+| `part_unassigned` | info, warn under `--retain` | a parted title has an episode video no part claims (`detail`: `video`, `reasons`, `sample`); under `--retain` the title is refused `parts_incomplete` |
+| `parts_pending` | info | the stored parts no longer match the recorded identity (`parts_stale`); the title reads as unidentified |
 
 `seadex.held_matches` is `best`, `alt`, `none` or `unknown` (no entry, unknown identity, or
 nothing held to compare). Held means the release groups parsed from the episode file names
