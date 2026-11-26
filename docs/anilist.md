@@ -65,7 +65,7 @@ media it covers; entries fetched within `--max-age-d` days are served from the c
 fetches again). A budget stop, a rate limit or an unreadable response ends the command with
 `complete: false`, the `error` code and `remaining`, and changes nothing for the media it did not
 reach; run it again to continue. Media AniList does not know are recorded `not_found`. The command
-only fills the cache; it never changes a title.
+only fills the cache; it never changes a title. `kura identity discover` (see `docs/retain.md`) reads it offline.
 
 ## Updating your list
 
