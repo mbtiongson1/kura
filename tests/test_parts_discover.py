@@ -171,6 +171,11 @@ class Refusals(Discover):
         self.lab.store.db.commit()
         self.none_written("media_unknown")
 
+    def test_unrecognised_format_is_doubtful(self):
+        self.lab.store.db.execute("UPDATE anilist_media SET format='HOLOGRAM' WHERE anilist_id=?", (S2,))
+        self.lab.store.db.commit()
+        self.none_written("media_unknown")
+
     def test_oversized_franchise(self):
         old = partsdiscover.MAX_COMPONENT
         partsdiscover.MAX_COMPONENT = 2
@@ -185,12 +190,23 @@ class Stale(Discover):
         out = self.run_discover()
         self.assertEqual((out["removed"], self.stored()), ([pr.TITLE], []))
 
-    def test_parts_derived_from_another_identity_are_replaced_or_removed(self):
+    def test_identity_moved_and_new_franchise_doubtful_keeps_stale_parts_that_refuse(self):
         self.run_discover()
-        self.row(S2)
+        self.row(OTHER)
+        self.media(OTHER, "Kura Other")
         self.edges()
         out = self.run_discover()
-        self.assertEqual((out["removed"], self.stored()), ([pr.TITLE], []))
+        self.assertEqual((out["removed"], out["stale"], len(self.stored())), ([], [pr.TITLE], 3))
+        doc, reasons = self.reasons(S3)
+        self.assertEqual(reasons, ["identity_unknown"])
+        self.assertEqual(doc["moves"], [])
+
+    def test_identity_moved_and_new_franchise_qualifies_replaces_the_parts(self):
+        self.run_discover()
+        self.row(S2)
+        out = self.run_discover()
+        self.assertEqual(out["written"], [pr.TITLE])
+        self.assertEqual({r[5] for r in self.stored()}, {S2})
 
     def test_doubt_keeps_parts_derived_from_the_same_identity(self):
         self.run_discover()

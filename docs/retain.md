@@ -203,9 +203,11 @@ the TV main line, movies and other non-TV entries as side entries) only when all
 
 The report lists `written`, `unchanged`, `removed`, a count of `skipped` titles per reason and the
 titles behind the reasons that deserve a look. A rerun with no change writes nothing. Derived parts
-whose title is no longer a resolved media title, or whose identity moved, are removed; if a title only
-stops qualifying (for example the cache is stale again) its parts are kept while the identity is still
-the one they were derived from, because derived parts only ever add protection. Discovery decides
+are removed only when their title is no longer a resolved media title or an owner decision now covers
+it. If a title stops qualifying, including when its identity moved to another ID (reported under
+`stale`), its parts are kept: derived parts only ever add protection, and retain planning refuses a
+title whose parts no longer match its identity until discovery writes a replacement or the owner
+decides. An entry with a format Kura does not know is doubtful (`media_unknown`). Discovery decides
 which entries belong to a title, never which file belongs to which part: that stays the job of
 `assign` and fails closed (`parts_incomplete`).
 

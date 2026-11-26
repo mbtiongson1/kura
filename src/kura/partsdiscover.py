@@ -15,9 +15,10 @@ resolved ID becomes the title's parts, but only when every one of these holds:
   the files really span several related media.
 
 Derived parts are over-protective by design and fail closed: retain planning refuses an episode
-file no part claims. A title that stops qualifying keeps its parts while its identity is still
-the one they were derived from (the effective view already marks them stale when it is not);
-parts of a title that is no longer a resolved media title are removed.
+file no part claims. A title that stops qualifying keeps its parts, even when its identity moved
+(the effective view marks them stale and retain planning refuses the title until discovery
+writes a replacement or the owner decides); only parts of a title that is no longer a resolved
+media title, or that an owner decision now covers, are removed.
 """
 import time
 
@@ -28,6 +29,7 @@ from .models import KuraError
 MAX_COMPONENT = 50
 MAX_LISTED = 50
 SIDE = titleparts.SIDE_FORMATS
+KNOWN_FORMATS = ("TV",) + tuple(SIDE)       # anything else AniList may add later is doubtful
 
 
 def check_args(library, max_age_d):
@@ -53,7 +55,7 @@ def component(db, seed: int) -> set[int] | None:
 def chain(db, members: set[int], info: dict) -> tuple[list[int], list[int]] | str:
     """``(main-line IDs in order, side IDs)`` or a reason string. The main line is every non-side
     entry; it must be one path of SEQUEL links with no branch and no cycle."""
-    if any(not info[i].get("format") for i in members):
+    if any(info[i].get("format") not in KNOWN_FORMATS for i in members):
         return "media_unknown"
     tv = {i for i in members if info[i]["format"] not in SIDE}
     succ: dict[int, set[int]] = {i: set() for i in tv}
@@ -143,7 +145,7 @@ def _run(db, store, library, max_age_d, dry_run, moment):
     fetched = anilist_relations.fetches(db)
     skipped: dict[str, int] = {}
     listed: dict[str, list[str]] = {}
-    found, written, unchanged, removed = [], [], 0, []
+    found, written, unchanged, removed, stale = [], [], 0, [], []
 
     def skip(key, reason):
         skipped[reason] = skipped.get(reason, 0) + 1
@@ -168,9 +170,7 @@ def _run(db, store, library, max_age_d, dry_run, moment):
             reason = "owner_decision"
         elif row["status"] != "resolved" or type(row["anilist_id"]) is not int:
             reason = "unidentified"
-        if reason is None and derived and {p["seed_id"] for p in derived} != {row["anilist_id"]}:
-            removed.append(key)         # derived from an identity this title no longer has
-            derived = []
+        moved = reason is None and bool(derived) and {p["seed_id"] for p in derived} != {row["anilist_id"]}
         if reason is not None:
             if reason != "non_media":
                 skip(key, reason)
@@ -180,6 +180,8 @@ def _run(db, store, library, max_age_d, dry_run, moment):
         got, summary = _evaluate(db, repo, rows_by_key[key], row, fetched, moment, max_age_d)
         if got is None:
             skip(key, summary)
+            if moved:
+                stale.append(key)       # kept, and refused by retain planning, until a replacement qualifies
             continue
         found.append({"title": key, **summary})
         same = [(p["anilist_id"], p["ordinal"], p["chain_pos"], p["seed_id"]) for p in derived] == [
@@ -202,6 +204,6 @@ def _run(db, store, library, max_age_d, dry_run, moment):
                            (library, key))
     return {"library": library, "dry_run": dry_run, "titles": len(media & set(rows_by_key)),
             "discovered": len(found), "written": sorted(written), "unchanged": unchanged,
-            "removed": sorted(set(removed) - set(written)), "skipped": dict(sorted(skipped.items())),
+            "removed": sorted(set(removed) - set(written)), "stale": sorted(stale), "skipped": dict(sorted(skipped.items())),
             "skipped_titles": {r: sorted(k)[:MAX_LISTED] for r, k in sorted(listed.items())},
             "found": found[:MAX_LISTED], "warnings": []}
