@@ -45,8 +45,8 @@ class Case(unittest.TestCase):
 
 class SchemaV3(Case):
     def test_target_version(self):
-        self.assertEqual(SCHEMA_VERSION, 4)
-        self.assertEqual(sorted(MIGRATIONS), [2, 3, 4])
+        self.assertEqual(SCHEMA_VERSION, 5)
+        self.assertEqual(sorted(MIGRATIONS), [2, 3, 4, 5])
 
     def test_fresh_database_is_v3(self):
         store = Store(self.root)

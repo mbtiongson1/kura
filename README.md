@@ -331,8 +331,8 @@ untouched-stream rule for web rips and the Unraid runner contract.
 Default state: `~/.local/share/kura/state.sqlite3` (preferences, receipts, audit events
 and validated sanitized descriptors for explicit offline resume). This is private data,
 not an export to Git or a public torrent archive.
-The state database is schema version 4 (library manifest tables, the library-quality
-tables, absent-title marks). Kura migrates an existing older database on first open; older Kura
+The state database is schema version 5 (library manifest tables, the library-quality
+tables, absent-title marks, multi-part title tables). Kura migrates an existing older database on first open; older Kura
 builds refuse a newer database, so keep one build per state directory after upgrading.
 Default payloads: `~/.local/share/kura/downloads/<infohash>/<validated-name>`.
 No legacy settings, credentials, torrents or media are imported automatically.
