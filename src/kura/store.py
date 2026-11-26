@@ -25,7 +25,7 @@ def validate_prefs(p: Preferences) -> Preferences:
     return p
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Each migration is idempotent DDL (IF NOT EXISTS) so a concurrent opener that
 # queued behind the writer re-runs it harmlessly; the version bump is guarded.
@@ -144,6 +144,32 @@ MIGRATIONS = {
     4: """
         CREATE TABLE IF NOT EXISTS library_absent (
             title_id INTEGER PRIMARY KEY, absent_at REAL NOT NULL);
+    """,
+    # Multi-part titles: one library folder (one Kura title) may hold several AniList media
+    # (seasons, cours, parts). Side tables again, so the step stays idempotent DDL and a title
+    # with no rows here behaves exactly as before (its title_identities row is its one part).
+    # Which file belongs to which part is never stored: it is derived from the files, the parts
+    # and the media metadata every time it is read. anilist_relations/anilist_relation_fetches
+    # are a global cache of AniList relation edges used to discover the parts of a franchise.
+    5: """
+        CREATE TABLE IF NOT EXISTS title_parts (
+            library TEXT NOT NULL, title TEXT NOT NULL,                 -- same key as title_identities
+            anilist_id INTEGER NOT NULL CHECK(anilist_id BETWEEN 1 AND 999999999),
+            selector TEXT NOT NULL CHECK(length(selector) BETWEEN 1 AND 512),
+            source TEXT NOT NULL CHECK(source IN ('owner','relations')),
+            ordinal INTEGER NOT NULL CHECK(ordinal >= 1),               -- owner: line order; relations: display order
+            chain_pos INTEGER CHECK(chain_pos IS NULL OR chain_pos >= 1),   -- position in the TV main line; NULL = side entry
+            seed_id INTEGER CHECK(seed_id IS NULL OR seed_id > 0),      -- relations: the identity the parts were derived from
+            updated_at REAL NOT NULL,
+            PRIMARY KEY(library, title, source, anilist_id, selector));
+        CREATE INDEX IF NOT EXISTS title_parts_id ON title_parts(anilist_id);
+        CREATE TABLE IF NOT EXISTS anilist_relations (
+            anilist_id INTEGER NOT NULL CHECK(anilist_id > 0), related_id INTEGER NOT NULL CHECK(related_id > 0),
+            relation TEXT NOT NULL CHECK(length(relation) BETWEEN 1 AND 32),   -- AniList relationType, verbatim
+            PRIMARY KEY(anilist_id, related_id, relation));
+        CREATE TABLE IF NOT EXISTS anilist_relation_fetches (
+            anilist_id INTEGER PRIMARY KEY CHECK(anilist_id > 0), fetched_at REAL NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('ok','not_found')));
     """,
 }
 

@@ -521,7 +521,7 @@ class Migration(unittest.TestCase):
         self.assertNotIn("library_absent", tables(path))
         store = Store(root)
         try:
-            self.assertEqual((version(path), SCHEMA_VERSION), (4, 4))
+            self.assertEqual((version(path), SCHEMA_VERSION), (5, 5))
             self.assertIn("library_absent", tables(path))
             repo = ManifestRepo(store.db)
             titles = repo.titles("lib")
