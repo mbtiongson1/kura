@@ -77,6 +77,14 @@ class OwnerParts(Parted):
         self.parts((S1, "auto"), (S2, "auto"), (S3, "dir:Specials"))
         self.assertEqual(self.reasons(S3)[1], ["retained"])
 
+    def test_a_later_pin_or_clear_makes_owner_parts_stale(self):
+        for change in (lambda: self.identity_row(OTHER), lambda: self.identity_row(S1, candidates=[S2, OTHER]),
+                       lambda: self.identity_row(S1, status="resolved"),
+                       lambda: self.lab.store.db.execute("DELETE FROM title_identities")):
+            change()
+            self.assertEqual(self.reasons(S1)[1], ["identity_unknown"])
+            self.assertEqual(self.reasons(OTHER)[1], ["identity_unknown"])
+
     def test_relatives_are_not_consulted_in_owner_mode(self):
         self.assertIsNone(self.reasons(S3)[1])
 
@@ -124,6 +132,11 @@ class AutoParts(Parted):
 
     def test_a_moved_identity_makes_the_parts_stale(self):
         self.identity_row(S2, status="resolved")
+        self.assertEqual(self.reasons(OTHER)[1], ["identity_unknown"])
+
+    def test_unreadable_candidates_fail_closed(self):
+        self.lab.store.db.execute("UPDATE title_identities SET candidates='not json'")
+        self.lab.store.db.commit()
         self.assertEqual(self.reasons(OTHER)[1], ["identity_unknown"])
 
     def test_the_unresolved_state_keeps_the_parts(self):

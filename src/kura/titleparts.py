@@ -388,6 +388,15 @@ def media_info(db, ids) -> dict[int, dict]:
     return out
 
 
+def _readable(candidates) -> bool:
+    import json
+    try:
+        listed = json.loads(candidates)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(listed, list) and all(type(i) is int for i in listed)
+
+
 def effective(db, library: str) -> dict[str, dict]:
     """The identity of each title as retain planning must read it, by title key.
 
@@ -397,26 +406,34 @@ def effective(db, library: str) -> dict[str, dict]:
     ``parts`` and ``row`` (the recorded identity row, or None).
 
     * ``single``: no part rows; the identity row, unchanged.
-    * ``owner``: owner part rows are the whole part set, whatever else is recorded. The owner
-      stated it, so no candidates are consulted.
+    * ``owner``: owner part rows are the whole part set. Trusted only while the pinned identity row
+      (the owner pin's safety net) agrees with it: first part pinned, the others as candidates.
     * ``auto``: parts derived from AniList relations. Trusted only while the identity row has
       not moved to a different resolved ID than the one the parts were derived from.
     """
     from . import identity
     rows = identity.load(db, library)
     stored = load_parts(db, library)
+    unreadable = {t for t, c in db.execute("SELECT title, candidates FROM title_identities WHERE library=?",
+                                           (library,)) if not _readable(c)}
     views = {}
     for key in sorted(set(rows) | set(stored)):
         row, parts = rows.get(key), stored.get(key, [])
         owner = [p for p in parts if p["source"] == "owner"]
         derived = [p for p in parts if p["source"] == "relations"]
         if owner:
-            views[key] = {"mode": "owner", "status": "parted", "anilist_id": owner[0]["anilist_id"],
-                          "candidates": [], "parts": owner, "row": row}
+            declared = {p["anilist_id"] for p in owner}
+            # The owner pin also records a safety-net identity row (the first part, the others as
+            # candidates). If that row is missing or disagrees with the parts, a later pin or clear
+            # has changed the decision: the parts are stale and the title reads as unidentified.
+            agrees = (row is not None and row["status"] == "pinned" and row["source"] == "owner"
+                      and row["anilist_id"] in declared and set(row["candidates"]) <= declared)
+            views[key] = {"mode": "owner", "status": "parted" if agrees else "parts_stale",
+                          "anilist_id": owner[0]["anilist_id"], "candidates": [], "parts": owner, "row": row}
         elif derived:
             seeds = {p["seed_id"] for p in derived}
             moved = (row is not None and row["status"] in identity.IDENTIFIED
-                     and seeds != {row["anilist_id"]})
+                     and seeds != {row["anilist_id"]}) or key in unreadable
             views[key] = {"mode": "auto", "status": "parts_stale" if moved or row is None else "parted",
                           "anilist_id": derived[0]["anilist_id"],
                           "candidates": list(row["candidates"]) if row else [], "parts": derived, "row": row}

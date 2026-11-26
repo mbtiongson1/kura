@@ -153,7 +153,7 @@ Under `--retain` a parted title is refused with the existing tokens plus one new
 
 | reason | meaning for a parted title |
 | --- | --- |
-| `identity_unknown` | derived parts no longer match the recorded identity (`parts_stale`) |
+| `identity_unknown` | the parts no longer match the recorded identity (`parts_stale`): a derived part set whose seed moved or whose identity row is unreadable, or an owner part set that the pinned identity row (first part pinned, the others as candidates) no longer agrees with, for example after a later `identity pin` or `--clear` |
 | `retained` | owner mode: any declared part is listed; derived mode: a part that owns a file is listed |
 | `retain_possible` | a recorded candidate is listed, or (derived mode) a related entry that owns no file is |
 | `parts_incomplete` | a non-extra video file belongs to no part, so its owner is unknown |
