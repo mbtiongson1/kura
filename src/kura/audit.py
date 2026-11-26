@@ -432,8 +432,9 @@ def _parts(ctx, title, files, view, flags):
     policy reasons, upgrade, seadex summary)`` and adds the parts' flags (``detail.part``) to ``flags``.
 
     The policy of the title is archival when any part is; ``policy_mixed`` says the parts differ.
-    Held SeaDex releases are attributed by group name only; the title's links are shared by every
-    part, which can only suppress a suggestion, never invent one."""
+    Held SeaDex releases are attributed by group name; a part whose files carry no group name is not
+    compared. The title-level ``held_matches`` is the worst over the parts that have a SeaDex entry and
+    files (best < alt < none), or ``unknown`` when there is none."""
     db = ctx["db"]
     parts = view["parts"]
     media = titleparts.media_info(db, [p["anilist_id"] for p in parts])
@@ -452,7 +453,10 @@ def _parts(ctx, title, files, view, flags):
         _band_flags(pflags, True, pol, file_doc, videos)
         sd = {"entry": None, "incomplete": None, "best": [], "alt": [], "held_matches": "unknown"}
         part_upgrade = False
-        if videos:
+        stale = _superseded(videos)
+        if stale:
+            pflags.add("superseded_version_present", "action", episodes=stale[:20], count=len(stale))
+        if any(f["n"]["group"] for f in videos):       # without a group name the comparison would rest on shared links
             sd, part_upgrade = _seadex(ctx, title, pid, pol, videos, pflags)
         items = pflags.done()
         info = media.get(pid) or {}
@@ -534,7 +538,7 @@ def _audit_title(ctx, title):
     known_groups = [g for g in groups if _norm(g["group"])]
     if len(known_groups) >= 2 and not parted:         # a parted title is judged part by part
         flags.add("mixed_groups", "warn", groups=[g["group"] for g in known_groups[:MAX_LIST]])
-    stale_eps = _superseded(videos)
+    stale_eps = _superseded(videos) if not parted else []        # per part for a parted title
     if stale_eps:
         flags.add("superseded_version_present", "action", episodes=stale_eps[:20], count=len(stale_eps))
     if not parted:
@@ -680,8 +684,8 @@ def run(store, *, library, retain=None, overrides=None, user=None, titles=None, 
             changed += stats["changed"]
         by_flag: dict[str, int] = {}
         for doc in docs:
-            for f in doc["flags"]:
-                by_flag[f["code"]] = by_flag.get(f["code"], 0) + 1
+            for code in {f["code"] for f in doc["flags"]}:       # titles per code, also for parted titles
+                by_flag[code] = by_flag.get(code, 0) + 1
         counts = {"titles": len(docs),
                   "flagged": sum(1 for d in docs if any(f["severity"] != "info" for f in d["flags"])),
                   "by_flag": dict(sorted(by_flag.items())),

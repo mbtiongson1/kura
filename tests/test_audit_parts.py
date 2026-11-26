@@ -92,6 +92,28 @@ class PerPart(Parted):
         doc = self.doc()
         self.assertEqual((doc["suggestion"], doc["parts"][1]["suggestion"]), ("upgrade_candidate", "upgrade_candidate"))
 
+    def test_same_episode_numbers_in_two_parts_are_not_versions(self):
+        self.two_seasons()
+        self.title(files=[sfile(1, 1), sfile(2, 1)] + [("Season 2/" + ep(2, ver="v2"), 250 * MB),
+                                                       ("Season 2/" + ep(2), 250 * MB)])
+        flags = [f for f in self.doc()["flags"] if f["code"] == "superseded_version_present"]
+        self.assertEqual([f["detail"]["part"] for f in flags], [B])
+
+    def test_by_flag_counts_titles(self):
+        self.title(files=[sfile(1, n, size=900 * MB) for n in (1, 2)] + [sfile(2, n, size=900 * MB) for n in (1, 2)])
+        self.media(A, SHOW)
+        self.media(B, f"{SHOW} 2nd Season")
+        self.parts((A, "auto"), (B, "auto"))
+        self.assertEqual(self.audit()["counts"]["by_flag"]["size_above_band"], 1)
+
+    def test_a_part_without_group_names_is_not_compared(self):
+        self.title(files=[sfile(1, 1), ("Season 2/Kura Sample Series - 01.mkv", 250 * MB)])
+        self.media(A, SHOW)
+        self.media(B, f"{SHOW} 2nd Season")
+        self.parts((A, "auto"), (B, "auto"))
+        self.seadex(B, [{"group": OTHER}], entry="entry000002")
+        self.assertEqual(self.doc()["parts"][1]["seadex"]["held_matches"], "unknown")
+
     def test_unassigned_episodes_are_flagged(self):
         self.title(files=[sfile(1, 1), sfile(2, 1), ("Misc/" + ep(9), 250 * MB)])
         self.media(A, SHOW)
