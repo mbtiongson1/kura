@@ -132,7 +132,8 @@ replaces them all (`replaced_parts`).
 
 `kura identity pin --title KEY --anilist-id N --part SELECTOR` adds or replaces one part (a title with a plain
 owner decision must be cleared first); `--clear --part SELECTOR` removes one part and the last removal
-drops the safety-net row; plain `--clear`, a plain pin or `--not-anime` remove every part.
+drops the safety-net row (`--clear --part auto` is refused: several IDs share `auto`); plain `--clear`, a plain pin or
+`--not-anime` remove every part, owner and derived.
 `kura identity parts --library L --title KEY` shows the parts and, for every video file, the part it
 belongs to with the rule or the reason it is unassigned (bounded to 2,000 files). `identity show` lists
 `mode` and `parts` for parted titles. `manifest prune` drops derived parts like derived identities and

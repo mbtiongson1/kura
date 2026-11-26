@@ -758,6 +758,8 @@ def pin(store, library: str, title: str, anilist_id: int | None = None, *,
     if part is not None:
         if not_anime:
             raise _bad("not-anime has no part")
+        if clear and part == "auto":
+            raise _bad("Several IDs can share the selector auto; clear the whole title or replace it")
         try:
             part = canonical_selector(part)
         except ValueError as e:
@@ -769,8 +771,9 @@ def pin(store, library: str, title: str, anilist_id: int | None = None, *,
                     cur = store.db.execute(
                         "DELETE FROM title_parts WHERE library=? AND title=? AND source='owner' AND selector=?",
                         (library, title, part))
-                    _write_safety_net(store.db, library, title, now())
                     removed = cur.rowcount
+                    if removed:
+                        _write_safety_net(store.db, library, title, now())
                 else:
                     removed = store.db.execute(
                         "DELETE FROM title_parts WHERE library=? AND title=? AND source='owner'",
@@ -807,7 +810,7 @@ def pin(store, library: str, title: str, anilist_id: int | None = None, *,
                 return {"library": library, "title": title, "status": "pinned", "anilist_id": anilist_id,
                         "part": part, "parts": [{"anilist_id": i, "selector": sel}
                                                  for i, sel, _ in _owner_parts(store.db, library, title)]}
-            store.db.execute("DELETE FROM title_parts WHERE library=? AND title=? AND source='owner'",
+            store.db.execute("DELETE FROM title_parts WHERE library=? AND title=?",    # a whole-title decision
                              (library, title))
             store.db.execute(
                 "INSERT INTO title_identities(library, title, anilist_id, status, source, query, matched,"
@@ -850,9 +853,8 @@ def apply_pins(store, library: str, pins, *, now=time.time) -> dict:
                     unchanged += 1
                     continue
                 if had_parts:
-                    store.db.execute("DELETE FROM title_parts WHERE library=? AND title=? AND source='owner'",
-                                     (library, title))
                     replaced.append(title)
+                store.db.execute("DELETE FROM title_parts WHERE library=? AND title=?", (library, title))
                 store.db.execute(
                     "INSERT INTO title_identities(library, title, anilist_id, status, source, query,"
                     " matched, candidates, updated_at) VALUES (?,?,?,?,'owner',NULL,NULL,'[]',?)"
@@ -866,6 +868,8 @@ def apply_pins(store, library: str, pins, *, now=time.time) -> dict:
                     missing.append(title)
                     continue
                 before = _owner_parts(store.db, library, title)
+                if not before and current.get(title) is not None:
+                    raise _bad("The title has a plain owner decision; clear it before adding parts", title=title)
                 if before and any(sel == "all" for _, sel, _ in before) != any(sel == "all" for _, sel in listed):
                     raise _bad("The selector all cannot be combined with other selectors", title=title)
                 for ordinal, (anilist_id, selector) in enumerate(listed, 1):

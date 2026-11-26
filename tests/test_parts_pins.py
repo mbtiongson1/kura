@@ -87,6 +87,12 @@ class ApplyPins(Base):
             self.apply(f"{S2}@all\t{KEY}\n")
         self.assertEqual(self.parts(), [(S1, "dir:Season 1", 1)])      # the failed file changed nothing
 
+    def test_selector_lines_do_not_replace_a_plain_decision(self):
+        self.apply(f"{S1}\t{KEY}\n")
+        with self.assertRaises(KuraError):
+            self.apply(f"{S2}@auto\t{KEY}\n")
+        self.assertEqual((self.parts(), self.net()[:2]), ([], (S1, "pinned")))
+
     def test_sync_never_touches_owner_parts(self):
         self.apply(self.TEXT)
         identity.sync(self.store, library="home", aliases=None, refresh=True)
@@ -137,6 +143,19 @@ class PinCommand(Base):
         self.assertEqual((self.parts(), self.net()[:3]), ([], (S2, "pinned", "owner")))
         with self.assertRaises(KuraError):
             self.pin(S1, part="auto")           # clear the plain decision first
+
+    def test_clearing_a_part_that_is_not_there_changes_nothing(self):
+        self.pin(S1)
+        self.assertEqual(self.pin(clear=True, part="rest")["status"], "none")
+        self.assertEqual(self.net()[:3], (S1, "pinned", "owner"))
+        with self.assertRaises(KuraError):
+            self.pin(clear=True, part="auto")
+
+    def test_a_plain_pin_also_drops_derived_parts(self):
+        self.db.execute("INSERT INTO title_parts VALUES ('home',?,?,'auto','relations',1,1,?,1.0)", (KEY, S2, S1))
+        self.db.commit()
+        self.pin(S1)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM title_parts").fetchone()[0], 0)
 
     def test_refusals(self):
         for kw in ({"anilist_id": S1, "part": "guess"}, {"not_anime": True, "part": "auto"},
